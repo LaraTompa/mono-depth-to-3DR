@@ -142,9 +142,14 @@ class ScanNetTemporalDataset(Dataset):
 
 
 if __name__ == "__main__":
+    import torchvision
     from torch.utils.data import DataLoader
 
-    ROOT_DIR = "/storage/group/dataset_mirrors/scannet/tasks/scannet_frames_test"
+    ROOT_DIR    = "/storage/group/dataset_mirrors/scannet/tasks/scannet_frames_test"
+    OUT_DIR     = "data/sample_output"   # visualisation grids
+    SAMPLE_DIR  = "data/sampled_data"    # individual saved frames
+    os.makedirs(OUT_DIR, exist_ok=True)
+    os.makedirs(SAMPLE_DIR, exist_ok=True)
 
     dataset = ScanNetTemporalDataset(
         root_dir=ROOT_DIR,
@@ -155,10 +160,29 @@ if __name__ == "__main__":
 
     print(f"Loaded {len(dataset.scene_data)} scenes")
     print(f"Dataset length (virtual): {len(dataset)}")
+    print(f"Fixed seq_len this run  : {dataset.seq_len}")
+    print(f"Saving visualisations to: {OUT_DIR}/")
+    print(f"Saving sampled frames to: {SAMPLE_DIR}/\n")
+
+    answer = input("Show all sampled batches or just a few? [all / few]: ").strip().lower()
+    if answer == "few":
+        while True:
+            try:
+                max_batches = int(input("How many batches? ").strip())
+                if max_batches > 0:
+                    break
+                print("Please enter a positive integer.")
+            except ValueError:
+                print("Please enter a valid integer.")
+    else:
+        max_batches = None  # no limit
 
     loader = DataLoader(dataset, batch_size=2, num_workers=2, shuffle=False)
 
     for i, batch in enumerate(loader):
+        if max_batches is not None and i >= max_batches:
+            break
+
         images = batch["images"]   # (B, N, 3, H, W)
         depths = batch["depths"]   # (B, N, 1, H, W)
         poses  = batch["poses"]    # (B, N, 4, 4)
@@ -170,7 +194,40 @@ if __name__ == "__main__":
         print(f"  depths : {tuple(depths.shape)}  dtype={depths.dtype}")
         print(f"  poses  : {tuple(poses.shape)}   dtype={poses.dtype}")
 
-        if i >= 2:  # print 3 batches then stop
-            break
+        # save each sample in the batch
+        for b, scene_name in enumerate(scenes):
+            N = images.shape[1]
+
+            # --- sampled_data: individual frames per sequence ---
+            seq_dir = os.path.join(SAMPLE_DIR, f"batch{i+1}_sample{b+1}_{scene_name}")
+            rgb_raw_dir = os.path.join(seq_dir, "color")
+            dep_raw_dir = os.path.join(seq_dir, "depth")
+            pose_dir    = os.path.join(seq_dir, "pose")
+            os.makedirs(rgb_raw_dir, exist_ok=True)
+            os.makedirs(dep_raw_dir, exist_ok=True)
+            os.makedirs(pose_dir,    exist_ok=True)
+
+            for f in range(N):
+                torchvision.utils.save_image(images[b, f], os.path.join(rgb_raw_dir, f"{f:04d}.png"))
+                np.save(os.path.join(dep_raw_dir, f"{f:04d}.npy"), depths[b, f].numpy())
+                np.savetxt(os.path.join(pose_dir, f"{f:04d}.txt"), poses[b, f].numpy())
+
+            # --- sample_output: visualisation grids ---
+            rgb_frames = images[b]          # (N, 3, H, W)
+            rgb_grid = torchvision.utils.make_grid(rgb_frames, nrow=N, padding=4)
+            rgb_path = os.path.join(OUT_DIR, f"batch{i+1}_sample{b+1}_{scene_name}_rgb.png")
+            torchvision.utils.save_image(rgb_grid, rgb_path)
+
+            dep_frames = depths[b]          # (N, 1, H, W)
+            dep_min, dep_max = dep_frames.min(), dep_frames.max()
+            dep_norm = (dep_frames - dep_min) / (dep_max - dep_min + 1e-6)
+            dep_rgb  = dep_norm.repeat(1, 3, 1, 1)
+            dep_grid = torchvision.utils.make_grid(dep_rgb, nrow=N, padding=4)
+            dep_path = os.path.join(OUT_DIR, f"batch{i+1}_sample{b+1}_{scene_name}_depth.png")
+            torchvision.utils.save_image(dep_grid, dep_path)
+
+            print(f"  saved frames : {seq_dir}/")
+            print(f"  saved rgb grid  : {rgb_path}")
+            print(f"  saved depth grid: {dep_path}")
 
     print("\nDone.")

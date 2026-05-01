@@ -49,6 +49,9 @@ dataset = ScanNetTemporalDataset(
     max_scenes=None,        # set an int to limit scenes loaded
 )
 
+# N is fixed per epoch — call this at the start of each epoch to resample it
+dataset.resample_seq_len()
+
 loader = DataLoader(dataset, batch_size=2, num_workers=4)
 batch = next(iter(loader))
 # batch["images"]  → (B, N, 3, H, W)  float32 in [0, 1]
@@ -57,7 +60,14 @@ batch = next(iter(loader))
 # batch["scene"]   → list of scene name strings
 ```
 
-**Quick test** (runs 3 batches and prints shapes):
+**Quick test:**
 ```bash
 python data/temporal_sampling.py
 ```
+
+Prompts whether to run all batches or a fixed number, then writes two output folders:
+
+| Folder | Contents |
+|---|---|
+| `data/sample_output/` | RGB and depth visualisation grids (PNG) |
+| `data/sampled_data/` | Individual frames per sequence — `color/*.png`, `depth/*.npy`, `pose/*.txt` |
