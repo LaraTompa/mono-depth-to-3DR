@@ -1,6 +1,5 @@
 import os
 import shutil
-from networkx import config
 import numpy as np
 import torch
 from torch.utils.data import Dataset
@@ -16,10 +15,10 @@ class ScanNetTemporalDataset(Dataset):
     def __init__(
         self,
         root_dir,
-        num_frames=config["dataset"]["num_frames"],
-        num_samples=config["dataset"]["num_samples"],
-        min_stride=config["dataset"]["min_stride"],
-        max_stride=config["dataset"]["max_stride"],
+        num_frames=6,
+        num_samples=700,
+        min_stride=2,
+        max_stride=10,
         transform=None,
         max_scenes=None
     ):
