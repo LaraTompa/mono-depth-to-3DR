@@ -40,13 +40,13 @@ Each `__getitem__` call randomly selects a scene and samples a temporally ordere
 **Change settings**
 ```
 config/dataset.yaml
-  # ScanNet Temporal Dataset configuration
 
 dataset:
   root_dir: "/storage/group/dataset_mirrors/scannet/tasks/scannet_frames_test"
   num_samples: 700       # number of samples per epoch (__len__)
   num_frames: 6          # exact number of frames per sample (seq_len)
-  max_stride: 10         # maximum temporal stride between frames (min is always 2)
+  min_stride: 2          # minimum temporal stride between frames
+  max_stride: 10         # maximum temporal stride between frames
   max_scenes: null       # limit scenes loaded; set to an integer to restrict (e.g. 5)
 
 output:
