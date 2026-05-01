@@ -14,13 +14,15 @@ class ScanNetTemporalDataset(Dataset):
     def __init__(
         self,
         root_dir,
-        seq_len_range=(4, 10),
+        num_frames=6,
+        num_samples=700,
         max_stride=10,
         transform=None,
         max_scenes=None
     ):
         self.root_dir = root_dir
-        self.seq_len_range = seq_len_range
+        self.num_frames = num_frames
+        self.num_samples = num_samples
         self.max_stride = max_stride
         self.transform = transform
 
@@ -29,7 +31,7 @@ class ScanNetTemporalDataset(Dataset):
             self.scenes = self.scenes[:max_scenes]
 
         # fixed seq_len per epoch; call resample_seq_len() to change between epochs
-        self.seq_len = random.randint(*seq_len_range)
+        self.seq_len = num_frames
 
         self.scene_data = []
 
@@ -58,11 +60,11 @@ class ScanNetTemporalDataset(Dataset):
             })
 
     def resample_seq_len(self):
-        """Call at the start of each epoch to draw a new fixed sequence length."""
-        self.seq_len = random.randint(*self.seq_len_range)
+        """No-op when num_frames is fixed; kept for API compatibility."""
+        pass
 
     def __len__(self):
-        return 1000  # dynamic sampling
+        return self.num_samples
 
     def _sample_sequence(self, scene_info):
         frame_ids = scene_info["frame_ids"]
@@ -142,20 +144,29 @@ class ScanNetTemporalDataset(Dataset):
 
 
 if __name__ == "__main__":
+    import yaml
     import torchvision
     from torch.utils.data import DataLoader
 
-    ROOT_DIR    = "/storage/group/dataset_mirrors/scannet/tasks/scannet_frames_test"
-    OUT_DIR     = "data/sample_output"   # visualisation grids
-    SAMPLE_DIR  = "data/sampled_data"    # individual saved frames
+    CONFIG_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config", "dataset.yaml")
+    with open(CONFIG_PATH) as f:
+        cfg = yaml.safe_load(f)
+
+    ds_cfg  = cfg["dataset"]
+    out_cfg = cfg["output"]
+
+    ROOT_DIR   = ds_cfg["root_dir"]
+    OUT_DIR    = out_cfg["sample_output_dir"]
+    SAMPLE_DIR = out_cfg["sampled_data_dir"]
     os.makedirs(OUT_DIR, exist_ok=True)
     os.makedirs(SAMPLE_DIR, exist_ok=True)
 
     dataset = ScanNetTemporalDataset(
         root_dir=ROOT_DIR,
-        seq_len_range=(4, 10),
-        max_stride=10,
-        max_scenes=5  # limit to 5 scenes for a quick test; remove to use all
+        num_frames=ds_cfg["num_frames"],
+        num_samples=ds_cfg["num_samples"],
+        max_stride=ds_cfg["max_stride"],
+        max_scenes=ds_cfg["max_scenes"],
     )
 
     print(f"Loaded {len(dataset.scene_data)} scenes")
@@ -177,7 +188,7 @@ if __name__ == "__main__":
     else:
         max_batches = None  # no limit
 
-    loader = DataLoader(dataset, batch_size=2, num_workers=2, shuffle=False)
+    loader = DataLoader(dataset, batch_size=out_cfg["batch_size"], num_workers=out_cfg["num_workers"], shuffle=False)
 
     for i, batch in enumerate(loader):
         if max_batches is not None and i >= max_batches:
@@ -190,9 +201,6 @@ if __name__ == "__main__":
 
         print(f"\nBatch {i + 1}:")
         print(f"  scenes : {list(scenes)}")
-        print(f"  images : {tuple(images.shape)}  dtype={images.dtype}")
-        print(f"  depths : {tuple(depths.shape)}  dtype={depths.dtype}")
-        print(f"  poses  : {tuple(poses.shape)}   dtype={poses.dtype}")
 
         # save each sample in the batch
         for b, scene_name in enumerate(scenes):
