@@ -28,6 +28,9 @@ class ScanNetTemporalDataset(Dataset):
         if max_scenes:
             self.scenes = self.scenes[:max_scenes]
 
+        # fixed seq_len per epoch; call resample_seq_len() to change between epochs
+        self.seq_len = random.randint(*seq_len_range)
+
         self.scene_data = []
 
         for scene in self.scenes:
@@ -54,6 +57,10 @@ class ScanNetTemporalDataset(Dataset):
                 "frame_ids": frame_ids
             })
 
+    def resample_seq_len(self):
+        """Call at the start of each epoch to draw a new fixed sequence length."""
+        self.seq_len = random.randint(*self.seq_len_range)
+
     def __len__(self):
         return 1000  # dynamic sampling
 
@@ -61,7 +68,7 @@ class ScanNetTemporalDataset(Dataset):
         frame_ids = scene_info["frame_ids"]
         n_frames = len(frame_ids)
 
-        seq_len = random.randint(*self.seq_len_range)
+        seq_len = self.seq_len
         stride = random.randint(2, self.max_stride)
 
         # choose center index safely
@@ -69,7 +76,9 @@ class ScanNetTemporalDataset(Dataset):
         max_offset = half * stride
 
         if n_frames < seq_len:
-            return frame_ids  # fallback
+            # not enough frames: return evenly spaced seq_len indices
+            indices = np.linspace(0, n_frames - 1, seq_len, dtype=int).tolist()
+            return [frame_ids[i] for i in indices]
 
         # reduce stride until the sequence fits within available frames
         while max_offset >= n_frames - max_offset and stride > 1:
