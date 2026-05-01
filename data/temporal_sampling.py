@@ -71,6 +71,16 @@ class ScanNetTemporalDataset(Dataset):
         if n_frames < seq_len:
             return frame_ids  # fallback
 
+        # reduce stride until the sequence fits within available frames
+        while max_offset >= n_frames - max_offset and stride > 1:
+            stride -= 1
+            max_offset = half * stride
+
+        if max_offset >= n_frames - max_offset:
+            # sequence still doesn't fit even at stride=1; return evenly spaced fallback
+            indices = np.linspace(0, n_frames - 1, seq_len, dtype=int).tolist()
+            return [frame_ids[i] for i in indices]
+
         center_idx = random.randint(max_offset, n_frames - max_offset - 1)
 
         indices = [
