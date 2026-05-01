@@ -1,4 +1,4 @@
-# From monocular depth to multiview reconstruction
+# Monocular depth to multiview reconstruction
 The idea of this project is with the given predicted monocular depth predictions, design and train a lightweight network to align these monocular depths and predict camera parameters to ensure multiview consistency.
 
 ## Setup
@@ -37,25 +37,26 @@ Each `__getitem__` call randomly selects a scene and samples a temporally ordere
   ...
 ```
 
-**Usage:**
-```python
-from data.temporal_sampling import ScanNetTemporalDataset
-from torch.utils.data import DataLoader
+**Change settings**
+```
+config/dataset.yaml
+  # ScanNet Temporal Dataset configuration
 
-dataset = ScanNetTemporalDataset(
-    root_dir="/storage/group/dataset_mirrors/scannet/tasks/scannet_frames_test",
-  num_frames=6,           # exact number of frames per sample
-  num_samples=700,        # number of samples per epoch
-    max_stride=10,          # stride sampled uniformly from [2, max_stride]
-    max_scenes=None,        # set an int to limit scenes loaded
-)
+dataset:
+  root_dir: "/storage/group/dataset_mirrors/scannet/tasks/scannet_frames_test"
+  num_samples: 700       # number of samples per epoch (__len__)
+  num_frames: 6          # exact number of frames per sample (seq_len)
+  max_stride: 10         # maximum temporal stride between frames (min is always 2)
+  max_scenes: null       # limit scenes loaded; set to an integer to restrict (e.g. 5)
 
-loader = DataLoader(dataset, batch_size=2, num_workers=4)
-batch = next(iter(loader))
-# batch["scene"]   → list of scene name strings
+output:
+  sample_output_dir: "datasets/sample_output"   # visualisation grids
+  sampled_data_dir:  "datasets/sampled_data"    # individual saved frames
+  batch_size: 2
+  num_workers: 2
 ```
 
-**Quick test:**
+**Run:**
 ```bash
 python data/temporal_sampling.py
 ```
@@ -66,3 +67,6 @@ Prompts whether to run all batches or a fixed number, then writes two output fol
 |---|---|
 | `datasets/sample_output/` | RGB and depth visualisation grids (PNG) |
 | `datasets/sampled_data/` | Individual frames per sequence — `color/*.png`, `depth/*.npy`, `pose/*.txt`, plus `intrinsics_color.txt` and `intrinsics_depth.txt` |
+
+## References
+1. ScanNet: Angela Dai, Angel X. Chang, Manolis Savva, Maciej Halber, Thomas Funkhouser, Matthias Nießner, "ScanNet: Richly-annotated 3D Reconstructions of Indoor Scenes", arXiv, 2017, url: https://arxiv.org/abs/1702.04405
