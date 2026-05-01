@@ -31,8 +31,9 @@ Each `__getitem__` call randomly selects a scene and samples a temporally ordere
     color/          # *.jpg RGB frames
     depth/          # *.png depth frames (uint16, millimetres)
     pose/           # *.txt 4×4 camera-to-world matrices
-    intrinsics_color.txt
-    intrinsics_depth.txt
+    intrinsics/
+      intrinsics_color.txt
+      intrinsics_depth.txt
   scene0001_00/
   ...
 ```
@@ -44,9 +45,9 @@ config/dataset.yaml
 dataset:
   root_dir: "/storage/group/dataset_mirrors/scannet/tasks/scannet_frames_test"
   num_samples: 700       # number of samples per epoch (__len__)
-  num_frames: 6          # exact number of frames per sample (seq_len)
-  min_stride: 2          # minimum temporal stride between frames
-  max_stride: 10         # maximum temporal stride between frames
+  num_frames: 5          # exact number of frames per sample (seq_len)
+  min_stride: 80          # minimum temporal stride between frames
+  max_stride: 120         # maximum temporal stride between frames
   max_scenes: null       # limit scenes loaded; set to an integer to restrict (e.g. 5)
 
 output:
@@ -66,7 +67,7 @@ Prompts whether to run all batches or a fixed number, then writes two output fol
 | Folder | Contents |
 |---|---|
 | `datasets/sample_output/` | RGB and depth visualisation grids (PNG) |
-| `datasets/sampled_data/` | Individual frames per sequence — `color/*.png`, `depth/*.npy`, `pose/*.txt`, plus `intrinsics_color.txt` and `intrinsics_depth.txt` |
+| `datasets/sampled_data/` | Individual frames per sequence — `color/*.png`, `depth/*.npy`, `pose/*.txt`, and `intrinsics/intrinsics_color.txt`, `intrinsics/intrinsics_depth.txt` |
 
 ## References
 1. ScanNet: Angela Dai, Angel X. Chang, Manolis Savva, Maciej Halber, Thomas Funkhouser, Matthias Nießner, "ScanNet: Richly-annotated 3D Reconstructions of Indoor Scenes", arXiv, 2017, url: https://arxiv.org/abs/1702.04405

@@ -1,5 +1,6 @@
 import os
 import shutil
+from networkx import config
 import numpy as np
 import torch
 from torch.utils.data import Dataset
@@ -15,10 +16,10 @@ class ScanNetTemporalDataset(Dataset):
     def __init__(
         self,
         root_dir,
-        num_frames=6,
-        num_samples=700,
-        min_stride=2,
-        max_stride=10,
+        num_frames=config["dataset"]["num_frames"],
+        num_samples=config["dataset"]["num_samples"],
+        min_stride=config["dataset"]["min_stride"],
+        max_stride=config["dataset"]["max_stride"],
         transform=None,
         max_scenes=None
     ):
@@ -219,15 +220,17 @@ if __name__ == "__main__":
             rgb_raw_dir = os.path.join(seq_dir, "color")
             dep_raw_dir = os.path.join(seq_dir, "depth")
             pose_dir    = os.path.join(seq_dir, "pose")
+            intr_dir    = os.path.join(seq_dir, "intrinsics")
             os.makedirs(rgb_raw_dir, exist_ok=True)
             os.makedirs(dep_raw_dir, exist_ok=True)
-            os.makedirs(pose_dir,    exist_ok=True)
+            os.makedirs(pose_dir, exist_ok=True)
+            os.makedirs(intr_dir, exist_ok=True)
 
             # Save camera intrinsics from the source scene.
-            intr_color_src = os.path.join(ROOT_DIR, scene_name, "intrinsics_color.txt")
-            intr_depth_src = os.path.join(ROOT_DIR, scene_name, "intrinsics_depth.txt")
-            intr_color_dst = os.path.join(seq_dir, "intrinsics_color.txt")
-            intr_depth_dst = os.path.join(seq_dir, "intrinsics_depth.txt")
+            intr_color_src = os.path.join(ROOT_DIR, scene_name, "intrinsics", "intrinsics_color.txt")
+            intr_depth_src = os.path.join(ROOT_DIR, scene_name, "intrinsics", "intrinsics_depth.txt")
+            intr_color_dst = os.path.join(intr_dir, "intrinsics_color.txt")
+            intr_depth_dst = os.path.join(intr_dir, "intrinsics_depth.txt")
 
             if os.path.isfile(intr_color_src):
                 shutil.copy2(intr_color_src, intr_color_dst)
