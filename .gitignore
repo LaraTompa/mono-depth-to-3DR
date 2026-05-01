@@ -48,7 +48,6 @@ venv.bak/
 *.ipynb
 
 # Data and models
-data/
 datasets/
 models/checkpoints/
 *.pkl
