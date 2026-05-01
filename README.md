@@ -44,19 +44,14 @@ from torch.utils.data import DataLoader
 
 dataset = ScanNetTemporalDataset(
     root_dir="/storage/group/dataset_mirrors/scannet/tasks/scannet_frames_test",
-    seq_len_range=(4, 10),  # random sequence length in this range
+  num_frames=6,           # exact number of frames per sample
+  num_samples=700,        # number of samples per epoch
     max_stride=10,          # stride sampled uniformly from [2, max_stride]
     max_scenes=None,        # set an int to limit scenes loaded
 )
 
-# N is fixed per epoch — call this at the start of each epoch to resample it
-dataset.resample_seq_len()
-
 loader = DataLoader(dataset, batch_size=2, num_workers=4)
 batch = next(iter(loader))
-# batch["images"]  → (B, N, 3, H, W)  float32 in [0, 1]
-# batch["depths"]  → (B, N, 1, H, W)  float32 in metres
-# batch["poses"]   → (B, N, 4, 4)     float32 camera-to-world
 # batch["scene"]   → list of scene name strings
 ```
 
@@ -69,5 +64,5 @@ Prompts whether to run all batches or a fixed number, then writes two output fol
 
 | Folder | Contents |
 |---|---|
-| `data/sample_output/` | RGB and depth visualisation grids (PNG) |
-| `data/sampled_data/` | Individual frames per sequence — `color/*.png`, `depth/*.npy`, `pose/*.txt` |
+| `datasets/sample_output/` | RGB and depth visualisation grids (PNG) |
+| `datasets/sampled_data/` | Individual frames per sequence — `color/*.png`, `depth/*.npy`, `pose/*.txt`, plus `intrinsics_color.txt` and `intrinsics_depth.txt` |

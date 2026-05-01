@@ -1,4 +1,5 @@
 import os
+import shutil
 import numpy as np
 import torch
 from torch.utils.data import Dataset
@@ -214,6 +215,22 @@ if __name__ == "__main__":
             os.makedirs(rgb_raw_dir, exist_ok=True)
             os.makedirs(dep_raw_dir, exist_ok=True)
             os.makedirs(pose_dir,    exist_ok=True)
+
+            # Save camera intrinsics from the source scene.
+            intr_color_src = os.path.join(ROOT_DIR, scene_name, "intrinsics_color.txt")
+            intr_depth_src = os.path.join(ROOT_DIR, scene_name, "intrinsics_depth.txt")
+            intr_color_dst = os.path.join(seq_dir, "intrinsics_color.txt")
+            intr_depth_dst = os.path.join(seq_dir, "intrinsics_depth.txt")
+
+            if os.path.isfile(intr_color_src):
+                shutil.copy2(intr_color_src, intr_color_dst)
+            else:
+                print(f"  warning: missing intrinsics file {intr_color_src}")
+
+            if os.path.isfile(intr_depth_src):
+                shutil.copy2(intr_depth_src, intr_depth_dst)
+            else:
+                print(f"  warning: missing intrinsics file {intr_depth_src}")
 
             for f in range(N):
                 torchvision.utils.save_image(images[b, f], os.path.join(rgb_raw_dir, f"{f:04d}.png"))
