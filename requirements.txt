@@ -1,0 +1,10 @@
+numpy           #>=1.24
+torch           # >= 2.0.0
+torchvision
+gradio          # ==2.8.13
+click           # ==8.1.7
+opencv-python   # ==4.10.0.84
+scipy           # ==1.14.1
+matplotlib      # ==3.9.2
+trimesh         # ==4.5.1
+pillow          # ==10.4.0
