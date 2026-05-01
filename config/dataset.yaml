@@ -1,0 +1,14 @@
+# ScanNet Temporal Dataset configuration
+
+dataset:
+  root_dir: "/storage/group/dataset_mirrors/scannet/tasks/scannet_frames_test"
+  num_samples: 700       # number of samples per epoch (__len__)
+  num_frames: 6          # exact number of frames per sample (seq_len)
+  max_stride: 10         # maximum temporal stride between frames (min is always 2)
+  max_scenes: null       # limit scenes loaded; set to an integer to restrict (e.g. 5)
+
+output:
+  sample_output_dir: "datasets/sample_output"   # visualisation grids
+  sampled_data_dir:  "datasets/sampled_data"    # individual saved frames
+  batch_size: 2
+  num_workers: 2
