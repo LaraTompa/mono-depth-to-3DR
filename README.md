@@ -16,6 +16,47 @@ Install the dependencies:
 pip install -r requirements.txt
 ```
 
+## Run scripts with metrics
+
+Use python3 to run the utilities from the project root (expand ~ or use absolute paths).
+
+1) Depth consistency check (per-RGB sample table)
+- Script: scripts/depth_consistency.py
+- Typical args: --rgb_dir, --gt_dir, --pred_dir
+
+Example:
+
+```bash
+cd ~/Downloads/mono-depth-to-3DR
+python3 scripts/depth_consistency.py \
+  --rgb_dir /path/to/rgb/frame_00000.jpg \
+  --gt_dir  /path/to/gt_depth/frame_00000.png \
+  --pred_dir /path/to/pred_depth_/frame_00000.png
+```
+
+Notes:
+- The script prints a per-image table and an average row.
+- Make sure depth loader knows the PNG format (16-bit with scale 1000 → meters) if applicable.
+
+2) Photometric consistency (SSIM + L2 using depth + poses + intrinsics)
+- Script: scripts/photometric_consistency.py
+- Typical args: --img1, --img2, --depth1, --depth2, --intrinsics_color, --pose1, --pose2, --depth_scale, --cam_to_world / --world_to_cam, --visualize.
+
+Example (camera-to-world poses, depth in uint16 mm):
+
+```bash
+python3 scripts/photometric_consistency.py \
+  --img1 /path/to/rgb/frame_00000.jpg \
+  --img2 /path/to/rgb/frame_00001.jpg \
+  --depth1 /path/to/depth/frame_00000.png \
+  --depth2 /path/to/depth/frame_00001.png \
+  --intrinsics_color /path/to/calib/color_intrinsics.txt \
+  --pose1 /path/to/poses/pose_000000.txt \
+  --pose2 /path/to/poses/pose_000001.txt \
+  --depth_scale 1000.0 \
+  --cam_to_world \
+  --visualize
+```
 ## Data
 
 ### ScanNet Temporal Dataset
@@ -65,8 +106,7 @@ output:
   num_workers: 2
 ```
 
-**Run:**
-1. Temporal sampling:
+**Run data loader:**
 ```bash
 python data/temporal_sampling.py
 ```
@@ -97,5 +137,33 @@ batch1/
 ```
 |
 
+## Monocular Depth Inference
+
+### ZoeDepth
+
+`model/zoe_depth.py` runs ZoeDepth inference on all sequences produced by the samplers.
+
+**Prerequisites:** clone [ZoeDepth](https://github.com/isl-org/ZoeDepth) on the workstation and activate its environment.
+
+**Run** (from the ZoeDepth root so `source="local"` resolves correctly):
+```bash
+cd ~/ZoeDepth
+python ~/mono-depth-to-3DR/model/zoe_depth.py
+```
+
+Walks every sequence folder under `datasets/sampled_data/`, reads `color/*.png`, and writes predicted metric depths to `depth_pred/` alongside each sequence:
+
+```
+datasets/sampled_data/
+  <seq_name>/
+    color/          # input RGB frames
+    depth/          # ScanNet GT depth (.npy)
+    depth_pred/     # ZoeDepth predictions (16-bit PNG, millimetres)
+    pose/
+    intrinsic/
+```
+
 ## References
 1. ScanNet: Angela Dai, Angel X. Chang, Manolis Savva, Maciej Halber, Thomas Funkhouser, Matthias Nießner, "ScanNet: Richly-annotated 3D Reconstructions of Indoor Scenes", arXiv, 2017, url: https://arxiv.org/abs/1702.04405
+2. DepthPro: Aleksei Bochkovskii, Amael Delaunoy, Hugo Germain, Marcel Santos, Yichao Zhou, Stephan R. Richter, Vladlen Koltun, "Depth Pro: Sharp Monocular Metric Depth in Less Than a Second", International Conference on Learning Representations, 2025, url: https://arxiv.org/abs/2410.02073
+3. ZoeDepth: Bhat, Shariq Farooq and Birkl, Reiner and Wofk, Diana and Wonka, Peter and Müller, Matthias, "ZoeDepth: Zero-shot Transfer by Combining Relative and Metric Depth", arXiv, 2023, url: https://arxiv.org/abs/2302.12288
