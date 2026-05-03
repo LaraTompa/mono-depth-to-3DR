@@ -170,31 +170,6 @@ def compute_photometric(img_src, img_tgt, depth, K, pose_src, pose_tgt, visualiz
     return ssim_score, l2, valid_ratio
 
 
-def depth_consistency(depth1, depth2, K, pose1, pose2):
-    """
-    Compare projected depth vs actual depth in target
-    """
-    x_proj, y_proj, valid = project_points(depth1, K, pose1, pose2)
-
-    if np.sum(valid) < 100:
-        return float("inf")
-
-    # sample depth2
-    depth2_warped = cv2.remap(
-        depth2,
-        x_proj,
-        y_proj,
-        interpolation=cv2.INTER_LINEAR,
-        borderMode=cv2.BORDER_CONSTANT,
-        borderValue=0
-    )
-
-    d1_valid = depth1[valid]
-    d2_valid = depth2_warped[valid]
-
-    return np.mean(np.abs(d1_valid - d2_valid))
-
-
 # Main
 
 def main(args):
@@ -227,10 +202,6 @@ def main(args):
     print("Running backward consistency (2 → 1)...")
     ssim_21, l2_21, vr_21 = compute_photometric(img2, img1, depth2, K, pose2, pose1, visualize=args.visualize, vis_out=args.vis_out_21 if args.visualize else None)
 
-    print("Running depth consistency...")
-    depth_12 = depth_consistency(depth1, depth2, K, pose1, pose2)
-    depth_21 = depth_consistency(depth2, depth1, K, pose2, pose1)
-
     print("\n=== RESULTS ===")
 
     print("\nPhotometric Consistency:")
@@ -242,19 +213,13 @@ def main(args):
     print(f"  L2 (2→1):   {l2_21:.4f}")
     print(f"  L2 avg:     {(l2_12 + l2_21)/2:.4f}")
 
-    print("\nDepth Consistency:")
-    print(f"  Depth (1→2): {depth_12:.4f}")
-    print(f"  Depth (2→1): {depth_21:.4f}")
-    print(f"  Depth avg:   {(depth_12 + depth_21)/2:.4f}")
-
     print("\nValid pixel ratios:")
     print(f"  1→2: {vr_12:.3f}")
     print(f"  2→1: {vr_21:.3f}")
 
 
-# -----------------------------
-# ENTRY
-# -----------------------------
+# Entry point
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 

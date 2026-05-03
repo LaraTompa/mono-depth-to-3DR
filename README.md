@@ -45,7 +45,7 @@ Notes:
 Example (camera-to-world poses, depth in uint16 mm):
 
 ```bash
-python3 scripts/photometric-consistency.py \
+python3 scripts/photometric_consistency.py \
   --img1 /path/to/rgb/frame_00000.jpg \
   --img2 /path/to/rgb/frame_00001.jpg \
   --depth1 /path/to/depth/frame_00000.png \
