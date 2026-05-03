@@ -227,8 +227,8 @@ if __name__ == "__main__":
 
             # Save camera intrinsics — files sit in scene/intrinsic/ subfolder.
             for intr_filename, intr_dst in [
-                ("intrinsics_color.txt", os.path.join(intr_dir, "intrinsic_color.txt")),
-                ("intrinsics_depth.txt", os.path.join(intr_dir, "intrinsic_depth.txt")),
+                ("intrinsic_color.txt", os.path.join(intr_dir, "intrinsic_color.txt")),
+                ("intrinsic_depth.txt", os.path.join(intr_dir, "intrinsic_depth.txt")),
             ]:
                 src = os.path.join(ROOT_DIR, scene_name, "intrinsic", intr_filename)
                 if os.path.isfile(src):

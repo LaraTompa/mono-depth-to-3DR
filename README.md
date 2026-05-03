@@ -31,9 +31,9 @@ Each `__getitem__` call randomly selects a scene and samples a temporally ordere
     color/          # *.jpg RGB frames
     depth/          # *.png depth frames (uint16 millimetres)
     pose/           # *.txt 4×4 camera-to-world matrices
-    intrinsics/
-      intrinsics_color.txt
-      intrinsics_depth.txt
+    intrinsic/
+      intrinsic_color.txt
+      intrinsic_depth.txt
   scene0001_00/
   ...
 ```
