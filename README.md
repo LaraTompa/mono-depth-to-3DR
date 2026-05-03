@@ -110,5 +110,33 @@ Prompts whether to run all batches or a fixed number, then writes two output fol
 | `datasets/sample_output/` | RGB and depth visualisation grids (PNG) |
 | `datasets/sampled_data/` | Individual frames per sequence — `color/*.png`, `depth/*.npy`, `pose/*.txt`, and `intrinsics/intrinsics_color.txt`, `intrinsics/intrinsics_depth.txt` |
 
+## Monocular Depth Inference
+
+### ZoeDepth
+
+`model/zoe_depth.py` runs ZoeDepth inference on all sequences produced by the samplers.
+
+**Prerequisites:** clone [ZoeDepth](https://github.com/isl-org/ZoeDepth) on the workstation and activate its environment.
+
+**Run** (from the ZoeDepth root so `source="local"` resolves correctly):
+```bash
+cd ~/ZoeDepth
+python ~/mono-depth-to-3DR/model/zoe_depth.py
+```
+
+Walks every sequence folder under `datasets/sampled_data/`, reads `color/*.png`, and writes predicted metric depths to `depth_pred/` alongside each sequence:
+
+```
+datasets/sampled_data/
+  <seq_name>/
+    color/          # input RGB frames
+    depth/          # ScanNet GT depth (.npy)
+    depth_pred/     # ZoeDepth predictions (16-bit PNG, millimetres)
+    pose/
+    intrinsic/
+```
+
 ## References
 1. ScanNet: Angela Dai, Angel X. Chang, Manolis Savva, Maciej Halber, Thomas Funkhouser, Matthias Nießner, "ScanNet: Richly-annotated 3D Reconstructions of Indoor Scenes", arXiv, 2017, url: https://arxiv.org/abs/1702.04405
+2. DepthPro: Aleksei Bochkovskii, Amael Delaunoy, Hugo Germain, Marcel Santos, Yichao Zhou, Stephan R. Richter, Vladlen Koltun, "Depth Pro: Sharp Monocular Metric Depth in Less Than a Second", International Conference on Learning Representations, 2025, url: https://arxiv.org/abs/2410.02073
+3. ZoeDepth: Bhat, Shariq Farooq and Birkl, Reiner and Wofk, Diana and Wonka, Peter and Müller, Matthias, "ZoeDepth: Zero-shot Transfer by Combining Relative and Metric Depth", arXiv, 2023, url: https://arxiv.org/abs/2302.12288
