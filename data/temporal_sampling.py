@@ -9,6 +9,10 @@ import random
 from graph_based_sampling import ScanNetGraphDataset
 
 
+# Fixed spatial size all frames are resized to before batching
+IMAGE_H, IMAGE_W = 480, 640
+
+
 def load_pose(path):
     return np.loadtxt(path)
 
@@ -112,7 +116,7 @@ class ScanNetTemporalDataset(Dataset):
         return seq_ids
 
     def _load_image(self, path):
-        img = Image.open(path).convert("RGB")
+        img = Image.open(path).convert("RGB").resize((IMAGE_W, IMAGE_H), Image.BILINEAR)
         if self.transform:
             img = self.transform(img)
         else:
@@ -120,7 +124,9 @@ class ScanNetTemporalDataset(Dataset):
         return img
 
     def _load_depth(self, path):
-        depth = np.array(Image.open(path)).astype(np.float32) / 1000.0
+        depth = np.array(
+            Image.open(path).resize((IMAGE_W, IMAGE_H), Image.NEAREST)
+        ).astype(np.float32) / 1000.0
         return torch.from_numpy(depth).unsqueeze(0)
 
     def __getitem__(self, idx):

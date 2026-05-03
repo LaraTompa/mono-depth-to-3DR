@@ -5,19 +5,6 @@ import numpy as np
 from zoedepth.utils.misc import save_raw_16bit
 
 # ======================
-# CONFIG
-# Run this script from ~/ZoeDepth on the workstation:
-#   cd ~/ZoeDepth
-#   python ~/mono-depth-to-3DR/model/zoe_depth.py
-#
-# Input layout (produced by temporal_sampling.py / graph_based_sampling.py):
-#   ~/mono-depth-to-3DR/datasets/sampled_data/
-#     <seq_name>/
-#       color/        ← {fid}.png  — ZoeDepth input
-#       depth/        ← {fid}.npy  — ScanNet GT depth (not used here)
-#       pose/
-#       intrinsic/
-#
 # Output: depth_pred/{fid}.png (16-bit, millimetres) written next to each color/
 # ======================
 SAMPLED_DATA_DIR = os.path.expanduser("~/mono-depth-to-3DR/datasets/sampled_data")
@@ -32,7 +19,6 @@ print("Using device:", device)
 # LOAD MODEL
 # ZoeD_NK works well for mixed indoor/outdoor; ScanNet is indoor so ZoeD_N
 # is also a valid choice if you want indoor-only specialisation.
-# Script is run from ~/ZoeDepth so source="local" loads from that folder.
 # ======================
 model = torch.hub.load(".", "ZoeD_NK", source="local", pretrained=True)
 model = model.to(device)
@@ -40,17 +26,22 @@ model.eval()
 
 # ======================
 # WALK SAMPLED SEQUENCES AND RUN INFERENCE
+# Layout: sampled_data/batch<N>/sample<M>/<scene_name>/color/
 # ======================
 seq_dirs = sorted([
-    os.path.join(SAMPLED_DATA_DIR, d)
-    for d in os.listdir(SAMPLED_DATA_DIR)
-    if os.path.isdir(os.path.join(SAMPLED_DATA_DIR, d))
+    os.path.join(SAMPLED_DATA_DIR, batch, sample, scene)
+    for batch in sorted(os.listdir(SAMPLED_DATA_DIR))
+    if os.path.isdir(os.path.join(SAMPLED_DATA_DIR, batch))
+    for sample in sorted(os.listdir(os.path.join(SAMPLED_DATA_DIR, batch)))
+    if os.path.isdir(os.path.join(SAMPLED_DATA_DIR, batch, sample))
+    for scene in sorted(os.listdir(os.path.join(SAMPLED_DATA_DIR, batch, sample)))
+    if os.path.isdir(os.path.join(SAMPLED_DATA_DIR, batch, sample, scene))
 ])
 
 if not seq_dirs:
-    raise RuntimeError(f"No sequence folders found in {SAMPLED_DATA_DIR}")
+    raise RuntimeError(f"No sequence folders found under {SAMPLED_DATA_DIR}")
 
-print(f"Found {len(seq_dirs)} sequence(s) in {SAMPLED_DATA_DIR}\n")
+print(f"Found {len(seq_dirs)} sequence(s) under {SAMPLED_DATA_DIR}\n")
 
 for seq_dir in seq_dirs:
     color_dir = os.path.join(seq_dir, "color")
