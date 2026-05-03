@@ -1,6 +1,7 @@
 numpy
 torch>=2.0.0
 torchvision
+pyyaml
 gradio==2.8.13
 click==8.1.7
 opencv-python==4.10.0.84

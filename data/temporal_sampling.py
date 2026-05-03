@@ -6,6 +6,8 @@ from torch.utils.data import Dataset
 from PIL import Image
 import random
 
+from graph_based_sampling import ScanNetGraphDataset
+
 
 def load_pose(path):
     return np.loadtxt(path)
@@ -158,24 +160,44 @@ if __name__ == "__main__":
 
     ds_cfg  = cfg["dataset"]
     out_cfg = cfg["output"]
+    graph_cfg = cfg.get("graph_sampling", {})
 
     ROOT_DIR   = ds_cfg["root_dir"]
     OUT_DIR    = out_cfg["sample_output_dir"]
     SAMPLE_DIR = out_cfg["sampled_data_dir"]
+    sampler_type = ds_cfg.get("sampler_type", "temporal")
     os.makedirs(OUT_DIR, exist_ok=True)
     os.makedirs(SAMPLE_DIR, exist_ok=True)
 
-    dataset = ScanNetTemporalDataset(
-        root_dir=ROOT_DIR,
-        num_frames=ds_cfg["num_frames"],
-        num_samples=ds_cfg["num_samples"],
-        min_stride=ds_cfg["min_stride"],
-        max_stride=ds_cfg["max_stride"],
-        max_scenes=ds_cfg["max_scenes"],
-    )
+    if sampler_type == "temporal":
+        dataset = ScanNetTemporalDataset(
+            root_dir=ROOT_DIR,
+            num_frames=ds_cfg["num_frames"],
+            num_samples=ds_cfg["num_samples"],
+            min_stride=ds_cfg["min_stride"],
+            max_stride=ds_cfg["max_stride"],
+            max_scenes=ds_cfg["max_scenes"],
+        )
+    elif sampler_type == "graph":
+        dataset = ScanNetGraphDataset(
+            root_dir=ROOT_DIR,
+            num_frames=ds_cfg["num_frames"],
+            num_samples=ds_cfg["num_samples"],
+            graph_cache=graph_cfg.get("graph_cache"),
+            min_overlap=graph_cfg["min_overlap"],
+            max_overlap=graph_cfg["max_overlap"],
+            overlap_sample_step=graph_cfg["overlap_sample_step"],
+            depth_tolerance=graph_cfg["depth_tolerance"],
+            max_scenes=ds_cfg["max_scenes"],
+        )
+    else:
+        raise ValueError(
+            f"Unsupported sampler_type '{sampler_type}'. Use 'temporal' or 'graph'."
+        )
 
     print(f"Loaded {len(dataset.scene_data)} scenes")
     print(f"Dataset length (virtual): {len(dataset)}")
+    print(f"Sampler type            : {sampler_type}")
     print(f"Fixed seq_len this run  : {dataset.seq_len}")
     print(f"Saving visualisations to: {OUT_DIR}/")
     print(f"Saving sampled frames to: {SAMPLE_DIR}/\n")

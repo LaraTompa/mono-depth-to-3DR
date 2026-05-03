@@ -20,7 +20,7 @@ pip install -r requirements.txt
 
 ### ScanNet Temporal Dataset
 
-`data/temporal_sampling.py` implements `ScanNetTemporalDataset`, a PyTorch `Dataset` for dynamic temporal sequence sampling from [ScanNet](http://www.scan-net.org/).
+`data/temporal_sampling.py` is the runnable sampling entry point. It can build batches either with `ScanNetTemporalDataset` or with the graph-based sampler from `data/graph_based_sampling.py`.
 
 Each `__getitem__` call randomly selects a scene and samples a temporally ordered sequence of frames with a random stride.
 
@@ -44,11 +44,19 @@ config/dataset.yaml
 
 dataset:
   root_dir: "/storage/group/dataset_mirrors/scannet/scans"
+  sampler_type: "temporal"  # choose "temporal" or "graph"
   num_samples: 700       # number of samples per epoch (__len__)
   num_frames: 5          # exact number of frames per sample (seq_len)
   min_stride: 80          # minimum temporal stride between frames
   max_stride: 120         # maximum temporal stride between frames
   max_scenes: null       # limit scenes loaded; set to an integer to restrict (e.g. 5)
+
+graph_sampling:
+  graph_cache: null
+  min_overlap: 0.2
+  max_overlap: 0.9
+  overlap_sample_step: 16
+  depth_tolerance: 0.05
 
 output:
   sample_output_dir: "datasets/sample_output"   # visualisation grids
@@ -58,8 +66,13 @@ output:
 ```
 
 **Run:**
+1. Temporal sampling:
 ```bash
 python data/temporal_sampling.py
+```
+2. Graph-based sampling:
+```bash
+python data/graph_based_sampling.py
 ```
 
 Prompts whether to run all batches or a fixed number, then writes two output folders:
@@ -67,7 +80,7 @@ Prompts whether to run all batches or a fixed number, then writes two output fol
 | Folder | Contents |
 |---|---|
 | `datasets/sample_output/` | RGB and depth visualisation grids (PNG) |
-| `datasets/sampled_data/` | Individual frames per sequence — `color/*.png`, `depth/*.npy`, `pose/*.txt`, and `intrinsics/intrinsics_color.txt`, `intrinsics/intrinsics_depth.txt` |
+| `datasets/sampled_data/` | Individual frames per sequence — `color/*.png`, `depth/*.npy`, `pose/*.txt`, and `intrinsic/intrinsic_color.txt`, `intrinsic/intrinsic_depth.txt` |
 
 ## References
 1. ScanNet: Angela Dai, Angel X. Chang, Manolis Savva, Maciej Halber, Thomas Funkhouser, Matthias Nießner, "ScanNet: Richly-annotated 3D Reconstructions of Indoor Scenes", arXiv, 2017, url: https://arxiv.org/abs/1702.04405
