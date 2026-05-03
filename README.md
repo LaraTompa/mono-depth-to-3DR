@@ -29,7 +29,7 @@ Each `__getitem__` call randomly selects a scene and samples a temporally ordere
 <root_dir>/
   scene0000_00/
     color/          # *.jpg RGB frames
-    depth/          # *.png depth frames (uint16, millimetres)
+    depth/          # *.png depth frames (uint16 millimetres)
     pose/           # *.txt 4×4 camera-to-world matrices
     intrinsics/
       intrinsics_color.txt
@@ -43,7 +43,7 @@ Each `__getitem__` call randomly selects a scene and samples a temporally ordere
 config/dataset.yaml
 
 dataset:
-  root_dir: "/storage/group/dataset_mirrors/scannet/tasks/scannet_frames_test"
+  root_dir: "/storage/group/dataset_mirrors/scannet/scans"
   num_samples: 700       # number of samples per epoch (__len__)
   num_frames: 5          # exact number of frames per sample (seq_len)
   min_stride: 80          # minimum temporal stride between frames

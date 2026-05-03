@@ -2,11 +2,11 @@
 
 dataset:
   root_dir: "/storage/group/dataset_mirrors/scannet/scans"
-  num_samples: 100       # number of samples per epoch (__len__)
-  num_frames: 5          # exact number of frames per sample (seq_len)
-  min_stride: 50          # minimum temporal stride between frames
-  max_stride: 100         # maximum temporal stride between frames
-  max_scenes: 120       # limit scenes loaded; set to an integer to restrict to a subset of scenes (for testing)
+  num_samples: 1       # number of samples per epoch (__len__)
+  num_frames: 6          # exact number of frames per sample (seq_len)
+  min_stride: 40          # minimum temporal stride between frames
+  max_stride: 90         # maximum temporal stride between frames
+  max_scenes: 1       # limit scenes loaded; set to an integer to restrict to a subset of scenes (for testing)
 
 output:
   sample_output_dir: "datasets/sample_output"   # visualisation grids

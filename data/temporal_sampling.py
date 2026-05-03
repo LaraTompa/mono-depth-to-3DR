@@ -219,27 +219,22 @@ if __name__ == "__main__":
             rgb_raw_dir = os.path.join(seq_dir, "color")
             dep_raw_dir = os.path.join(seq_dir, "depth")
             pose_dir    = os.path.join(seq_dir, "pose")
-            intr_dir    = os.path.join(seq_dir, "intrinsics")
+            intr_dir    = os.path.join(seq_dir, "intrinsic")
             os.makedirs(rgb_raw_dir, exist_ok=True)
             os.makedirs(dep_raw_dir, exist_ok=True)
             os.makedirs(pose_dir, exist_ok=True)
             os.makedirs(intr_dir, exist_ok=True)
 
-            # Save camera intrinsics from the source scene.
-            intr_color_src = os.path.join(ROOT_DIR, scene_name, "intrinsics", "intrinsics_color.txt")
-            intr_depth_src = os.path.join(ROOT_DIR, scene_name, "intrinsics", "intrinsics_depth.txt")
-            intr_color_dst = os.path.join(intr_dir, "intrinsics_color.txt")
-            intr_depth_dst = os.path.join(intr_dir, "intrinsics_depth.txt")
-
-            if os.path.isfile(intr_color_src):
-                shutil.copy2(intr_color_src, intr_color_dst)
-            else:
-                print(f"  warning: missing intrinsics file {intr_color_src}")
-
-            if os.path.isfile(intr_depth_src):
-                shutil.copy2(intr_depth_src, intr_depth_dst)
-            else:
-                print(f"  warning: missing intrinsics file {intr_depth_src}")
+            # Save camera intrinsics — files sit in scene/intrinsic/ subfolder.
+            for intr_filename, intr_dst in [
+                ("intrinsics_color.txt", os.path.join(intr_dir, "intrinsic_color.txt")),
+                ("intrinsics_depth.txt", os.path.join(intr_dir, "intrinsic_depth.txt")),
+            ]:
+                src = os.path.join(ROOT_DIR, scene_name, "intrinsic", intr_filename)
+                if os.path.isfile(src):
+                    shutil.copy2(src, intr_dst)
+                else:
+                    print(f"  warning: could not find {intr_filename} for scene {scene_name}")
 
             for f in range(N):
                 fid = fids[f]
