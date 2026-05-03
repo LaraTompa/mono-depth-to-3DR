@@ -178,11 +178,17 @@ def compute_photometric(img_src, img_tgt, depth, K, pose_src, pose_tgt, visualiz
 
     # SSIM handling -- compute on full image
     if img_src.ndim == 3:  # RGB
-        ssim_score = ssim(img_src, warped, data_range=1.0, channel_axis=-1)
+        #ssim_score = ssim(img_src, warped, data_range=1.0, channel_axis=-1)
+        ssim_map = ssim(img_src, warped, data_range=1.0, channel_axis=-1, full=True)[1] #ssim only on valid pixels
+        ssim_score = np.mean(ssim_map[valid])
     else:  # Grayscale
-        ssim_score = ssim(img_src, warped, data_range=1.0)
+        #ssim_score = ssim(img_src, warped, data_range=1.0)
+        ssim_map = ssim(img_src, warped, data_range=1.0, full=True)[1]   #ssim only on valid pixels
+        ssim_score = np.mean(ssim_map[valid])
     
     valid_ratio = np.mean(valid)
+
+
 
     return ssim_score, l2, valid_ratio
 
