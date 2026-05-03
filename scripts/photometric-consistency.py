@@ -3,11 +3,11 @@ import argparse
 import numpy as np
 import cv2
 from skimage.metrics import structural_similarity as ssim
+import matplotlib.pyplot as plt
 
 
-# -----------------------------
-# IO
-# -----------------------------
+# Functions
+
 def load_intrinsics(path):
     K = np.loadtxt(path)
     if K.shape == (4, 4):
@@ -51,9 +51,44 @@ def load_depth(path, scale=1000.0):
     return depth / scale
 
 
-# -----------------------------
-# GEOMETRY
-# -----------------------------
+def visualize_warping(img_src, img_tgt, warped, valid, out_path=None):
+    """
+    Display source (with valid mask overlay), target, and warped side-by-side.
+
+    Args:
+        img_src: source grayscale image (H, W) normalized [0,1]
+        img_tgt: target grayscale image (H, W) normalized [0,1]
+        warped: warped target→source (H, W) normalized [0,1]
+        valid: boolean mask (H, W) of valid pixels
+        out_path: optional path to save figure
+    """
+    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+
+    # Source image with valid mask overlay (green = valid pixels)
+    img_src_overlay = np.stack([img_src, img_src, img_src], axis=-1)  # grayscale → RGB
+    img_src_overlay[valid, 1] = np.clip(img_src_overlay[valid, 1] + 0.3, 0, 1)  # add green channel
+    axes[0].imshow(img_src_overlay)
+    axes[0].set_title(f'Source (valid={np.mean(valid):.2%} green overlay)')
+    axes[0].axis('off')
+
+    # Target image (plain)
+    axes[1].imshow(img_tgt, cmap='gray', vmin=0, vmax=1)
+    axes[1].set_title('Target Image')
+    axes[1].axis('off')
+
+    # Warped image (target → source)
+    axes[2].imshow(warped, cmap='gray', vmin=0, vmax=1)
+    axes[2].set_title('Warped Target→Source')
+    axes[2].axis('off')
+
+    plt.tight_layout()
+    if out_path:
+        plt.savefig(out_path, dpi=150, bbox_inches='tight')
+        print(f"Saved visualization to {out_path}")
+    plt.show()
+
+# Geometry and projections
+
 def project_points(depth, K, pose_src, pose_tgt):
     H, W = depth.shape
 
@@ -101,10 +136,9 @@ def project_points(depth, K, pose_src, pose_tgt):
 
     return x_proj.astype(np.float32), y_proj.astype(np.float32), valid
 
-# -----------------------------
-# METRICS
-# -----------------------------
-def compute_photometric(img_src, img_tgt, depth, K, pose_src, pose_tgt):
+# Metrics
+
+def compute_photometric(img_src, img_tgt, depth, K, pose_src, pose_tgt, visualize=False, vis_out=None):
     """
     Warp target → source and compare
     """
@@ -121,6 +155,9 @@ def compute_photometric(img_src, img_tgt, depth, K, pose_src, pose_tgt):
         borderMode=cv2.BORDER_CONSTANT,
         borderValue=0
     )
+
+    if visualize:
+        visualize_warping(img_src, img_tgt, warped, valid, out_path=vis_out)
 
     src_valid = img_src[valid]
     tgt_valid = warped[valid]
@@ -158,9 +195,8 @@ def depth_consistency(depth1, depth2, K, pose1, pose2):
     return np.mean(np.abs(d1_valid - d2_valid))
 
 
-# -----------------------------
-# MAIN
-# -----------------------------
+# Main
+
 def main(args):
     global args_cam_to_world
     args_cam_to_world = args.cam_to_world
@@ -177,8 +213,8 @@ def main(args):
     if depth2.shape != img2.shape:
         depth2 = cv2.resize(depth2, (img2.shape[1], img2.shape[0]), interpolation=cv2.INTER_NEAREST)
     
-    print("img1:", img1.shape)
-    print("depth1:", depth1.shape)
+    #print("img1:", img1.shape) 
+    #print("depth1:", depth1.shape)
 
     K = load_intrinsics(args.intrinsics)
 
@@ -186,10 +222,10 @@ def main(args):
     pose2 = load_pose(args.pose2)
 
     print("Running forward consistency (1 → 2)...")
-    ssim_12, l2_12, vr_12 = compute_photometric(img1, img2, depth1, K, pose1, pose2)
+    ssim_12, l2_12, vr_12 = compute_photometric(img1, img2, depth1, K, pose1, pose2, visualize=args.visualize, vis_out=args.vis_out_12 if args.visualize else None)
 
     print("Running backward consistency (2 → 1)...")
-    ssim_21, l2_21, vr_21 = compute_photometric(img2, img1, depth2, K, pose2, pose1)
+    ssim_21, l2_21, vr_21 = compute_photometric(img2, img1, depth2, K, pose2, pose1, visualize=args.visualize, vis_out=args.vis_out_21 if args.visualize else None)
 
     print("Running depth consistency...")
     depth_12 = depth_consistency(depth1, depth2, K, pose1, pose2)
@@ -238,6 +274,10 @@ if __name__ == "__main__":
                         help="Poses are camera-to-world (default: True, as in ScanNet/TUM/etc)")
     parser.add_argument("--world_to_cam", dest="cam_to_world", action="store_false",
                         help="Poses are world-to-camera")
+    
+    parser.add_argument("--visualize", action="store_true", help="Whether to visualize warping")
+    parser.add_argument("--vis_out_12", type=str, default=None, help="Path to save forward warping visualization")
+    parser.add_argument("--vis_out_21", type=str, default=None, help="Path to save backward warping visualization")
 
     args = parser.parse_args()
     main(args)
