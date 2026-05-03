@@ -80,7 +80,22 @@ Prompts whether to run all batches or a fixed number, then writes two output fol
 | Folder | Contents |
 |---|---|
 | `datasets/sample_output/` | RGB and depth visualisation grids (PNG) |
-| `datasets/sampled_data/` | Individual frames per sequence — `color/*.png`, `depth/*.npy`, `pose/*.txt`, and `intrinsic/intrinsic_color.txt`, `intrinsic/intrinsic_depth.txt` |
+| `datasets/sampled_data/` | Individual frames per sequence with structure: 
+```
+batch1/
+    sample1/
+      scene0000_00/
+        color/
+        depth/
+        pose/
+        intrinsic/
+    sample2/
+      scene0079_01/
+        ...
+  batch2/
+    ...
+```
+|
 
 ## References
 1. ScanNet: Angela Dai, Angel X. Chang, Manolis Savva, Maciej Halber, Thomas Funkhouser, Matthias Nießner, "ScanNet: Richly-annotated 3D Reconstructions of Indoor Scenes", arXiv, 2017, url: https://arxiv.org/abs/1702.04405

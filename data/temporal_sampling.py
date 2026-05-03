@@ -202,24 +202,13 @@ if __name__ == "__main__":
     print(f"Saving visualisations to: {OUT_DIR}/")
     print(f"Saving sampled frames to: {SAMPLE_DIR}/\n")
 
-    answer = input("Show all sampled batches or just a few? [all / few]: ").strip().lower()
-    if answer == "few":
-        while True:
-            try:
-                max_batches = int(input("How many batches? ").strip())
-                if max_batches > 0:
-                    break
-                print("Please enter a positive integer.")
-            except ValueError:
-                print("Please enter a valid integer.")
-    else:
-        max_batches = None  # no limit
-
     loader = DataLoader(dataset, batch_size=out_cfg["batch_size"], num_workers=out_cfg["num_workers"], shuffle=False)
 
+    total_batches = len(loader)
+    milestone = max(1, total_batches // 4)
+    print(f"Sampling {total_batches} batches — progress reported every {milestone} batches.\n")
+
     for i, batch in enumerate(loader):
-        if max_batches is not None and i >= max_batches:
-            break
 
         images   = batch["images"]    # (B, N, 3, H, W)
         depths   = batch["depths"]    # (B, N, 1, H, W)
@@ -237,7 +226,7 @@ if __name__ == "__main__":
             fids = [all_fids[f][b] for f in range(N)]
 
             # --- sampled_data: individual frames per sequence ---
-            seq_dir = os.path.join(SAMPLE_DIR, f"batch{i+1}_sample{b+1}_{scene_name}")
+            seq_dir = os.path.join(SAMPLE_DIR, f"batch{i+1}", f"sample{b+1}", scene_name)
             rgb_raw_dir = os.path.join(seq_dir, "color")
             dep_raw_dir = os.path.join(seq_dir, "depth")
             pose_dir    = os.path.join(seq_dir, "pose")
@@ -281,5 +270,8 @@ if __name__ == "__main__":
             print(f"  saved frames : {seq_dir}/")
             print(f"  saved rgb grid  : {rgb_path}")
             print(f"  saved depth grid: {dep_path}")
+
+        if (i + 1) % milestone == 0 or (i + 1) == total_batches:
+            print(f"\nProgress: {i + 1}/{total_batches} batches complete ({(i + 1) * 100 // total_batches}%)")
 
     print("\nDone.")
