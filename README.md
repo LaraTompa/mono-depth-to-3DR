@@ -148,7 +148,7 @@ batch1/
 **Run** (from the ZoeDepth root so `source="local"` resolves correctly):
 ```bash
 cd ~/ZoeDepth
-python ~/mono-depth-to-3DR/model/zoe_depth.py
+python ~/mono-depth-to-3DR/models/zoe_depth.py
 ```
 ### Depth Pro 
 
@@ -159,7 +159,7 @@ python ~/mono-depth-to-3DR/model/zoe_depth.py
 **Run** (from the Depth Pro root so `source="local"` resolves correctly):
 ```bash
 cd ~/ml-depth-pro
-python ~/mono-depth-to-3DR/model/depth-pro.py
+python ~/mono-depth-to-3DR/models/depth-pro.py
 ```
 
 ```
