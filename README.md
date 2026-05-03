@@ -16,6 +16,47 @@ Install the dependencies:
 pip install -r requirements.txt
 ```
 
+## Run scripts with metrics
+
+Use python3 to run the utilities from the project root (expand ~ or use absolute paths).
+
+1) Depth consistency check (per-RGB sample table)
+- Script: scripts/depth_consistency.py
+- Typical args: --rgb_dir, --gt_dir, --pred_dir
+
+Example:
+
+```bash
+cd ~/Downloads/mono-depth-to-3DR
+python3 scripts/depth_consistency.py \
+  --rgb_dir /path/to/rgb/frame_00000.jpg \
+  --gt_dir  /path/to/gt_depth/frame_00000.png \
+  --pred_dir /path/to/pred_depth_/frame_00000.png
+```
+
+Notes:
+- The script prints a per-image table and an average row.
+- Make sure depth loader knows the PNG format (16-bit with scale 1000 → meters) if applicable.
+
+2) Photometric consistency (SSIM + L2 using depth + poses + intrinsics)
+- Script: scripts/photometric_consistency.py
+- Typical args: --img1, --img2, --depth1, --depth2, --intrinsics_color, --pose1, --pose2, --depth_scale, --cam_to_world / --world_to_cam, --visualize.
+
+Example (camera-to-world poses, depth in uint16 mm):
+
+```bash
+python3 scripts/photometric_consistency.py \
+  --img1 /path/to/rgb/frame_00000.jpg \
+  --img2 /path/to/rgb/frame_00001.jpg \
+  --depth1 /path/to/depth/frame_00000.png \
+  --depth2 /path/to/depth/frame_00001.png \
+  --intrinsics_color /path/to/calib/color_intrinsics.txt \
+  --pose1 /path/to/poses/pose_000000.txt \
+  --pose2 /path/to/poses/pose_000001.txt \
+  --depth_scale 1000.0 \
+  --cam_to_world \
+  --visualize
+```
 ## Data
 
 ### ScanNet Temporal Dataset
@@ -57,7 +98,7 @@ output:
   num_workers: 2
 ```
 
-**Run:**
+**Run data loader:**
 ```bash
 python data/temporal_sampling.py
 ```

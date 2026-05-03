@@ -8,9 +8,8 @@ from glob import glob
 EPS = 1e-6
 
 
-# -----------------------------
-# IO FUNCTIONS
-# -----------------------------
+# Functions
+
 def load_rgb(path):
     img = cv2.imread(path)
     if img is None:
@@ -52,7 +51,7 @@ def load_pred_depth(path):
 
         depth = depth.astype(np.float32)
 
-        # if RGB → convert (just in case, although usually it is used for visualization only)
+        # if RGB → convert (just in case, although usually it is used for visualization only and should be grayscale)
         if depth.ndim == 3:
             depth = cv2.cvtColor(depth, cv2.COLOR_BGR2GRAY)
 
@@ -94,9 +93,8 @@ def align_scale(pred, gt, mask):
     return pred * scale
 
 
-# -----------------------------
-# MAIN
-# -----------------------------
+# Main
+
 def main(args):
     rgb_files = sorted(glob(os.path.join(args.rgb_dir, "*.jpg")))
 
@@ -105,7 +103,7 @@ def main(args):
 
     all_results = []
 
-    # formatting
+    # formatting for output
     header_fmt = "{:20s} {:>10s} {:>10s} {:>10s} {:>8s} {:>8s} {:>8s}"
     row_fmt =    "{:20s} {:10.4f} {:10.4f} {:10.4f} {:8.4f} {:8.4f} {:8.4f}"
     printed_header = False
@@ -127,7 +125,7 @@ def main(args):
             print(f"Skipping {name} (missing files)")
             continue
 
-        rgb = load_rgb(rgb_path)
+        #rgb = load_rgb(rgb_path)
         gt_depth = load_depth_png(gt_path, args.depth_scale)
         pred_depth = load_pred_depth(pred_path)
 
@@ -140,7 +138,7 @@ def main(args):
             print(f"Skipping {name} (no valid depth)")
             continue
 
-        #pred_depth = align_scale(pred_depth, gt_depth, mask)
+        #pred_depth = align_scale(pred_depth, gt_depth, mask) # optional scale, only needed for relative MDEs such as MoGe
 
         d_metrics = depth_metrics(pred_depth, gt_depth, mask)
 
@@ -179,9 +177,9 @@ def main(args):
             continue
         avg[k] = np.mean([r[k] for r in all_results])
 
-    print("\n=== AVERAGE ===")
+    print("\n=== Averages ===")
     print(row_fmt.format(
-        "AVERAGE",
+        "Average",
         avg["abs_rel"],
         avg["rmse"],
         avg["mae"],
