@@ -150,18 +150,29 @@ batch1/
 cd ~/ZoeDepth
 python ~/mono-depth-to-3DR/model/zoe_depth.py
 ```
+### Depth Pro 
 
-Walks every sequence folder under `datasets/sampled_data/`, reads `color/*.png`, and writes predicted metric depths to `depth_pred/` alongside each sequence:
+`model/depth-pro.py` runs Depth Pro inference on all sequences produced by the samplers.
+
+**Prerequisites:** clone [Depth Pro](https://github.com/apple/ml-depth-pro) on the workstation and activate its environment.
+
+**Run** (from the Depth Pro root so `source="local"` resolves correctly):
+```bash
+cd ~/ml-depth-pro
+python ~/mono-depth-to-3DR/model/depth-pro.py
+```
 
 ```
 datasets/sampled_data/
   <seq_name>/
     color/          # input RGB frames
     depth/          # ScanNet GT depth (.npy)
-    depth_pred/     # ZoeDepth predictions (16-bit PNG, millimetres)
+    zoe-depth_pred/     # ZoeDepth predictions (16-bit PNG, millimetres)
+    depth-pro_pred/     # Depth Pro predictions (npz files, meters)
     pose/
     intrinsic/
 ```
+
 
 ## References
 1. ScanNet: Angela Dai, Angel X. Chang, Manolis Savva, Maciej Halber, Thomas Funkhouser, Matthias Nießner, "ScanNet: Richly-annotated 3D Reconstructions of Indoor Scenes", arXiv, 2017, url: https://arxiv.org/abs/1702.04405

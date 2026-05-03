@@ -45,7 +45,7 @@ print(f"Found {len(seq_dirs)} sequence(s) under {SAMPLED_DATA_DIR}\n")
 
 for seq_dir in seq_dirs:
     color_dir = os.path.join(seq_dir, "color")
-    pred_dir  = os.path.join(seq_dir, "depth_pred")
+    pred_dir  = os.path.join(seq_dir, "zoe-depth_pred")
 
     if not os.path.isdir(color_dir):
         print(f"  [skip] no color/ in {seq_dir}")
