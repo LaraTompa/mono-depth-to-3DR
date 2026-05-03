@@ -24,11 +24,14 @@ def load_pose(path):
     return pose
 
 
-def load_image(path):
+def load_image(path, as_gray=True):
     img = cv2.imread(path)
     if img is None:
         raise FileNotFoundError(path)
-    img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    if as_gray:
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    else:
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
     return img.astype(np.float32) / 255.0
 
 
@@ -55,36 +58,47 @@ def visualize_warping(img_src, img_tgt, warped, valid, out_path=None):
     """
     Display source (with valid mask overlay), target, and warped side-by-side.
 
-    Args:
-        img_src: source grayscale image (H, W) normalized [0,1]
-        img_tgt: target grayscale image (H, W) normalized [0,1]
-        warped: warped target→source (H, W) normalized [0,1]
-        valid: boolean mask (H, W) of valid pixels
-        out_path: optional path to save figure
+    Works for both grayscale (H, W) and RGB (H, W, 3) images.
     """
+
     fig, axes = plt.subplots(1, 3, figsize=(15, 5))
 
-    # Source image with valid mask overlay (green = valid pixels)
-    img_src_overlay = np.stack([img_src, img_src, img_src], axis=-1)  # grayscale → RGB
-    img_src_overlay[valid, 1] = np.clip(img_src_overlay[valid, 1] + 0.3, 0, 1)  # add green channel
+    # --- Ensure RGB for visualization ---
+    def to_rgb(img):
+        if img.ndim == 2:  # grayscale
+            return np.stack([img, img, img], axis=-1)
+        return img  # already RGB
+
+    src_rgb = to_rgb(img_src)
+    tgt_rgb = to_rgb(img_tgt)
+    warped_rgb = to_rgb(warped)
+
+    # --- Source with valid mask overlay ---
+    img_src_overlay = src_rgb.copy()
+    img_src_overlay[valid, 1] = np.clip(
+        img_src_overlay[valid, 1] + 0.3, 0, 1
+    )  # boost green
+
     axes[0].imshow(img_src_overlay)
-    axes[0].set_title(f'Source (valid={np.mean(valid):.2%} green overlay)')
+    axes[0].set_title(f'Source (valid={np.mean(valid):.2%})')
     axes[0].axis('off')
 
-    # Target image (plain)
-    axes[1].imshow(img_tgt, cmap='gray', vmin=0, vmax=1)
+    # --- Target ---
+    axes[1].imshow(tgt_rgb)
     axes[1].set_title('Target Image')
     axes[1].axis('off')
 
-    # Warped image (target → source)
-    axes[2].imshow(warped, cmap='gray', vmin=0, vmax=1)
+    # --- Warped ---
+    axes[2].imshow(warped_rgb)
     axes[2].set_title('Warped Target→Source')
     axes[2].axis('off')
 
     plt.tight_layout()
+
     if out_path:
         plt.savefig(out_path, dpi=150, bbox_inches='tight')
         print(f"Saved visualization to {out_path}")
+
     plt.show()
 
 # Geometry and projections
@@ -159,12 +173,15 @@ def compute_photometric(img_src, img_tgt, depth, K, pose_src, pose_tgt, visualiz
     if visualize:
         visualize_warping(img_src, img_tgt, warped, valid, out_path=vis_out)
 
-    src_valid = img_src[valid]
-    tgt_valid = warped[valid]
+    # L2 over valid pixels
+    l2 = np.mean(((img_src - warped)[valid] ** 2))
 
-    l2 = np.mean((src_valid - tgt_valid) ** 2)
-    ssim_score = ssim(src_valid, tgt_valid, data_range=1.0)
-
+    # SSIM handling -- compute on full image
+    if img_src.ndim == 3:  # RGB
+        ssim_score = ssim(img_src, warped, data_range=1.0, channel_axis=-1)
+    else:  # Grayscale
+        ssim_score = ssim(img_src, warped, data_range=1.0)
+    
     valid_ratio = np.mean(valid)
 
     return ssim_score, l2, valid_ratio
@@ -176,8 +193,8 @@ def main(args):
     global args_cam_to_world
     args_cam_to_world = args.cam_to_world
 
-    img1 = load_image(args.img1)
-    img2 = load_image(args.img2)
+    img1 = load_image(args.img1, as_gray=True)
+    img2 = load_image(args.img2, as_gray=True)
 
     depth1 = load_depth(args.depth1, args.depth_scale)
     depth2 = load_depth(args.depth2, args.depth_scale)
