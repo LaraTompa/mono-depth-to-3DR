@@ -19,10 +19,34 @@ def load_rgb(path):
 
 
 def load_depth_png(path, scale):
+    path = os.path.expanduser(path)
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Depth file not found: {path}")
+
+    ext = os.path.splitext(path)[1].lower()
+
+    if ext == ".npy":
+        depth = np.load(path)
+        return depth.astype(np.float32)
+
+    if ext == ".npz":
+        data = np.load(path, allow_pickle=True)
+        for key in ["depth", "pred", "prediction", "arr_0", "data"]:
+            if key in data:
+                depth = data[key]
+                break
+        else:
+            depth = data[list(data.keys())[0]]
+        return np.asarray(depth).astype(np.float32)
+
+    # fallback for PNG/JPG/other image formats
     depth = cv2.imread(path, cv2.IMREAD_UNCHANGED)
     if depth is None:
-        raise ValueError(f"Failed to load depth: {path}")
-    return depth.astype(np.float32) / scale
+        raise ValueError(f"Failed to load depth image: {path}")
+    depth = depth.astype(np.float32)
+
+    # keep existing behaviour: divide by scale for image-based depths (e.g. uint16 mm -> m)
+    return depth / scale
 
 
 def load_pred_depth(path):
@@ -194,7 +218,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Depth evaluation script")
 
     parser.add_argument("--rgb_dir", type=str, required=True, help="Path to RGB JPG images")
-    parser.add_argument("--gt_dir", type=str, required=True, help="Path to GT depth PNGs")
+    parser.add_argument("--gt_dir", type=str, required=True, help="Path to GT depth PNGs or .npy/.npz files")
     parser.add_argument("--pred_dir", type=str, required=True, help="Path to predicted depths")
     parser.add_argument("--depth_scale", type=float, default=1000.0,
                         help="Scale for GT depth (default: 1000 for ScanNet mm→m)")

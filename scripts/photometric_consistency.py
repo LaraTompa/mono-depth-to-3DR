@@ -39,6 +39,8 @@ def load_depth(path, scale=1000.0):
     if path.endswith(".npz"):
         data = np.load(path)
         depth = data[list(data.keys())[0]]
+    elif path.endswith(".npy"):
+        depth = np.load(path)
     else:
         depth = cv2.imread(path, cv2.IMREAD_UNCHANGED)
 
@@ -257,7 +259,7 @@ if __name__ == "__main__":
     parser.add_argument("--pose1", required=True)
     parser.add_argument("--pose2", required=True)
 
-    parser.add_argument("--depth_scale", type=float, default=1000.0)
+    parser.add_argument("--depth_scale", type=float, default=1.0)
     parser.add_argument("--cam_to_world", action="store_true", default=True,
                         help="Poses are camera-to-world (default: True, as in ScanNet/TUM/etc)")
     parser.add_argument("--world_to_cam", dest="cam_to_world", action="store_false",
