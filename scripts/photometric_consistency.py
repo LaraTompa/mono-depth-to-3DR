@@ -39,8 +39,18 @@ def load_depth(path, scale=1000.0):
     if path.endswith(".npz"):
         data = np.load(path)
         depth = data[list(data.keys())[0]]
+        #handle common cases of extra dimensions
+        if depth.ndim == 3 and depth.shape[0] == 1:
+            depth = depth[0]
+        if depth.ndim == 3 and depth.shape[-1] in (1, 3, 4):
+            depth = depth[..., 0]
     elif path.endswith(".npy"):
         depth = np.load(path)
+        #handle common cases of extra dimensions
+        if depth.ndim == 3 and depth.shape[0] == 1:
+            depth = depth[0]
+        if depth.ndim == 3 and depth.shape[-1] in (1, 3, 4):
+            depth = depth[..., 0]
     else:
         depth = cv2.imread(path, cv2.IMREAD_UNCHANGED)
 

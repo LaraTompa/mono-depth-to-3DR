@@ -18,7 +18,7 @@ def load_rgb(path):
     return img.astype(np.float32) / 255.0
 
 
-def load_depth_png(path, scale):
+def load_depth_gt(path, scale):
     path = os.path.expanduser(path)
     if not os.path.exists(path):
         raise FileNotFoundError(f"Depth file not found: {path}")
@@ -27,6 +27,13 @@ def load_depth_png(path, scale):
 
     if ext == ".npy":
         depth = np.load(path)
+        depth = np.asarray(depth).astype(np.float32)
+        # squeeze leading singleton (1,H,W) -> (H,W)
+        if depth.ndim == 3 and depth.shape[0] == 1:
+            depth = depth[0]
+        # handle trailing singleton (H,W,1) or RGB (H,W,3)
+        if depth.ndim == 3 and depth.shape[-1] in (1, 3, 4):
+            depth = depth[..., 0]
         return depth.astype(np.float32)
 
     if ext == ".npz":
@@ -37,7 +44,12 @@ def load_depth_png(path, scale):
                 break
         else:
             depth = data[list(data.keys())[0]]
-        return np.asarray(depth).astype(np.float32)
+        depth = np.asarray(depth).astype(np.float32)
+        if depth.ndim == 3 and depth.shape[0] == 1:
+            depth = depth[0]
+        if depth.ndim == 3 and depth.shape[-1] in (1, 3, 4):
+            depth = depth[..., 0]
+        return depth
 
     # fallback for PNG/JPG/other image formats
     depth = cv2.imread(path, cv2.IMREAD_UNCHANGED)
@@ -52,30 +64,33 @@ def load_depth_png(path, scale):
 def load_pred_depth(path):
     if path.endswith(".npz"):
         data = np.load(path)
-        # Try common keys for depth arrays, e.g. "depth" in Depth Pro
         for key in ["depth", "pred", "prediction", "arr_0"]:
             if key in data:
                 depth = data[key]
                 break
         else:
-            # fallback: take first array
             depth = data[list(data.keys())[0]]
-
-        depth = depth.astype(np.float32)
+        depth = np.asarray(depth).astype(np.float32)
+        #handle common layouts: (1,H,W) -> (H,W), (H,W,1) -> (H,W), (H,W,3) -> (H,W)
+        if depth.ndim == 3 and depth.shape[0] == 1:
+            depth = depth[0]
+        if depth.ndim == 3 and depth.shape[-1] in (1, 3, 4):
+            depth = depth[..., 0]
 
     elif path.endswith(".npy"):
         depth = np.load(path).astype(np.float32)
+        # handle common layouts: (1,H,W) -> (H,W) and (H,W,1) or (H,W,3) -> (H,W)
+        if depth.ndim == 3 and depth.shape[0] == 1:
+            depth = depth[0]
+        if depth.ndim == 3 and depth.shape[-1] in (1, 3, 4):
+            depth = depth[..., 0]
 
     else:
-        # fallback (png/jpg)
+        # fallback for PNG/JPG/other image formats
         depth = cv2.imread(path, cv2.IMREAD_UNCHANGED)
-
         if depth is None:
             raise ValueError(f"Failed to load: {path}")
-
         depth = depth.astype(np.float32)
-
-        # if RGB → convert (just in case, although usually it is used for visualization only and should be grayscale)
         if depth.ndim == 3:
             depth = cv2.cvtColor(depth, cv2.COLOR_BGR2GRAY)
 
@@ -150,7 +165,7 @@ def main(args):
             continue
 
         #rgb = load_rgb(rgb_path)
-        gt_depth = load_depth_png(gt_path, args.depth_scale)
+        gt_depth = load_depth_gt(gt_path, args.depth_scale)
         pred_depth = load_pred_depth(pred_path)
 
         if pred_depth.shape != gt_depth.shape:
