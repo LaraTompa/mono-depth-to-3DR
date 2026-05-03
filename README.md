@@ -148,7 +148,8 @@ batch1/
 **Run** (from the ZoeDepth root so `source="local"` resolves correctly):
 ```bash
 cd ~/ZoeDepth
-python ~/mono-depth-to-3DR/models/zoe_depth.py
+export PYTHONPATH=/usr/prakt/s0014/ZoeDepth:$PYTHONPATH
+python /usr/prakt/s0014/mono-depth-to-3DR/models/zoe_depth.py
 ```
 ### Depth Pro 
 
