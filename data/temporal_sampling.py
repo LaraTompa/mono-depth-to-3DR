@@ -17,6 +17,7 @@ class ScanNetTemporalDataset(Dataset):
         root_dir,
         num_frames=6,
         num_samples=700,
+        min_stride=2,
         max_stride=10,
         transform=None,
         max_scenes=None
@@ -24,6 +25,7 @@ class ScanNetTemporalDataset(Dataset):
         self.root_dir = root_dir
         self.num_frames = num_frames
         self.num_samples = num_samples
+        self.min_stride = min_stride
         self.max_stride = max_stride
         self.transform = transform
 
@@ -72,7 +74,7 @@ class ScanNetTemporalDataset(Dataset):
         n_frames = len(frame_ids)
 
         seq_len = self.seq_len
-        stride = random.randint(2, self.max_stride)
+        stride = random.randint(self.min_stride, self.max_stride)
 
         # choose center index safely
         half = seq_len // 2
@@ -140,7 +142,8 @@ class ScanNetTemporalDataset(Dataset):
             "images": torch.stack(images),   # (N, 3, H, W)
             "depths": torch.stack(depths),   # (N, 1, H, W)
             "poses": torch.stack(poses),     # (N, 4, 4)
-            "scene": scene_info["scene"]
+            "scene": scene_info["scene"],
+            "frame_ids": seq_ids             # original frame names e.g. ["0", "15", "30"]
         }
 
 
@@ -166,6 +169,7 @@ if __name__ == "__main__":
         root_dir=ROOT_DIR,
         num_frames=ds_cfg["num_frames"],
         num_samples=ds_cfg["num_samples"],
+        min_stride=ds_cfg["min_stride"],
         max_stride=ds_cfg["max_stride"],
         max_scenes=ds_cfg["max_scenes"],
     )
@@ -195,10 +199,11 @@ if __name__ == "__main__":
         if max_batches is not None and i >= max_batches:
             break
 
-        images = batch["images"]   # (B, N, 3, H, W)
-        depths = batch["depths"]   # (B, N, 1, H, W)
-        poses  = batch["poses"]    # (B, N, 4, 4)
-        scenes = batch["scene"]
+        images   = batch["images"]    # (B, N, 3, H, W)
+        depths   = batch["depths"]    # (B, N, 1, H, W)
+        poses    = batch["poses"]     # (B, N, 4, 4)
+        scenes   = batch["scene"]
+        all_fids = batch["frame_ids"] # list of N-length lists, one per sample
 
         print(f"\nBatch {i + 1}:")
         print(f"  scenes : {list(scenes)}")
@@ -206,36 +211,36 @@ if __name__ == "__main__":
         # save each sample in the batch
         for b, scene_name in enumerate(scenes):
             N = images.shape[1]
+            # frame_ids is collated as a list of N lists (one per position), so transpose
+            fids = [all_fids[f][b] for f in range(N)]
 
             # --- sampled_data: individual frames per sequence ---
             seq_dir = os.path.join(SAMPLE_DIR, f"batch{i+1}_sample{b+1}_{scene_name}")
             rgb_raw_dir = os.path.join(seq_dir, "color")
             dep_raw_dir = os.path.join(seq_dir, "depth")
             pose_dir    = os.path.join(seq_dir, "pose")
+            intr_dir    = os.path.join(seq_dir, "intrinsic")
             os.makedirs(rgb_raw_dir, exist_ok=True)
             os.makedirs(dep_raw_dir, exist_ok=True)
-            os.makedirs(pose_dir,    exist_ok=True)
+            os.makedirs(pose_dir, exist_ok=True)
+            os.makedirs(intr_dir, exist_ok=True)
 
-            # Save camera intrinsics from the source scene.
-            intr_color_src = os.path.join(ROOT_DIR, scene_name, "intrinsics_color.txt")
-            intr_depth_src = os.path.join(ROOT_DIR, scene_name, "intrinsics_depth.txt")
-            intr_color_dst = os.path.join(seq_dir, "intrinsics_color.txt")
-            intr_depth_dst = os.path.join(seq_dir, "intrinsics_depth.txt")
-
-            if os.path.isfile(intr_color_src):
-                shutil.copy2(intr_color_src, intr_color_dst)
-            else:
-                print(f"  warning: missing intrinsics file {intr_color_src}")
-
-            if os.path.isfile(intr_depth_src):
-                shutil.copy2(intr_depth_src, intr_depth_dst)
-            else:
-                print(f"  warning: missing intrinsics file {intr_depth_src}")
+            # Save camera intrinsics — files sit in scene/intrinsic/ subfolder.
+            for intr_filename, intr_dst in [
+                ("intrinsic_color.txt", os.path.join(intr_dir, "intrinsic_color.txt")),
+                ("intrinsic_depth.txt", os.path.join(intr_dir, "intrinsic_depth.txt")),
+            ]:
+                src = os.path.join(ROOT_DIR, scene_name, "intrinsic", intr_filename)
+                if os.path.isfile(src):
+                    shutil.copy2(src, intr_dst)
+                else:
+                    print(f"  warning: could not find {intr_filename} for scene {scene_name}")
 
             for f in range(N):
-                torchvision.utils.save_image(images[b, f], os.path.join(rgb_raw_dir, f"{f:04d}.png"))
-                np.save(os.path.join(dep_raw_dir, f"{f:04d}.npy"), depths[b, f].numpy())
-                np.savetxt(os.path.join(pose_dir, f"{f:04d}.txt"), poses[b, f].numpy())
+                fid = fids[f]
+                torchvision.utils.save_image(images[b, f], os.path.join(rgb_raw_dir, f"{fid}.png"))
+                np.save(os.path.join(dep_raw_dir, f"{fid}.npy"), depths[b, f].numpy())
+                np.savetxt(os.path.join(pose_dir, f"{fid}.txt"), poses[b, f].numpy())
 
             # --- sample_output: visualisation grids ---
             rgb_frames = images[b]          # (N, 3, H, W)
