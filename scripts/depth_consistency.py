@@ -249,7 +249,7 @@ if __name__ == "__main__":
     parser.add_argument("--gt_dir", type=str, required=True, help="Path to GT depth PNGs or .npy/.npz files")
     parser.add_argument("--pred_dir", type=str, required=True, help="Path to predicted depths")
     parser.add_argument("--depth_scale_gt", type=float, default=1000.0,
-                        help="Scale for GT depth (default: 1000 for ScanNet mm→m)")
+                        help="Scale for GT depth in PNG (default: 1000 for ScanNet mm→m)")
     parser.add_argument("--depth_scale_pred", type=float, default=1.0,
                         help="Scale for predicted depth (default: 1.0, e.g, for Depth Pro with outputs in meters)")
 
