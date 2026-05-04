@@ -14,9 +14,9 @@ Predictions are written to:
   <scene_dir>/depth-pro_pred/<frame_stem>.npz
 
 Usage (from inside the depth-pro repo with the venv active):
-  python run_depth_pro.py
-  python run_depth_pro.py --data-dir ~/mono-depth-to-3DR/datasets/sampled_data
-  python run_depth_pro.py --workers 4 --dry-run
+  python ~/mono-depth-to-3DR/models/depth-pro.py
+  python ~/mono-depth-to-3DR/models/depth-pro.py --data-dir ~/mono-depth-to-3DR/datasets/sampled_data
+  python ~/mono-depth-to-3DR/models/depth-pro.py --workers 4 --dry-run
 """
 
 import argparse

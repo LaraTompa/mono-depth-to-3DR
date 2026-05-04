@@ -32,6 +32,7 @@ def load_image(path, as_gray=True):
         img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     else:
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    #print(f"Loaded image {path} with shape {img.shape}")
     return img.astype(np.float32) / 255.0
 
 
@@ -62,6 +63,8 @@ def load_depth(path, scale=1000.0):
     # if RGB depth → convert
     if depth.ndim == 3:
         depth = cv2.cvtColor(depth, cv2.COLOR_BGR2GRAY)
+    
+    #print(f"Loaded depth {path} with shape {depth.shape}, dtype={depth.dtype}, min={depth.min():.3f}, max={depth.max():.3f}")
 
     return depth / scale
 
