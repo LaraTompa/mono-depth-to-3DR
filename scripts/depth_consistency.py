@@ -61,7 +61,7 @@ def load_depth_gt(path, scale):
     return depth / scale
 
 
-def load_pred_depth(path):
+def load_pred_depth(path, scale=1.0):
     if path.endswith(".npz"):
         data = np.load(path)
         for key in ["depth", "pred", "prediction", "arr_0"]:
@@ -76,6 +76,7 @@ def load_pred_depth(path):
             depth = depth[0]
         if depth.ndim == 3 and depth.shape[-1] in (1, 3, 4):
             depth = depth[..., 0]
+        return depth
 
     elif path.endswith(".npy"):
         depth = np.load(path).astype(np.float32)
@@ -84,6 +85,7 @@ def load_pred_depth(path):
             depth = depth[0]
         if depth.ndim == 3 and depth.shape[-1] in (1, 3, 4):
             depth = depth[..., 0]
+        return depth
 
     else:
         # fallback for PNG/JPG/other image formats
@@ -94,7 +96,7 @@ def load_pred_depth(path):
         if depth.ndim == 3:
             depth = cv2.cvtColor(depth, cv2.COLOR_BGR2GRAY)
 
-    return depth
+        return depth / scale
 
 
 def resize_to_match(src, target_shape):
@@ -176,8 +178,8 @@ def main(args):
             continue
 
         #rgb = load_rgb(rgb_path)
-        gt_depth = load_depth_gt(gt_path, args.depth_scale)
-        pred_depth = load_pred_depth(pred_path)
+        gt_depth = load_depth_gt(gt_path, args.depth_scale_gt)
+        pred_depth = load_pred_depth(pred_path, args.depth_scale_pred)
 
         if pred_depth.shape != gt_depth.shape:
             pred_depth = resize_to_match(pred_depth, gt_depth.shape)
@@ -246,8 +248,10 @@ if __name__ == "__main__":
     parser.add_argument("--rgb_dir", type=str, required=True, help="Path to RGB JPG images")
     parser.add_argument("--gt_dir", type=str, required=True, help="Path to GT depth PNGs or .npy/.npz files")
     parser.add_argument("--pred_dir", type=str, required=True, help="Path to predicted depths")
-    parser.add_argument("--depth_scale", type=float, default=1000.0,
+    parser.add_argument("--depth_scale_gt", type=float, default=1000.0,
                         help="Scale for GT depth (default: 1000 for ScanNet mm→m)")
+    parser.add_argument("--depth_scale_pred", type=float, default=1.0,
+                        help="Scale for predicted depth (default: 1.0, e.g, for Depth Pro with outputs in meters)")
 
     args = parser.parse_args()
     main(args)
