@@ -135,7 +135,10 @@ def align_scale(pred, gt, mask):
 # Main
 
 def main(args):
+    #allow rgb files with different extensions (e.g. .png) as long as they match gt/pred names
+    
     rgb_files = sorted(glob(os.path.join(args.rgb_dir, "*.jpg")))
+    rgb_files += sorted(glob(os.path.join(args.rgb_dir, "*.png")))
 
     if len(rgb_files) == 0:
         raise ValueError("No RGB images found.")
@@ -150,7 +153,15 @@ def main(args):
     for rgb_path in rgb_files:
         name = os.path.splitext(os.path.basename(rgb_path))[0]
 
-        gt_path = os.path.join(args.gt_dir, name + ".png")
+
+        #allow gt files with different extensions (e.g. .npy) as long as they match pred names
+
+        gt_path = None
+        for ext in [".png", ".jpg", ".npy", ".npz"]:
+            candidate = os.path.join(args.gt_dir, name + ext)
+            if os.path.exists(candidate):
+                gt_path = candidate
+                break
 
         # support multiple pred formats
         pred_path = None
