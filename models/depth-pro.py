@@ -66,12 +66,19 @@ def run_depth_pro(frame: Path, out_dir: Path, dry_run: bool = False) -> tuple[Pa
     Returns (frame, success, message).
     """
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    # skip if output already exists
+    npz_out = out_dir / f"{frame.stem}.npz"
+    if npz_out.exists():
+        return frame, True, "[SKIPPED] already exists"
+    
     cmd = [
         "depth-pro-run",
         "-i", str(frame),
         "-o", str(out_dir),
         "--skip-display",
     ]
+    
     if dry_run:
         return frame, True, f"[DRY-RUN] would run: {' '.join(cmd)}"
     try:
