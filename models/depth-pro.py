@@ -11,20 +11,23 @@ Expects the following structure under SAMPLED_DATA_DIR:
         intrinsic/
 
 Predictions are written to:
-  <scene_dir>/depth-pro_pred/<frame_stem>.png   (16-bit depth PNG)
+  <scene_dir>/depth-pro_pred/<frame_stem>.npz
 
 Usage (from inside the depth-pro repo with the venv active):
   python run_depth_pro.py
   python run_depth_pro.py --data-dir ~/mono-depth-to-3DR/datasets/sampled_data
-  python run_depth_pro.py --ext png --workers 4 --dry-run
+  python run_depth_pro.py --workers 4 --dry-run
 """
 
 import argparse
 import os
-import subprocess
 import sys
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+import torch
+import numpy as np
+import depth_pro
 
 # Default settings
 
@@ -59,38 +62,46 @@ def color_frames(scene_dir: Path) -> list[Path]:
     return frames
 
 
-def run_depth_pro(frame: Path, out_dir: Path, dry_run: bool = False) -> tuple[Path, bool, str]:
+def run_depth_pro(frame: Path, out_dir: Path, model, transform, dry_run: bool = False) -> tuple[Path, bool, str]:
     """
-    Call the depth-pro CLI for a single frame, keeping only the .npz output.
-    depth-pro-run writes both <stem>.png and <stem>.npz; the PNG is removed.
+    Run Depth Pro inference for a single frame using the Python API.
+    Saves a .npz file with depth and focallength_px to out_dir.
     Returns (frame, success, message).
     """
     out_dir.mkdir(parents=True, exist_ok=True)
-    cmd = [
-        "depth-pro-run",
-        "-i", str(frame),
-        "-o", str(out_dir),
-        "--skip-display",
-    ]
+    npz_out = out_dir / f"{frame.stem}.npz"
+
+    # Skip already processed frames
+    if npz_out.exists():
+        return frame, True, "[SKIPPED] already exists"
+
     if dry_run:
-        return frame, True, f"[DRY-RUN] would run: {' '.join(cmd)}"
+        return frame, True, f"[DRY-RUN] would process: {frame}"
+
     try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        # Remove the visualisation PNG, keep only the .npz
-        png_out = out_dir / f"{frame.stem}.png"
-        if png_out.exists():
-            png_out.unlink()
-        return frame, True, result.stdout.strip()
-    except subprocess.CalledProcessError as exc:
-        return frame, False, exc.stderr.strip()
+        # Load and preprocess image
+        image, _, f_px = depth_pro.load_rgb(frame)
+        image = transform(image)
+        if torch.cuda.is_available():
+            image = image.cuda()
+
+        # Run inference
+        with torch.no_grad():
+            prediction = model.infer(image, f_px=f_px)
+
+        depth = prediction["depth"].cpu().numpy()            # Depth in [m]
+        focallength_px = prediction["focallength_px"].cpu().numpy()
+
+        # Save as .npz (same as CLI output)
+        np.savez(npz_out, depth=depth, focallength_px=focallength_px)
+
+        return frame, True, f"Saved: {npz_out}"
+
+    except Exception as exc:
+        return frame, False, str(exc)
 
 
-def process_scene(scene_dir: Path, workers: int, dry_run: bool) -> dict:
+def process_scene(scene_dir: Path, model, transform, workers: int, dry_run: bool) -> dict:
     """Process all frames in one scene and return a summary dict."""
     frames = color_frames(scene_dir)
     out_dir = scene_dir / OUTPUT_SUBDIR
@@ -101,7 +112,7 @@ def process_scene(scene_dir: Path, workers: int, dry_run: bool) -> dict:
     ok = fail = 0
     errors = []
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = {pool.submit(run_depth_pro, f, out_dir, dry_run): f for f in frames}
+        futures = {pool.submit(run_depth_pro, f, out_dir, model, transform, dry_run): f for f in frames}
         for future in as_completed(futures):
             frame, success, msg = future.result()
             if success:
@@ -153,10 +164,20 @@ def main() -> None:
 
     print(f"Found {len(scenes)} scene(s).\n")
 
+    # Load model ONCE here, before processing any scenes
+    print("Loading Depth Pro model...")
+    model, transform = depth_pro.create_model_and_transforms()
+    model.eval()
+    if torch.cuda.is_available():
+        model = model.cuda()
+        print("Running on GPU.\n")
+    else:
+        print("Running on CPU.\n")
+
     totals = {"frames": 0, "ok": 0, "fail": 0}
 
     for i, scene_dir in enumerate(scenes, 1):
-        summary = process_scene(scene_dir, args.workers, args.dry_run)
+        summary = process_scene(scene_dir, model, transform, args.workers, args.dry_run)
         totals["frames"] += summary["frames"]
         totals["ok"] += summary["ok"]
         totals["fail"] += summary["fail"]

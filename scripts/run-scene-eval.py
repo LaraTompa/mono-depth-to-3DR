@@ -85,10 +85,10 @@ def main():
     parser.add_argument("--gt_depth_dir", required=True)
 
     # formats
-    parser.add_argument("--rgb_ext", default="jpg")
+    parser.add_argument("--rgb_ext", default="png")
     parser.add_argument("--depth_ext", default="npz")
     parser.add_argument("--pose_ext", default="txt")
-    parser.add_argument("--gt_depth_ext", default="png")
+    parser.add_argument("--gt_depth_ext", default="npy")
 
     # settings
     parser.add_argument("--depth_scale", type=float, default=1.0)
