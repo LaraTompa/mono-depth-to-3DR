@@ -161,6 +161,9 @@ def run_scene_eval(scene_path, args):
     pose_dir      = os.path.join(scene_path, "pose")
     gt_depth_dir  = os.path.join(scene_path, "depth")
     intrinsics    = os.path.join(scene_path, "intrinsic", "intrinsic_color.txt")
+    #change momentarily to support aligned pred depth folder structure, but may want to unify later
+    #folder is aligned_zoe-depth_pred for example 
+    #pred_depth_dir = os.path.join(scene_path, f"aligned_{args.model}_pred")
     pred_depth_dir = os.path.join(scene_path, f"{args.model}_pred")
 
     # Validate required paths
