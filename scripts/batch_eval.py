@@ -161,10 +161,9 @@ def run_scene_eval(scene_path, args):
     pose_dir      = os.path.join(scene_path, "pose")
     gt_depth_dir  = os.path.join(scene_path, "depth")
     intrinsics    = os.path.join(scene_path, "intrinsic", "intrinsic_color.txt")
-    #change momentarily to support aligned pred depth folder structure, but may want to unify later
-    #folder is aligned_zoe-depth_pred for example 
-    #pred_depth_dir = os.path.join(scene_path, f"aligned_{args.model}_pred")
-    pred_depth_dir = os.path.join(scene_path, f"{args.model}_pred")
+
+    pred_depth_dir = os.path.join(scene_path, f"{args.model}_aligned") if args.align else os.path.join(scene_path, f"{args.model}_pred")
+
 
     # Validate required paths
     for d in [rgb_dir, pose_dir, gt_depth_dir, pred_depth_dir]:
@@ -433,6 +432,7 @@ def main():
     parser.add_argument("--depth_scale", type=float, default=1.0)
     parser.add_argument("--cam_to_world", action="store_true")
     parser.add_argument("--window", type=int, default=1)
+    parser.add_argument("--align", action="store_true", help="Use aligned predictions for evaluation")
 
     # New: print raw subprocess output when parsing returns None
     parser.add_argument("--debug", action="store_true",
