@@ -6,31 +6,28 @@ import cv2
 
 def find_scenes_in_batches(sampled_data_dir, max_batches=None):
     """
-    Find all scene folders organized as:
-    sampled_data/batch#/sample#/scene####_##/
-    Returns list of tuples: (batch_name, sample_name, scene_name, scene_path)
+    (Rewritten as a generator) Yield scene tuples instead of building a list:
+    yields (batch_name, sample_name, scene_name, scene_path)
     """
     import glob
-    scenes = []
+    sampled_data_dir = os.path.expanduser(sampled_data_dir)
     batch_dirs = sorted(glob.glob(os.path.join(sampled_data_dir, "batch*")))
-    
+
     if max_batches:
         batch_dirs = batch_dirs[:max_batches]
-    
+
     for batch_dir in batch_dirs:
         batch_name = os.path.basename(batch_dir)
         sample_dirs = sorted(glob.glob(os.path.join(batch_dir, "sample*")))
-        
+
         for sample_dir in sample_dirs:
             sample_name = os.path.basename(sample_dir)
             scene_dirs = [d for d in glob.glob(os.path.join(sample_dir, "*"))
                          if os.path.isdir(d) and os.path.basename(d).startswith("scene")]
-            
+
             for scene_dir in scene_dirs:
                 scene_name = os.path.basename(scene_dir)
-                scenes.append((batch_name, sample_name, scene_name, scene_dir))
-    
-    return scenes
+                yield (batch_name, sample_name, scene_name, scene_dir)
 
 def align_scale(pred, gt, mask):
     scale = np.median(gt[mask]) / (np.median(pred[mask]) + EPS)
@@ -83,7 +80,7 @@ EPS = 1e-8
 def main():
     import argparse
     import glob
-    
+
     parser = argparse.ArgumentParser(
         description="Batch align predicted depths to GT depths (median scaling) for all scenes in sampled_data")
     parser.add_argument("--sampled_data_dir", type=str, default="datasets/sampled_data",
@@ -102,39 +99,44 @@ def main():
 
     sampled_data_dir = os.path.expanduser(args.sampled_data_dir)
     models = [m.strip() for m in args.models.split(",") if m.strip()]
-    
+
     print(f"\n🔍 Searching for scenes in: {sampled_data_dir}")
-    scenes = find_scenes_in_batches(sampled_data_dir, args.max_batches)
-    print(f"✓ Found {len(scenes)} scenes")
-    print(f"✓ Models to align: {', '.join(models)}\n")
+    # Do NOT collect all scenes in memory; iterate the generator
+    scene_iter = find_scenes_in_batches(sampled_data_dir, args.max_batches)
 
-    if not scenes:
-        print(" Warning: No scenes found! Check directory structure.")
-        return
-
+    # We cannot know total easily without scanning, so print streaming status.
+    print(f"✓ Processing scenes (streaming)...\n")
     total_aligned = 0
     total_failed = 0
+    idx = 0
 
-    for idx, (batch, sample, scene, scene_path) in enumerate(scenes, 1):
-        print(f"[{idx}/{len(scenes)}] {batch}/{sample}/{scene}")
-        
+    for idx, (batch, sample, scene, scene_path) in enumerate(scene_iter, start=1):
+        # lightweight per-scene print only
+        print(f"[{idx}] {batch}/{sample}/{scene}")
+
         gt_dir = os.path.join(scene_path, "depth")
         if not os.path.exists(gt_dir):
-            print(f" Warning:  Missing GT depth directory, skipping")
+            # silently skip most missing scenes; print on first few
+            if idx <= 3:
+                print(f"  Warning: Missing GT depth directory, skipping")
+            total_failed += 1
             continue
 
         # Get GT file stems
         gt_files = sorted(glob.glob(os.path.join(gt_dir, "*.npy")))
         if not gt_files:
-            print(f"  Warning  No GT .npy files found, skipping")
+            if idx <= 3:
+                print(f"  Warning: No GT .npy files found, skipping")
+            total_failed += 1
             continue
-        
+
         gt_by_stem = {os.path.splitext(os.path.basename(f))[0]: f for f in gt_files}
 
         for model in models:
             pred_dir = os.path.join(scene_path, f"{model}_pred")
             if not os.path.exists(pred_dir):
-                print(f" Warning:  Missing {model}_pred directory, skipping model")
+                if idx <= 3:
+                    print(f"  Warning: Missing {model}_pred directory, skipping model")
                 continue
 
             out_dir = os.path.join(scene_path, f"{model}_aligned")
@@ -151,14 +153,15 @@ def main():
                 pred_scale = 1.0
                 pred_exts = ["npz", "npy", "png"]
 
-            # Find prediction files
+            # Find prediction files (no heavy memory usage)
             pred_files = []
             for ext in pred_exts:
                 pred_files.extend(glob.glob(os.path.join(pred_dir, f"*.{ext}")))
             pred_files = sorted(pred_files)
 
             if not pred_files:
-                print(f"  Warning:  No {model} prediction files found")
+                if idx <= 3:
+                    print(f"  Warning: No {model} prediction files found")
                 continue
 
             scene_success = 0
@@ -166,20 +169,21 @@ def main():
 
             for pred_path in pred_files:
                 stem = os.path.splitext(os.path.basename(pred_path))[0]
-                
+
                 # Find matching GT file
                 if stem not in gt_by_stem:
                     scene_failed += 1
                     continue
-                
+
                 gt_path = gt_by_stem[stem]
 
                 try:
                     pred_depth = load_depth(pred_path, scale=pred_scale)
                     gt_depth = load_depth(gt_path, scale=args.gt_scale)
                 except Exception as e:
-                    if idx <= 3:  # Only print details for first few scenes
-                        print(f"   Warning:  Failed to load {stem}: {e}")
+                    # keep output light for large runs
+                    if idx <= 3:
+                        print(f"   Warning: Failed to load {stem}: {e}")
                     scene_failed += 1
                     continue
 
@@ -211,8 +215,9 @@ def main():
             total_aligned += scene_success
             total_failed += scene_failed
 
+    # final summary (idx is total processed)
     print("\n" + "=" * 60)
-    print(f"Batch alignment complete!")
+    print(f"Batch alignment complete! Scenes processed: {idx}")
     print(f"   Total aligned: {total_aligned}")
     print(f"   Total failed:  {total_failed}")
     print("=" * 60 + "\n")
