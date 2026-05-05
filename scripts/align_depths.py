@@ -2,12 +2,41 @@ import numpy as np
 import os
 import cv2
 
-#Write a script to compute median scaling factor to align predicted depth to GT depth, using only valid pixels defined by the mask
+#Script to compute median scaling factor to align predicted depth to GT depth, using only valid pixels defined by the mask
+
+def find_scenes_in_batches(sampled_data_dir, max_batches=None):
+    """
+    Find all scene folders organized as:
+    sampled_data/batch#/sample#/scene####_##/
+    Returns list of tuples: (batch_name, sample_name, scene_name, scene_path)
+    """
+    import glob
+    scenes = []
+    batch_dirs = sorted(glob.glob(os.path.join(sampled_data_dir, "batch*")))
+    
+    if max_batches:
+        batch_dirs = batch_dirs[:max_batches]
+    
+    for batch_dir in batch_dirs:
+        batch_name = os.path.basename(batch_dir)
+        sample_dirs = sorted(glob.glob(os.path.join(batch_dir, "sample*")))
+        
+        for sample_dir in sample_dirs:
+            sample_name = os.path.basename(sample_dir)
+            scene_dirs = [d for d in glob.glob(os.path.join(sample_dir, "*"))
+                         if os.path.isdir(d) and os.path.basename(d).startswith("scene")]
+            
+            for scene_dir in scene_dirs:
+                scene_name = os.path.basename(scene_dir)
+                scenes.append((batch_name, sample_name, scene_name, scene_dir))
+    
+    return scenes
+
 def align_scale(pred, gt, mask):
     scale = np.median(gt[mask]) / (np.median(pred[mask]) + EPS)
     return pred * scale
 
-def load_depth_gt(path, scale):
+def load_depth(path, scale):
     path = os.path.expanduser(path)
     if not os.path.exists(path):
         raise FileNotFoundError(f"Depth file not found: {path}")
@@ -53,76 +82,141 @@ EPS = 1e-8
 
 def main():
     import argparse
+    import glob
+    
     parser = argparse.ArgumentParser(
-        description="Align predicted depths to GT depths (median scaling) for all matching filenames in directories")
-    parser.add_argument("--pred_dir", type=str, required=True, help="Directory of predicted depth files")
-    parser.add_argument("--gt_dir",   type=str, required=True, help="Directory of GT depth files")
-    parser.add_argument("--out_dir",  type=str, default=None, help="Directory to write aligned predictions (default: pred_dir/_aligned)")
-    parser.add_argument("--pred_scale", type=float, default=1.0, help="Scale to apply when loading predicted depth files (image-based depths)")
-    parser.add_argument("--gt_scale",   type=float, default=1.0, help="Scale to apply when loading GT depth files (image-based depths)")
-    parser.add_argument("--exts", type=str, default="npy,npz,png,jpg,jpeg", help="Comma-separated extensions to consider (by priority)")
+        description="Batch align predicted depths to GT depths (median scaling) for all scenes in sampled_data")
+    parser.add_argument("--sampled_data_dir", type=str, default="datasets/sampled_data",
+                        help="Root directory containing batch*/sample*/scene*/ folders")
+    parser.add_argument("--models", type=str, default="depth-pro,zoe-depth",
+                        help="Comma-separated model names (e.g., depth-pro,zoe-depth)")
+    parser.add_argument("--max_batches", type=int, default=None,
+                        help="Limit number of batches to process (default: all)")
+    parser.add_argument("--pred_scale_depth_pro", type=float, default=1.0,
+                        help="Scale for depth-pro predictions (default: 1.0, already in meters)")
+    parser.add_argument("--pred_scale_zoe_depth", type=float, default=1000.0,
+                        help="Scale for zoe-depth predictions (default: 1000.0, PNG in mm)")
+    parser.add_argument("--gt_scale", type=float, default=1.0,
+                        help="Scale for GT depth files (default: 1.0, .npy in meters)")
     args = parser.parse_args()
 
-    pred_dir = os.path.expanduser(args.pred_dir)
-    gt_dir = os.path.expanduser(args.gt_dir)
-    out_dir = os.path.expanduser(args.out_dir) if args.out_dir else os.path.join(pred_dir, "_aligned")
-    os.makedirs(out_dir, exist_ok=True)
+    sampled_data_dir = os.path.expanduser(args.sampled_data_dir)
+    models = [m.strip() for m in args.models.split(",") if m.strip()]
+    
+    print(f"\n🔍 Searching for scenes in: {sampled_data_dir}")
+    scenes = find_scenes_in_batches(sampled_data_dir, args.max_batches)
+    print(f"✓ Found {len(scenes)} scenes")
+    print(f"✓ Models to align: {', '.join(models)}\n")
 
-    exts = [e.strip().lower() for e in args.exts.split(",") if e.strip()]
-    pred_files = sorted([f for f in os.listdir(pred_dir) if os.path.splitext(f)[1].lower().lstrip('.') in exts])
-
-    if not pred_files:
-        print(f"No prediction files found in {pred_dir} matching extensions: {exts}")
+    if not scenes:
+        print(" Warning: No scenes found! Check directory structure.")
         return
 
-    # Build GT lookup by stem -> filename
-    gt_files = [f for f in os.listdir(gt_dir) if os.path.splitext(f)[1].lower().lstrip('.') in exts]
-    gt_by_stem = {}
-    for g in gt_files:
-        stem = os.path.splitext(g)[0]
-        gt_by_stem.setdefault(stem, []).append(g)
+    total_aligned = 0
+    total_failed = 0
 
-    for pred_fname in pred_files:
-        stem = os.path.splitext(pred_fname)[0]
-        pred_path = os.path.join(pred_dir, pred_fname)
-
-        # Find GT file with same stem (prefer exact same ext order)
-        candidates = gt_by_stem.get(stem, [])
-        if not candidates:
-            print(f"GT file not found for {pred_fname}, skipping...")
-            continue
-        # pick first candidate
-        gt_fname = candidates[0]
-        gt_path = os.path.join(gt_dir, gt_fname)
-
-        try:
-            pred_depth = load_depth_gt(pred_path, scale=args.pred_scale)
-            gt_depth   = load_depth_gt(gt_path,   scale=args.gt_scale)
-        except Exception as e:
-            print(f"Failed to load {pred_fname} or GT {gt_fname}: {e}")
+    for idx, (batch, sample, scene, scene_path) in enumerate(scenes, 1):
+        print(f"[{idx}/{len(scenes)}] {batch}/{sample}/{scene}")
+        
+        gt_dir = os.path.join(scene_path, "depth")
+        if not os.path.exists(gt_dir):
+            print(f" Warning:  Missing GT depth directory, skipping")
             continue
 
-        mask = gt_depth > 0
-        if not np.any(mask):
-            print(f"No valid GT pixels for {gt_fname}, skipping...")
+        # Get GT file stems
+        gt_files = sorted(glob.glob(os.path.join(gt_dir, "*.npy")))
+        if not gt_files:
+            print(f"  Warning  No GT .npy files found, skipping")
             continue
+        
+        gt_by_stem = {os.path.splitext(os.path.basename(f))[0]: f for f in gt_files}
 
-        # Resize predicted depth to match GT if needed
-        if pred_depth.shape != gt_depth.shape:
-            print(f"Resizing predicted depth {pred_fname} {pred_depth.shape} -> GT {gt_fname} {gt_depth.shape}")
-            pred_depth = cv2.resize(pred_depth, (gt_depth.shape[1], gt_depth.shape[0]), interpolation=cv2.INTER_NEAREST)
+        for model in models:
+            pred_dir = os.path.join(scene_path, f"{model}_pred")
+            if not os.path.exists(pred_dir):
+                print(f" Warning:  Missing {model}_pred directory, skipping model")
+                continue
 
-        # compute scale and align
-        median_gt = np.median(gt_depth[mask])
-        median_pred = np.median(pred_depth[mask])
-        scale_factor = median_gt / (median_pred + EPS)
-        aligned_pred = pred_depth * scale_factor
+            out_dir = os.path.join(scene_path, f"{model}_aligned")
+            os.makedirs(out_dir, exist_ok=True)
 
-        out_name = f"{stem}.npy"
-        out_path = os.path.join(out_dir, out_name)
-        np.save(out_path, aligned_pred.astype(np.float32))
+            # Determine pred_scale based on model
+            if model == "depth-pro":
+                pred_scale = args.pred_scale_depth_pro
+                pred_exts = ["npz"]
+            elif model == "zoe-depth":
+                pred_scale = args.pred_scale_zoe_depth
+                pred_exts = ["png"]
+            else:
+                pred_scale = 1.0
+                pred_exts = ["npz", "npy", "png"]
 
-        print(f"Aligned {pred_fname} -> {out_name} (scale={scale_factor:.6f})")
+            # Find prediction files
+            pred_files = []
+            for ext in pred_exts:
+                pred_files.extend(glob.glob(os.path.join(pred_dir, f"*.{ext}")))
+            pred_files = sorted(pred_files)
+
+            if not pred_files:
+                print(f"  Warning:  No {model} prediction files found")
+                continue
+
+            scene_success = 0
+            scene_failed = 0
+
+            for pred_path in pred_files:
+                stem = os.path.splitext(os.path.basename(pred_path))[0]
+                
+                # Find matching GT file
+                if stem not in gt_by_stem:
+                    scene_failed += 1
+                    continue
+                
+                gt_path = gt_by_stem[stem]
+
+                try:
+                    pred_depth = load_depth(pred_path, scale=pred_scale)
+                    gt_depth = load_depth(gt_path, scale=args.gt_scale)
+                except Exception as e:
+                    if idx <= 3:  # Only print details for first few scenes
+                        print(f"   Warning:  Failed to load {stem}: {e}")
+                    scene_failed += 1
+                    continue
+
+                mask = gt_depth > 0
+                if not np.any(mask):
+                    scene_failed += 1
+                    continue
+
+                # Resize if needed
+                if pred_depth.shape != gt_depth.shape:
+                    pred_depth = cv2.resize(
+                        pred_depth,
+                        (gt_depth.shape[1], gt_depth.shape[0]),
+                        interpolation=cv2.INTER_NEAREST
+                    )
+
+                # Align
+                median_gt = np.median(gt_depth[mask])
+                median_pred = np.median(pred_depth[mask])
+                scale_factor = median_gt / (median_pred + EPS)
+                aligned_pred = pred_depth * scale_factor
+
+                # Save as .npy with same stem
+                out_path = os.path.join(out_dir, f"{stem}.npy")
+                np.save(out_path, aligned_pred.astype(np.float32))
+                scene_success += 1
+
+            print(f"  ✓ {model}: aligned {scene_success}/{len(pred_files)} frames")
+            total_aligned += scene_success
+            total_failed += scene_failed
+
+    print("\n" + "=" * 60)
+    print(f"Batch alignment complete!")
+    print(f"   Total aligned: {total_aligned}")
+    print(f"   Total failed:  {total_failed}")
+    print("=" * 60 + "\n")
+
 
 if __name__ == "__main__":
     main()
