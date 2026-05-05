@@ -276,7 +276,7 @@ def run_scene_eval(scene_path, args):
             pair_tasks.append((photo_cmd, i, j, si, sj))
 
     # Process pairs in parallel (4 workers = 4 concurrent GPU processes)
-    max_workers = 2
+    max_workers = 4
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = [
             executor.submit(run_photometric_pair, cmd, i, j, si, sj, args)
