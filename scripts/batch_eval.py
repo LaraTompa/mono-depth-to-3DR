@@ -8,6 +8,10 @@ import re
 from pathlib import Path
 import matplotlib.pyplot as plt
 import seaborn as sns
+import concurrent
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
+
 
 
 def find_scenes_in_batches(sampled_data_dir, max_batches=None):
@@ -127,6 +131,17 @@ def parse_depth_consistency_output(output: str) -> dict:
 
     return {}
 
+def run_photometric_pair(photo_cmd, i, j, si, sj, args):
+    """Run one photometric pair and return (i, j, ssim, l2)."""
+    try:
+        photo_result = subprocess.run(photo_cmd, capture_output=True, text=True, timeout=60)
+        photo_output = photo_result.stdout + photo_result.stderr
+        ssim, l2 = parse_photometric_output(photo_output, debug=args.debug)
+        return (i, j, si, sj, ssim, l2, None)
+    except subprocess.TimeoutExpired:
+        return (i, j, si, sj, None, None, "timeout")
+    except Exception as e:
+        return (i, j, si, sj, None, None, str(e))
 
 def parse_photometric_output(output, debug=False):
     """Parse photometric consistency output for SSIM and L2 metrics."""
@@ -235,10 +250,11 @@ def run_scene_eval(scene_path, args):
 
     #print(f"      Matched {n} frames, window={args.window}")
 
+    # Build list of all pairs to process
+    pair_tasks = []
     for i in range(n):
         for j in range(i + 1, min(i + 1 + args.window, n)):
             si, sj = common_stems[i], common_stems[j]
-
             photo_cmd = [
                 "python3", "scripts/photometric_consistency.py",
                 "--img1",      rgb_map[si],
@@ -254,23 +270,29 @@ def run_scene_eval(scene_path, args):
                 photo_cmd.append("--cam_to_world")
             else:
                 photo_cmd.append("--world_to_cam")
+            
+            pair_tasks.append((photo_cmd, i, j, si, sj))
 
-            try:
-                photo_result = subprocess.run(photo_cmd, capture_output=True, text=True, timeout=60)
-                photo_output = photo_result.stdout + photo_result.stderr
-                ssim, l2 = parse_photometric_output(photo_output, debug=args.debug)
-
-                if ssim is not None and l2 is not None:
-                    results['photometric_pairs'].append((ssim, l2))
-                elif args.debug:
-                    print(f" Warning:  Pair {i}→{j} ({si}→{sj}): parse returned None")
-
-            except subprocess.TimeoutExpired:
-                if args.debug:
+    # Process pairs in parallel (4 workers = 4 concurrent GPU processes)
+    max_workers = 2
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [
+            executor.submit(run_photometric_pair, cmd, i, j, si, sj, args)
+            for cmd, i, j, si, sj in pair_tasks
+        ]
+        
+        for future in as_completed(futures):
+            i, j, si, sj, ssim, l2, error = future.result()
+            
+            if ssim is not None and l2 is not None:
+                results['photometric_pairs'].append((ssim, l2))
+            elif args.debug:
+                if error == "timeout":
                     print(f" Warning:  Pair {i}→{j} timed out")
-            except Exception as e:
-                if args.debug:
-                    print(f" Warning:  Pair {i}→{j} failed: {e}")
+                elif error:
+                    print(f" Warning:  Pair {i}→{j} failed: {error}")
+                else:
+                    print(f" Warning:  Pair {i}→{j} ({si}→{sj}): parse returned None")
 
     # Print concise one-line summary
     valid = results['photometric_pairs']
