@@ -190,7 +190,9 @@ def main(args):
             print(f"Skipping {name} (no valid depth)")
             continue
 
-        #pred_depth = align_scale(pred_depth, gt_depth, mask) # optional scale, only needed for relative MDEs such as MoGe
+        #allow only if specified
+        if args.align_scale:
+            pred_depth = align_scale(pred_depth, gt_depth, mask) # optional scale, only needed for relative MDEs such as MoGe
 
         d_metrics = depth_metrics(pred_depth, gt_depth, mask)
 
@@ -249,9 +251,11 @@ if __name__ == "__main__":
     parser.add_argument("--gt_dir", type=str, required=True, help="Path to GT depth PNGs or .npy/.npz files")
     parser.add_argument("--pred_dir", type=str, required=True, help="Path to predicted depths")
     parser.add_argument("--depth_scale_gt", type=float, default=1000.0,
-                        help="Scale for GT depth (default: 1000 for ScanNet mm→m)")
+                        help="Scale for GT depth in PNG (default: 1000 for ScanNet mm→m)")
     parser.add_argument("--depth_scale_pred", type=float, default=1.0,
                         help="Scale for predicted depth (default: 1.0, e.g, for Depth Pro with outputs in meters)")
+    parser.add_argument("--align_scale", action="store_true",
+                        help="Align scale of predictions to GT using median scaling (useful for relative MDEs like MoGe)")
 
     args = parser.parse_args()
     main(args)
