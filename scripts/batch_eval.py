@@ -161,10 +161,9 @@ def run_scene_eval(scene_path, args):
     pose_dir      = os.path.join(scene_path, "pose")
     gt_depth_dir  = os.path.join(scene_path, "depth")
     intrinsics    = os.path.join(scene_path, "intrinsic", "intrinsic_color.txt")
-    #change momentarily to support aligned pred depth folder structure, but may want to unify later
-    #folder is aligned_zoe-depth_pred for example 
-    #pred_depth_dir = os.path.join(scene_path, f"aligned_{args.model}_pred")
-    pred_depth_dir = os.path.join(scene_path, f"{args.model}_pred")
+
+    pred_depth_dir = os.path.join(scene_path, f"{args.model}_aligned") if args.align else os.path.join(scene_path, f"{args.model}_pred")
+
 
     # Validate required paths
     for d in [rgb_dir, pose_dir, gt_depth_dir, pred_depth_dir]:
@@ -216,6 +215,8 @@ def run_scene_eval(scene_path, args):
     rgb_files        = sorted_files(rgb_dir, args.rgb_ext)
     pose_files       = sorted_files(pose_dir, args.pose_ext)
     pred_depth_files = sorted_files(pred_depth_dir, args.depth_ext)
+    # also collect all GT depth files (any extension) and map by stem
+    gt_depth_files = sorted(glob.glob(os.path.join(gt_depth_dir, "*")))
 
     # Stem-based matching so mismatched counts don't silently misalign
     def stem(p):
@@ -224,8 +225,9 @@ def run_scene_eval(scene_path, args):
     rgb_map  = {stem(p): p for p in rgb_files}
     pose_map = {stem(p): p for p in pose_files}
     pred_map = {stem(p): p for p in pred_depth_files}
+    gt_map   = {stem(p): p for p in gt_depth_files}
 
-    common_stems = sorted(set(rgb_map) & set(pose_map) & set(pred_map))
+    common_stems = sorted(set(rgb_map) & set(pose_map) & set(pred_map) & set(gt_map))
     n = len(common_stems)
 
     if n < 2:
@@ -433,6 +435,7 @@ def main():
     parser.add_argument("--depth_scale", type=float, default=1.0)
     parser.add_argument("--cam_to_world", action="store_true")
     parser.add_argument("--window", type=int, default=1)
+    parser.add_argument("--align", action="store_true", help="Use aligned predictions for evaluation")
 
     # New: print raw subprocess output when parsing returns None
     parser.add_argument("--debug", action="store_true",
