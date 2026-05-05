@@ -215,6 +215,8 @@ def run_scene_eval(scene_path, args):
     rgb_files        = sorted_files(rgb_dir, args.rgb_ext)
     pose_files       = sorted_files(pose_dir, args.pose_ext)
     pred_depth_files = sorted_files(pred_depth_dir, args.depth_ext)
+    # also collect all GT depth files (any extension) and map by stem
+    gt_depth_files = sorted(glob.glob(os.path.join(gt_depth_dir, "*")))
 
     # Stem-based matching so mismatched counts don't silently misalign
     def stem(p):
@@ -223,8 +225,9 @@ def run_scene_eval(scene_path, args):
     rgb_map  = {stem(p): p for p in rgb_files}
     pose_map = {stem(p): p for p in pose_files}
     pred_map = {stem(p): p for p in pred_depth_files}
+    gt_map   = {stem(p): p for p in gt_depth_files}
 
-    common_stems = sorted(set(rgb_map) & set(pose_map) & set(pred_map))
+    common_stems = sorted(set(rgb_map) & set(pose_map) & set(pred_map) & set(gt_map))
     n = len(common_stems)
 
     if n < 2:
