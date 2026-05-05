@@ -174,6 +174,68 @@ datasets/sampled_data/
     intrinsic/
 ```
 
+## Batch Evaluation
+
+`scripts/batch_eval.py` evaluates depth consistency and photometric consistency across all sampled scenes in batch.
+
+**Typical usage:**
+
+```bash
+python3 scripts/batch_eval.py \
+  --sampled_data_dir datasets/sampled_data \
+  --output_dir results/batch_eval \
+  --model depth-pro \
+  --rgb_ext png \
+  --depth_ext npz \
+  --pose_ext txt \
+  --depth_scale 1.0 \
+  --cam_to_world \
+  --window 1 \
+  --max_batches 10
+```
+
+**Arguments:**
+
+| Argument | Description | Default |
+|---|---|---|
+| `--sampled_data_dir` | Root directory containing `batch*/sample*/scene*/` folders | `datasets/sampled_data` |
+| `--output_dir` | Directory to save CSV results and visualizations | `results/batch_eval` |
+| `--model` | Depth prediction model (`depth-pro` or `zoe-depth`) | `depth-pro` |
+| `--rgb_ext` | RGB image extension | `jpg` |
+| `--depth_ext` | Depth file extension (`npz`, `png`, `npy`) | `npz` |
+| `--pose_ext` | Pose file extension | `txt` |
+| `--depth_scale` | Scale factor for depth values (e.g., 1000 for mm→m) | `1.0` |
+| `--cam_to_world` | Flag: poses are camera-to-world (default for ScanNet) | `False` |
+| `--window` | Temporal window for photometric pairs (1 = adjacent frames only) | `1` |
+| `--max_batches` | Limit number of batches to evaluate (None = all) | `None` |
+| `--debug` | Print verbose subprocess output when parsing fails | `False` |
+
+**Output:**
+
+| File | Contents |
+|---|---|
+| `photometric_pairs_detailed.csv` | Per-pair SSIM and L2 metrics for all photometric consistency checks |
+| `scene_metrics_summary.csv` | Per-scene aggregated metrics: depth consistency (RMSE, MAE, δ¹, etc.) and photometric statistics (mean SSIM, L2) |
+| `photometric_boxplots.png` | Box plots of SSIM and L2 distributions across all pairs |
+| `depth_consistency_boxplots.png` | Box plots of depth metrics (RMSE, MAE, AbsRel, δ¹) across all scenes |
+| `overall_statistics.txt` | Summary statistics (mean, std, median, min, max) for all metrics |
+
+**Example with ZoeDepth predictions (16-bit PNG in millimetres):**
+
+```bash
+python3 scripts/batch_eval.py \
+  --sampled_data_dir datasets/sampled_data \
+  --output_dir results/batch_eval_zoe \
+  --model zoe-depth \
+  --rgb_ext png \
+  --depth_ext png \
+  --pose_ext txt \
+  --depth_scale 1000.0 \
+  --cam_to_world \
+  --window 1 \
+  --max_batches 50 \
+```
+
 
 ## References
 1. ScanNet: Angela Dai, Angel X. Chang, Manolis Savva, Maciej Halber, Thomas Funkhouser, Matthias Nießner, "ScanNet: Richly-annotated 3D Reconstructions of Indoor Scenes", arXiv, 2017, url: https://arxiv.org/abs/1702.04405
