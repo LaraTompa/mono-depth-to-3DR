@@ -169,10 +169,12 @@ def run_scene_eval(scene_path, args):
     # Validate required paths
     for d in [rgb_dir, pose_dir, gt_depth_dir, pred_depth_dir]:
         if not os.path.exists(d):
-            print(f"  ⚠️  Missing directory: {d}")
+            if args.debug:
+                print(f" Warning:  Missing directory: {d}")
             return None
     if not os.path.exists(intrinsics):
-        print(f"  ⚠️  Missing intrinsics: {intrinsics}")
+        if args.debug:
+            print(f" Warning:  Missing intrinsics: {intrinsics}")
         return None
 
     results = {
@@ -181,10 +183,9 @@ def run_scene_eval(scene_path, args):
         'photometric_pairs': [],   # list of (ssim, l2) per valid pair — mirrors run-scene-eval.py
     }
 
-    # ------------------------------------------------------------------
-    # 1. Depth consistency
-    # ------------------------------------------------------------------
-    print(f"    Running depth consistency...")
+    # Depth consistency
+    #print(f"    Running depth consistency...")
+
     depth_cmd = [
         "python3", "scripts/depth_consistency.py",
         "--rgb_dir", rgb_dir,
@@ -199,16 +200,15 @@ def run_scene_eval(scene_path, args):
             print("      [DEBUG] depth_consistency raw output:")
             print("      " + "\n      ".join(depth_output.splitlines()))
         results['depth_metrics'] = parse_depth_consistency_output(depth_output)
-        if not results['depth_metrics']:
-            print("      ⚠️  Depth metrics parsed empty — check script output above with --debug")
+        if not results['depth_metrics'] and args.debug:
+            print("   Warning: Depth metrics parsed empty — check script output above with --debug")
     except Exception as e:
-        print(f"    ❌ Depth consistency failed: {e}")
+        print(f"   Warning: Depth consistency failed: {e}")
         return None
 
-    # ------------------------------------------------------------------
-    # 2. Photometric consistency — pairwise, identical logic to run-scene-eval.py
-    # ------------------------------------------------------------------
-    print(f"    Running photometric consistency...")
+    # Photometric consistency
+
+    #print(f"    Running photometric consistency...")
 
     def sorted_files(folder, ext):
         return sorted(glob.glob(os.path.join(folder, f"*.{ext}")))
@@ -229,10 +229,11 @@ def run_scene_eval(scene_path, args):
     n = len(common_stems)
 
     if n < 2:
-        print(f"    ⚠️  Not enough matched frames (n={n}, need ≥2) — skipping photometric")
+        if args.debug:
+            print(f" Warning:  Not enough matched frames (n={n}, need ≥2) — skipping photometric")
         return results
 
-    print(f"      Matched {n} frames, window={args.window}")
+    #print(f"      Matched {n} frames, window={args.window}")
 
     for i in range(n):
         for j in range(i + 1, min(i + 1 + args.window, n)):
@@ -261,26 +262,34 @@ def run_scene_eval(scene_path, args):
 
                 if ssim is not None and l2 is not None:
                     results['photometric_pairs'].append((ssim, l2))
-                    print(f"      Pair {i}→{j} ({si}→{sj}): SSIM={ssim:.4f}, L2={l2:.6f}")
-                else:
-                    print(f"      ⚠️  Pair {i}→{j} ({si}→{sj}): parse returned None "
-                          f"(add --debug to see raw output)")
+                elif args.debug:
+                    print(f" Warning:  Pair {i}→{j} ({si}→{sj}): parse returned None")
 
             except subprocess.TimeoutExpired:
-                print(f"      ⚠️  Pair {i}→{j} timed out — skipping")
+                if args.debug:
+                    print(f" Warning:  Pair {i}→{j} timed out")
             except Exception as e:
-                print(f"      ⚠️  Pair {i}→{j} failed: {e}")
+                if args.debug:
+                    print(f" Warning:  Pair {i}→{j} failed: {e}")
 
-    # Scene-level photometric summary (mirrors run-scene-eval.py "FINAL AVERAGES")
+    # Print concise one-line summary
     valid = results['photometric_pairs']
+    depth = results['depth_metrics']
+    
+    summary_parts = []
+    if depth.get('rmse'):
+        summary_parts.append(f"RMSE={depth['rmse']:.3f}")
+    if depth.get('mae'):
+        summary_parts.append(f"MAE={depth['mae']:.3f}")
     if valid:
         mean_ssim = np.mean([s for s, _ in valid])
         mean_l2   = np.mean([l for _, l in valid])
-        print(f"\n    === Scene Photometric Summary ({len(valid)} pairs) ===")
-        print(f"    Mean SSIM: {mean_ssim:.4f}")
-        print(f"    Mean L2:   {mean_l2:.6f}")
-    else:
-        print("    ⚠️  No valid photometric pairs for this scene")
+        summary_parts.append(f"SSIM={mean_ssim:.3f}")
+        summary_parts.append(f"L2={mean_l2:.4f}")
+        summary_parts.append(f"pairs={len(valid)}")
+    
+    if summary_parts:
+        print(f"    ✓ {', '.join(summary_parts)}")
 
     return results
 
@@ -297,7 +306,7 @@ def save_results_to_csv(all_results, output_dir):
             for idx, (ssim, l2) in enumerate(result['photometric_pairs']):
                 writer.writerow([result['batch'], result['sample'], result['scene'],
                                  idx, ssim, l2])
-    print(f"\n✅ Per-pair photometric results saved to: {pairs_path}")
+    print(f"\n Per-pair photometric results saved to: {pairs_path}")
 
     # --- Scene-level summary CSV ---
     summary_path = os.path.join(output_dir, "scene_metrics_summary.csv")
@@ -326,7 +335,7 @@ def save_results_to_csv(all_results, output_dir):
                 depth.get('sq_rel'), depth.get('delta1'), depth.get('delta2'), depth.get('delta3'),
                 mean_ssim, std_ssim, mean_l2, std_l2, num_pairs
             ])
-    print(f"✅ Scene summary saved to: {summary_path}")
+    print(f" Scene summary saved to: {summary_path}")
 
 
 def create_visualizations(all_results, output_dir):
@@ -361,7 +370,7 @@ def create_visualizations(all_results, output_dir):
         plt.tight_layout()
         plt.savefig(os.path.join(output_dir, 'photometric_boxplots.png'), dpi=150)
         plt.close()
-        print(f"✅ Saved: photometric_boxplots.png")
+        #print(f"Saved: photometric_boxplots.png")
 
     if rmse_all and mae_all:
         fig, axes = plt.subplots(2, 2, figsize=(14, 10))
@@ -377,7 +386,7 @@ def create_visualizations(all_results, output_dir):
         plt.tight_layout()
         plt.savefig(os.path.join(output_dir, 'depth_consistency_boxplots.png'), dpi=150)
         plt.close()
-        print(f"✅ Saved: depth_consistency_boxplots.png")
+        #print(f"Saved: depth_consistency_boxplots.png")
 
     stats_path = os.path.join(output_dir, 'overall_statistics.txt')
     with open(stats_path, 'w') as f:
@@ -406,7 +415,7 @@ def create_visualizations(all_results, output_dir):
         f.write(f"Total scenes evaluated:          {len(all_results)}\n")
         f.write(f"Total photometric pairs:         {len(ssim_all)}\n")
 
-    print(f"✅ Saved: overall_statistics.txt")
+    print(f" Saved: overall_statistics.txt")
 
 
 def main():
@@ -434,10 +443,10 @@ def main():
 
     print(f"\n🔍 Searching for scenes in: {args.sampled_data_dir}")
     scenes = find_scenes_in_batches(args.sampled_data_dir, args.max_batches)
-    print(f"✅ Found {len(scenes)} scenes\n")
+    print(f" Found {len(scenes)} scenes\n")
 
     if not scenes:
-        print("❌ No scenes found! Check directory structure.")
+        print("No scenes found! Check directory structure.")
         return
 
     all_results = []
@@ -450,21 +459,21 @@ def main():
             result['sample'] = sample
             result['scene']  = scene
             all_results.append(result)
-            print(f"  ✅ Completed")
+            #print(f"Completed")
         else:
-            print(f"  ❌ Failed or skipped")
+            print(f"Failed or skipped")
 
     print("\n" + "=" * 60)
-    print(f"📊 Saving results for {len(all_results)} scenes...")
+    print(f" Saving results for {len(all_results)} scenes...")
 
     if all_results:
         save_results_to_csv(all_results, args.output_dir)
         create_visualizations(all_results, args.output_dir)
-        print(f"\n✅ All results saved to: {args.output_dir}")
+        print(f"\n All results saved to: {args.output_dir}")
     else:
-        print("\n❌ No successful evaluations to save.")
+        print("\n No successful evaluations to save.")
 
-    print("\n🎉 Batch evaluation complete!\n")
+    print("\n Batch evaluation complete!\n")
 
 
 if __name__ == "__main__":
