@@ -9,19 +9,7 @@ from PIL import Image
 from tqdm import tqdm
 
 
-def load_pose(path):
-    return np.loadtxt(path)
-
-
-def load_intrinsics(path):
-    intrinsics = np.loadtxt(path).astype(np.float32)
-    if intrinsics.shape == (4, 4):
-        intrinsics = intrinsics[:3, :3]
-    return intrinsics
-
-
-def load_depth(path):
-    return np.array(Image.open(path)).astype(np.float32) / 1000.0
+from scene import ScanNetScene, load_depth_png
 
 
 class ScanNetGraphDataset(Dataset):
@@ -37,7 +25,7 @@ class ScanNetGraphDataset(Dataset):
         depth_tolerance=0.05,
         max_frame_gap=50,
         transform=None,
-        max_scenes=None
+        max_scenes=None,
     ):
         self.root_dir = root_dir
         self.num_samples = num_samples
@@ -167,56 +155,39 @@ class ScanNetGraphDataset(Dataset):
     def _build_graph(self):
         scene_data = []
 
-        for scene in tqdm(self.scenes, desc="Scenes", unit="scene"):
-            scene_path = os.path.join(self.root_dir, scene)
+        for scene_name in tqdm(self.scenes, desc="Scenes", unit="scene"):
+            scene_path = os.path.join(self.root_dir, scene_name)
+            scene = ScanNetScene(scene_path)
 
-            color_dir = os.path.join(scene_path, "color")
-            depth_dir = os.path.join(scene_path, "depth")
-            pose_dir = os.path.join(scene_path, "pose")
-            intrinsic_path = os.path.join(scene_path, "intrinsic", "intrinsic_depth.txt")
-
-            if not (
-                os.path.isdir(color_dir)
-                and os.path.isdir(depth_dir)
-                and os.path.isdir(pose_dir)
-                and os.path.isfile(intrinsic_path)
-            ):
+            if not scene.is_valid():
                 continue
 
-            frame_ids = sorted([
-                f.split(".")[0] for f in os.listdir(color_dir)
-            ])
-
-            if not frame_ids:
+            if not scene.frame_ids:
                 continue
 
-            poses = {
-                fid: load_pose(os.path.join(pose_dir, f"{fid}.txt"))
-                for fid in frame_ids
-            }
-            world_to_camera = {
-                fid: np.linalg.inv(pose)
-                for fid, pose in poses.items()
-            }
-            # within a scene the camera is fixed; intrinsics are shared across all frames
-            intrinsics = load_intrinsics(intrinsic_path)
-
-            # ScanNet marks missing/invalid poses with inf — drop those frames
-            valid_fids = [
-                fid for fid in frame_ids
-                if np.all(np.isfinite(poses[fid]))
-            ]
+            poses, valid_fids = scene.load_all_poses()
 
             if not valid_fids:
                 continue
+
+            world_to_camera = {
+                fid: np.linalg.inv(pose)
+                for fid, pose in poses.items()
+                if fid in valid_fids
+            }
+            # within a scene the camera is fixed; intrinsics are shared across all frames
+            intrinsics = scene.intrinsics
+
+            color_dir = scene.color_dir
+            depth_dir = scene.depth_dir
 
             depth_cache = {}
 
             # default-arg trick binds depth_dir and depth_cache at definition time,
             # avoiding the classic loop-closure bug
-            def get_depth(fid, _dir=depth_dir, _cache=depth_cache):
+            def get_depth(fid, _scene=scene, _cache=depth_cache):
                 if fid not in _cache:
-                    _cache[fid] = load_depth(os.path.join(_dir, f"{fid}.png"))
+                    _cache[fid] = load_depth_png(_scene.depth_path(fid))
                 return _cache[fid]
 
             # weighted adjacency: graph[fid_i][fid_j] = symmetric overlap score
@@ -247,7 +218,7 @@ class ScanNetGraphDataset(Dataset):
                         pbar.update(1)
 
             scene_data.append({
-                "scene": scene,
+                "scene": scene_name,
                 "color_dir": color_dir,
                 "depth_dir": depth_dir,
                 "intrinsics": intrinsics,  # same camera for every frame in the scene

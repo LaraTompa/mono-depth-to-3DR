@@ -7,14 +7,10 @@ from PIL import Image
 import random
 
 from graph_based_sampling import ScanNetGraphDataset
-
+from scene import ScanNetScene
 
 # Fixed spatial size all frames are resized to before batching
 IMAGE_H, IMAGE_W = 480, 640
-
-
-def load_pose(path):
-    return np.loadtxt(path)
 
 
 class ScanNetTemporalDataset(Dataset):
@@ -26,7 +22,7 @@ class ScanNetTemporalDataset(Dataset):
         min_stride=2,
         max_stride=10,
         transform=None,
-        max_scenes=None
+        max_scenes=None,
     ):
         self.root_dir = root_dir
         self.num_frames = num_frames
@@ -44,28 +40,21 @@ class ScanNetTemporalDataset(Dataset):
 
         self.scene_data = []
 
-        for scene in self.scenes:
-            scene_path = os.path.join(root_dir, scene)
+        for scene_name in self.scenes:
+            scene_path = os.path.join(root_dir, scene_name)
+            scene = ScanNetScene(scene_path)
 
-            color_dir = os.path.join(scene_path, "color")
-            depth_dir = os.path.join(scene_path, "depth")
-            pose_dir = os.path.join(scene_path, "pose")
+            if not scene.is_valid() or not scene.frame_ids:
+                continue
 
-            frame_ids = sorted([
-                f.split(".")[0] for f in os.listdir(color_dir)
-            ])
-
-            poses = {
-                fid: load_pose(os.path.join(pose_dir, f"{fid}.txt"))
-                for fid in frame_ids
-            }
+            poses, valid_fids = scene.load_all_poses()
 
             self.scene_data.append({
-                "scene": scene,
-                "color_dir": color_dir,
-                "depth_dir": depth_dir,
+                "scene": scene_name,
+                "color_dir": scene.color_dir,
+                "depth_dir": scene.depth_dir,
                 "poses": poses,
-                "frame_ids": frame_ids
+                "frame_ids": valid_fids
             })
 
     def resample_seq_len(self):

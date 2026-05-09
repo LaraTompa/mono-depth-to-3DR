@@ -124,17 +124,15 @@ def compute_pixel_consistency(
     """
     H, W = gt_depth_src.shape
 
-    # ── Step 1: project with GT depth ────────────────────────────────────────
+    # Step 1 & 2: GT projection + validity at target
     x_gt, y_gt, valid_gt_proj = project_with_depth(
         gt_depth_src, K, pose_src, pose_tgt, cam_to_world
     )
-
-    # ── Step 2: check GT depth validity at projected position in tgt ─────────
     x_gt_int = np.clip(np.round(x_gt).astype(np.int32), 0, W - 1)
     y_gt_int = np.clip(np.round(y_gt).astype(np.int32), 0, H - 1)
     valid_gt_full = valid_gt_proj & (gt_depth_tgt[y_gt_int, x_gt_int] > 0)
 
-    # ── Step 3: project with predicted depth ─────────────────────────────────
+    # Step 3: predicted-depth projection
     x_pred, y_pred, valid_pred_proj = project_with_depth(
         pred_depth_src, K, pose_src, pose_tgt, cam_to_world
     )
@@ -172,19 +170,15 @@ def main(args):
     pred_depth1 = resize_if_needed(pred_depth1, H, W)
     pred_depth2 = resize_if_needed(pred_depth2, H, W)
 
-    K = load_intrinsics(args.intrinsics)
-
+    K     = load_intrinsics(args.intrinsics)
     pose1 = load_pose(args.pose1)
     pose2 = load_pose(args.pose2)
 
-    print("Running forward pixel consistency (1 → 2)...")
     mae_12, rmse_12, vr_12 = compute_pixel_consistency(
         gt_depth1, pred_depth1, gt_depth2,
         K, pose1, pose2,
         cam_to_world=args.cam_to_world,
     )
-
-    print("Running backward pixel consistency (2 → 1)...")
     mae_21, rmse_21, vr_21 = compute_pixel_consistency(
         gt_depth2, pred_depth2, gt_depth1,
         K, pose2, pose1,
@@ -209,7 +203,7 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Pixel consistency: compare where GT depth vs predicted depth project pixels."
+        description="Pixel consistency: geometric reprojection error between GT and pred depth."
     )
 
     parser.add_argument("--gt_depth1",   required=True, help="GT depth for frame 1")

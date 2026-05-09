@@ -118,12 +118,8 @@ def visualize_warping(img_src, img_tgt, warped, valid, out_path=None):
 
 # Geometry and projections
 
-def project_points(depth, K, pose_src, pose_tgt):
+def project_points(depth, K, pose_src, pose_tgt, cam_to_world=True):
     H, W = depth.shape
-
-    # --- diagnostics ---
-    valid_depth = depth[depth > 0]
-    print(f"  [project_points] depth valid={valid_depth.size}/{depth.size}, min={valid_depth.min():.3f}, max={valid_depth.max():.3f}" if valid_depth.size > 0 else "  [project_points] depth all zeros!")
 
     y, x = np.meshgrid(np.arange(H), np.arange(W), indexing='ij')
 
@@ -132,9 +128,7 @@ def project_points(depth, K, pose_src, pose_tgt):
     xy1 = np.stack([x, y, np.ones_like(x)], axis=-1)
     xyz = (K_inv @ xy1[..., None])[..., 0] * depth[..., None]
 
-    # --- fix: if poses are camera-to-world (most RGB-D datasets) use inv(pose_tgt) @ pose_src
-    # if poses are world-to-camera use: pose_tgt @ inv(pose_src)
-    if args_cam_to_world:
+    if cam_to_world:
         T = np.linalg.inv(pose_tgt) @ pose_src
     else:
         T = pose_tgt @ np.linalg.inv(pose_src)
@@ -150,28 +144,22 @@ def project_points(depth, K, pose_src, pose_tgt):
     x_proj = proj[..., 0] / (z + 1e-6)
     y_proj = proj[..., 1] / (z + 1e-6)
 
-    # --- diagnostics ---
-    print(f"  [project_points] z: min={z.min():.3f}, max={z.max():.3f}, positive={np.sum(z>0)}")
-    print(f"  [project_points] x_proj: [{x_proj.min():.1f}, {x_proj.max():.1f}], y_proj: [{y_proj.min():.1f}, {y_proj.max():.1f}]")
-
     valid = (
         (z > 0) &
-        (depth > 0) &                        # <-- also filter invalid source depth
+        (depth > 0) &
         (x_proj >= 0) & (x_proj < W - 1) &
         (y_proj >= 0) & (y_proj < H - 1)
     )
-
-    print(f"  [project_points] valid pixels: {np.sum(valid)}/{valid.size} ({np.mean(valid):.3f})")
 
     return x_proj.astype(np.float32), y_proj.astype(np.float32), valid
 
 # Metrics
 
-def compute_photometric(img_src, img_tgt, depth, K, pose_src, pose_tgt, visualize=False, vis_out=None):
+def compute_photometric(img_src, img_tgt, depth, K, pose_src, pose_tgt, cam_to_world=True, visualize=False, vis_out=None):
     """
     Warp target → source and compare
     """
-    x_proj, y_proj, valid = project_points(depth, K, pose_src, pose_tgt)
+    x_proj, y_proj, valid = project_points(depth, K, pose_src, pose_tgt, cam_to_world)
 
     if np.sum(valid) < 100:
         return 0.0, float("inf"), 0.0
@@ -211,9 +199,6 @@ def compute_photometric(img_src, img_tgt, depth, K, pose_src, pose_tgt, visualiz
 # Main
 
 def main(args):
-    global args_cam_to_world
-    args_cam_to_world = args.cam_to_world
-
     img1 = load_image(args.img1, as_gray=True)
     img2 = load_image(args.img2, as_gray=True)
 
@@ -225,9 +210,6 @@ def main(args):
 
     if depth2.shape != img2.shape:
         depth2 = cv2.resize(depth2, (img2.shape[1], img2.shape[0]), interpolation=cv2.INTER_NEAREST)
-    
-    #print("img1:", img1.shape) 
-    #print("depth1:", depth1.shape)
 
     K = load_intrinsics(args.intrinsics)
 
@@ -235,10 +217,10 @@ def main(args):
     pose2 = load_pose(args.pose2)
 
     print("Running forward consistency (1 → 2)...")
-    ssim_12, l2_12, vr_12 = compute_photometric(img1, img2, depth1, K, pose1, pose2, visualize=args.visualize, vis_out=args.vis_out_12 if args.visualize else None)
+    ssim_12, l2_12, vr_12 = compute_photometric(img1, img2, depth1, K, pose1, pose2, cam_to_world=args.cam_to_world, visualize=args.visualize, vis_out=args.vis_out_12 if args.visualize else None)
 
     print("Running backward consistency (2 → 1)...")
-    ssim_21, l2_21, vr_21 = compute_photometric(img2, img1, depth2, K, pose2, pose1, visualize=args.visualize, vis_out=args.vis_out_21 if args.visualize else None)
+    ssim_21, l2_21, vr_21 = compute_photometric(img2, img1, depth2, K, pose2, pose1, cam_to_world=args.cam_to_world, visualize=args.visualize, vis_out=args.vis_out_21 if args.visualize else None)
 
     print("\n=== RESULTS ===")
 

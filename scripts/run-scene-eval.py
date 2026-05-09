@@ -19,7 +19,7 @@ def run_cmd(cmd):
 
 def run_depth(args):
     cmd = [
-        "python3", "scripts/depth_consistency.py",
+        "python3", "metrics/depth_consistency.py",
         "--rgb_dir", args.rgb_dir,
         "--gt_dir", args.gt_depth_dir,
         "--pred_dir", args.pred_depth_dir,
@@ -51,7 +51,7 @@ def parse_photometric_output(output):
 
 def run_photometric(args, img1, img2, depth1, depth2, pose1, pose2):
     cmd = [
-        "python3", "scripts/photometric_consistency.py",
+        "python3", "metrics/photometric_consistency.py",
         "--img1", img1,
         "--img2", img2,
         "--depth1", depth1,

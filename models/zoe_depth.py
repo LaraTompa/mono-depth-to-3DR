@@ -3,7 +3,16 @@ import os
 from PIL import Image
 import numpy as np
 import time
-from zoedepth.utils.misc import save_raw_16bit
+import importlib
+
+try:
+    _zoe_misc = importlib.import_module("zoedepth.utils.misc")
+    save_raw_16bit = _zoe_misc.save_raw_16bit
+except Exception:
+    # Fallback to avoid requiring ZoeDepth as an installed Python package.
+    def save_raw_16bit(depth, path):
+        depth_mm = np.clip(depth * 1000.0, 0, 65535).astype(np.uint16)
+        Image.fromarray(depth_mm).save(path)
 
 # ======================
 # Output: depth_pred/{fid}.png (16-bit, millimetres) written next to each color/
@@ -21,7 +30,47 @@ print("Using device:", device)
 # ZoeD_NK works well for mixed indoor/outdoor; ScanNet is indoor so ZoeD_N
 # is also a valid choice if you want indoor-only specialisation.
 # ======================
-model = torch.hub.load(".", "ZoeD_NK", source="local", pretrained=True)
+def load_zoe_model_local():
+    candidates = []
+
+    # 1) If launched from ZoeDepth root
+    candidates.append(os.getcwd())
+
+    # 2) Optional explicit override
+    env_root = os.environ.get("ZOEDEPTH_ROOT")
+    if env_root:
+        candidates.append(os.path.expanduser(env_root))
+
+    # 3) Common default location
+    candidates.append(os.path.expanduser("~/ZoeDepth"))
+
+    tried = []
+    for root in candidates:
+        if not root:
+            continue
+        root = os.path.abspath(root)
+        hubconf = os.path.join(root, "hubconf.py")
+        if not os.path.isfile(hubconf):
+            tried.append(f"{root} (missing hubconf.py)")
+            continue
+        try:
+            print(f"Loading ZoeDepth from: {root}")
+            return torch.hub.load(root, "ZoeD_NK", source="local", pretrained=True)
+        except Exception as e:
+            tried.append(f"{root} ({e})")
+
+    msg = "\n".join(tried) if tried else "No candidate paths checked."
+    raise RuntimeError(
+        "Could not load ZoeDepth locally. Checked:\n"
+        f"{msg}\n\n"
+        "Fix one of these:\n"
+        "1) Run from ZoeDepth root: cd ~/ZoeDepth && python ~/mono-depth-to-3DR/models/zoe_depth.py\n"
+        "2) Set env var: export ZOEDEPTH_ROOT=~/ZoeDepth\n"
+        "3) Ensure ZoeDepth repo contains hubconf.py"
+    )
+
+
+model = load_zoe_model_local()
 model = model.to(device)
 model.eval()
 
