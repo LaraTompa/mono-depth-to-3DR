@@ -317,7 +317,7 @@ def run_scene_eval(scene_path, args):
             pair_tasks.append((photo_cmd, i, j, si, sj))
 
             pixel_cmd = [
-                "python3", "scripts/pixel_consistency.py",
+                "python3", "metrics/pixel_consistency.py",
                 "--gt_depth1",   gt_map[si],
                 "--gt_depth2",   gt_map[sj],
                 "--pred_depth1", pred_map[si],
