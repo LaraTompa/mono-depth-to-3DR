@@ -1,0 +1,156 @@
+"""
+scene.py — Per-scene abstraction for ScanNet.
+
+Provides:
+  - load_pose / load_intrinsics / load_depth_png  (shared I/O helpers)
+  - ScanNetScene                                  (lazy, path-aware scene object)
+"""
+
+import os
+import numpy as np
+from PIL import Image
+
+
+# ---------------------------------------------------------------------------
+# Shared I/O helpers
+# ---------------------------------------------------------------------------
+
+def load_pose(path: str) -> np.ndarray:
+    """Load a 4×4 camera-to-world pose matrix from a text file."""
+    return np.loadtxt(path)
+
+
+def load_intrinsics(path: str) -> np.ndarray:
+    """Load camera intrinsics, returning a 3×3 float32 matrix."""
+    K = np.loadtxt(path).astype(np.float32)
+    if K.shape == (4, 4):
+        K = K[:3, :3]
+    return K
+
+
+def load_depth_png(path: str) -> np.ndarray:
+    """Load a ScanNet uint16 PNG depth map and convert to metres (float32)."""
+    return np.array(Image.open(path)).astype(np.float32) / 1000.0
+
+
+# ---------------------------------------------------------------------------
+# Scene class
+# ---------------------------------------------------------------------------
+
+class ScanNetScene:
+    """
+    Lightweight wrapper around a single ScanNet scene directory.
+
+    Directory layout assumed::
+
+        <scene_path>/
+            color/          {fid}.jpg
+            depth/          {fid}.png
+            pose/           {fid}.txt
+            intrinsic/
+                intrinsic_depth.txt
+                intrinsic_color.txt
+
+    All heavy data is loaded lazily or on explicit request so that the object
+    is cheap to construct during scene discovery.
+    """
+
+    COLOR_EXT = ".jpg"
+    DEPTH_EXT = ".png"
+    POSE_EXT = ".txt"
+    INTRINSIC_FNAME = "intrinsic_depth.txt"
+
+    def __init__(self, scene_path: str):
+        self.scene_path = scene_path
+        self.name = os.path.basename(scene_path)
+
+        self.color_dir = os.path.join(scene_path, "color")
+        self.depth_dir = os.path.join(scene_path, "depth")
+        self.pose_dir = os.path.join(scene_path, "pose")
+        self.intrinsic_dir = os.path.join(scene_path, "intrinsic")
+        self.intrinsic_path = os.path.join(
+            self.intrinsic_dir, self.INTRINSIC_FNAME
+        )
+
+        self._frame_ids: list | None = None
+        self._intrinsics: np.ndarray | None = None
+
+    # ------------------------------------------------------------------
+    # Validity check
+    # ------------------------------------------------------------------
+
+    def is_valid(self) -> bool:
+        """Return True if the scene has all required subdirectories."""
+        return (
+            os.path.isdir(self.color_dir)
+            and os.path.isdir(self.depth_dir)
+            and os.path.isdir(self.pose_dir)
+            and os.path.isfile(self.intrinsic_path)
+        )
+
+    # ------------------------------------------------------------------
+    # Lazy properties
+    # ------------------------------------------------------------------
+
+    @property
+    def frame_ids(self) -> list[str]:
+        """Sorted list of frame IDs derived from files in the color directory."""
+        if self._frame_ids is None:
+            self._frame_ids = sorted(
+                f[: -len(self.COLOR_EXT)]
+                for f in os.listdir(self.color_dir)
+                if f.endswith(self.COLOR_EXT)
+            )
+        return self._frame_ids
+
+    @property
+    def intrinsics(self) -> np.ndarray:
+        """3×3 float32 depth-camera intrinsic matrix (cached after first load)."""
+        if self._intrinsics is None:
+            self._intrinsics = load_intrinsics(self.intrinsic_path)
+        return self._intrinsics
+
+    # ------------------------------------------------------------------
+    # Path helpers
+    # ------------------------------------------------------------------
+
+    def color_path(self, fid: str) -> str:
+        return os.path.join(self.color_dir, f"{fid}{self.COLOR_EXT}")
+
+    def depth_path(self, fid: str) -> str:
+        return os.path.join(self.depth_dir, f"{fid}{self.DEPTH_EXT}")
+
+    def pose_path(self, fid: str) -> str:
+        return os.path.join(self.pose_dir, f"{fid}{self.POSE_EXT}")
+
+    def intrinsic_color_path(self) -> str:
+        return os.path.join(self.intrinsic_dir, "intrinsic_color.txt")
+
+    # ------------------------------------------------------------------
+    # Pose loading
+    # ------------------------------------------------------------------
+
+    def load_all_poses(self) -> tuple[dict, list]:
+        """
+        Load poses for every frame in the scene.
+
+        Returns
+        -------
+        poses : dict[str, np.ndarray]
+            Mapping from frame ID to 4×4 camera-to-world matrix.
+        valid_fids : list[str]
+            Frame IDs whose pose contains no non-finite values.
+            (ScanNet marks missing/failed poses with inf.)
+        """
+        poses = {fid: load_pose(self.pose_path(fid)) for fid in self.frame_ids}
+        valid_fids = [
+            fid for fid in self.frame_ids if np.all(np.isfinite(poses[fid]))
+        ]
+        return poses, valid_fids
+
+    # ------------------------------------------------------------------
+    # Repr
+    # ------------------------------------------------------------------
+
+    def __repr__(self) -> str:
+        return f"ScanNetScene(name={self.name!r}, path={self.scene_path!r})"

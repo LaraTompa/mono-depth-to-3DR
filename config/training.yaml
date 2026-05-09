@@ -1,0 +1,57 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# training.yaml  —  all training hyper-parameters and data configuration
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ---------------------------------------------------------------------------
+# Dataset / scene root
+# ---------------------------------------------------------------------------
+dataset:
+  root_dir: "/storage/group/dataset_mirrors/scannet/scans"
+  # expected layout: root_dir/train/<scenes>  and  root_dir/val/<scenes>
+  sampler_type: "temporal"       # "temporal" | "graph"
+  num_frames: 6                  # frames per sequence
+  num_samples: 700               # virtual epoch length (DataLoader __len__)
+  min_stride: 40
+  max_stride: 90
+  max_scenes: null               # null → use all scenes; int → cap for debugging
+
+# ---------------------------------------------------------------------------
+# DataLoader
+# ---------------------------------------------------------------------------
+loader:
+  batch_size: 8
+  num_workers: 4
+  pin_memory: true
+  drop_last: true
+
+# ---------------------------------------------------------------------------
+# Model / Optimiser / Scheduler / Loss
+# ---------------------------------------------------------------------------
+# (to be filled when losses.py and the model are implemented)
+train:
+  epochs: 50
+  grad_clip: 1.0                 # max gradient norm; null → disabled
+  mixed_precision: true          # torch.cuda.amp
+  accumulate_grad_batches: 1     # gradient accumulation steps
+  val_every: 1                   # validate every N epochs
+  log_every: 50                  # log every N batches
+  seed: 0
+
+# ---------------------------------------------------------------------------
+# Checkpointing
+# ---------------------------------------------------------------------------
+checkpoint:
+  save_dir: "checkpoints/"
+  save_top_k: 3                  # keep the best K checkpoints
+  monitor: "val/abs_rel"         # metric to track for best-model selection
+  mode: "min"                    # "min" | "max"
+  resume: null                   # path to .pt checkpoint to resume from
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+logging:
+  project: "mono-depth-3DR"
+  run_name: null                 # null → auto-generated timestamp
+  use_wandb: false
+  log_dir: "runs/"
