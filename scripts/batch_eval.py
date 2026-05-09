@@ -46,7 +46,7 @@ def find_scenes_in_batches(sampled_data_dir, max_batches=None):
 
 def parse_depth_consistency_output(output: str) -> dict:
     """
-    Parse output from scripts/depth_consistency.py and return a dict with keys:
+    Parse output from metric/depth_consistency.py and return a dict with keys:
       rmse, mae, abs_rel, sq_rel (optional), delta1, delta2, delta3
     """
     output = (output or "").replace("\xa0", " ")
@@ -235,7 +235,7 @@ def run_scene_eval(scene_path, args):
     #print(f"    Running depth consistency...")
 
     depth_cmd = [
-        "python3", "scripts/depth_consistency.py",
+        "python3", "metric/depth_consistency.py",
         "--rgb_dir", rgb_dir,
         "--gt_dir", gt_depth_dir,
         "--pred_dir", pred_depth_dir,
@@ -294,7 +294,7 @@ def run_scene_eval(scene_path, args):
             si, sj = common_stems[i], common_stems[j]
 
             photo_cmd = [
-                "python3", "scripts/photometric_consistency.py",
+                "python3", "metric/photometric_consistency.py",
                 "--img1",      rgb_map[si],
                 "--img2",      rgb_map[sj],
                 "--depth1",    pred_map[si],
@@ -311,9 +311,7 @@ def run_scene_eval(scene_path, args):
             pair_tasks.append((photo_cmd, i, j, si, sj))
 
             pixel_cmd = [
-                "python3", "scripts/pixel_consistency.py",
-                "--img1",        rgb_map[si],
-                "--img2",        rgb_map[sj],
+                "python3", "metric/pixel_consistency.py",
                 "--gt_depth1",   gt_map[si],
                 "--gt_depth2",   gt_map[sj],
                 "--pred_depth1", pred_map[si],
