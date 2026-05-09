@@ -372,9 +372,9 @@ def run_scene_eval(scene_path, args):
 
     summary_parts = []
     if depth.get('rmse'):
-        summary_parts.append(f"RMSE={depth['rmse']:.3f}")
+        summary_parts.append(f"Depth-RMSE={depth['rmse']:.3f}")
     if depth.get('mae'):
-        summary_parts.append(f"MAE={depth['mae']:.3f}")
+        summary_parts.append(f"Depth-MAE={depth['mae']:.3f}")
     if photo_valid:
         mean_ssim = np.mean([s for s, _, _ in photo_valid])
         mean_l2   = np.mean([l for _, l, _ in photo_valid])
@@ -424,7 +424,7 @@ def save_results_to_csv(all_results, output_dir):
         writer = csv.writer(f)
         writer.writerow([
             'batch', 'sample', 'scene',
-            'rmse', 'mae', 'abs_rel', 'sq_rel', 'delta1', 'delta2', 'delta3',
+            'mean_depth_rmse', 'mean_depth_mae', 'abs_rel', 'sq_rel', 'delta1', 'delta2', 'delta3',
             'mean_photo_ssim', 'std_photo_ssim', 'mean_photo_l2', 'std_photo_l2', 'mean_photo_valid_ratio', 'num_photo_pairs',
             'mean_pixel_mae', 'std_pixel_mae', 'mean_pixel_rmse', 'std_pixel_rmse', 'mean_pixel_valid_ratio', 'num_pixel_pairs',
         ])
@@ -585,7 +585,7 @@ def main():
 
     parser.add_argument("--depth_scale",    type=float, default=1.0,
                         help="Divisor for predicted depth maps (usually 1.0 for .npz)")
-    parser.add_argument("--depth_scale_gt", type=float, default=1000.0,
+    parser.add_argument("--depth_scale_gt", type=float, default=1.0,
                         help="Divisor for GT depth maps (e.g. 1000 for ScanNet mm→m PNG)")
     parser.add_argument("--cam_to_world", action="store_true")
     parser.add_argument("--window", type=int, default=1)

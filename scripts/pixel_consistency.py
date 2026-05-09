@@ -221,7 +221,7 @@ if __name__ == "__main__":
     parser.add_argument("--pose1",       required=True)
     parser.add_argument("--pose2",       required=True)
 
-    parser.add_argument("--depth_scale_gt",   type=float, default=1000.0,
+    parser.add_argument("--depth_scale_gt",   type=float, default=1.0,
                         help="Divisor for GT depth (e.g. 1000 for ScanNet mm→m PNG)")
     parser.add_argument("--depth_scale_pred", type=float, default=1.0,
                         help="Divisor for predicted depth (usually 1.0 for .npz)")
