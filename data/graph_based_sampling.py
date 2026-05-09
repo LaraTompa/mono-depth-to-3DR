@@ -255,7 +255,7 @@ class ScanNetGraphDataset(Dataset):
         pass
 
     # --------------------------------------------------
-    # RANDOM WALK SAMPLING
+    # WEIGHTED RANDOM WALK SAMPLING
     # --------------------------------------------------
     def _random_walk(self, graph, start, length):
         seq = [start]
@@ -295,11 +295,16 @@ class ScanNetGraphDataset(Dataset):
         # pick valid start (with neighbors)
         valid_starts = [f for f in frame_ids if len(graph[f]) > 0]
         if not valid_starts:
-            return random.sample(frame_ids, seq_len)
+            # no edges at all — fall back to random frames with replacement
+            return random.choices(frame_ids, k=seq_len)
 
         start = random.choice(valid_starts)
 
         seq = self._random_walk(graph, start, seq_len)
+
+        # Pad if the walk hit a dead end before reaching seq_len
+        while len(seq) < seq_len:
+            seq.append(random.choice(valid_starts))
 
         return seq
 
@@ -360,7 +365,7 @@ if __name__ == "__main__":
         cfg = yaml.safe_load(f)
 
     ds_cfg = cfg["dataset"]
-    out_cfg = cfg["output"]
+    out_cfg = cfg["graph_output"]
     graph_cfg = cfg.get("graph_sampling", {})
 
     root_dir = ds_cfg["root_dir"]
@@ -442,7 +447,7 @@ if __name__ == "__main__":
                 fid = fids[f]
                 torchvision.utils.save_image(
                     images[b, f],
-                    os.path.join(rgb_raw_dir, f"{fid}.png"),
+                    os.path.join(rgb_raw_dir, f"{fid}.jpg"),
                 )
                 np.save(os.path.join(dep_raw_dir, f"{fid}.npy"), depths[b, f].numpy())
                 np.savetxt(os.path.join(pose_dir, f"{fid}.txt"), poses[b, f].numpy())

@@ -3,21 +3,27 @@
 dataset:
   root_dir: "/storage/group/dataset_mirrors/scannet/scans"
   sampler_type: "temporal"   # choose "temporal" or "graph"
-  num_samples: 700       # number of samples per epoch (__len__)
+  num_samples: 2       # number of samples per epoch (__len__)
   num_frames: 6          # exact number of frames per sample (seq_len)
   min_stride: 40          # minimum temporal stride between frames
   max_stride: 90         # maximum temporal stride between frames
-  max_scenes: 700       # limit scenes loaded; set to an integer to restrict to a subset of scenes (for testing)
+  max_scenes: 2      # limit scenes loaded; set to an integer to restrict to a subset of scenes (for testing)
 
 graph_sampling:
   graph_cache: null      # optional path to a pickle cache for the built frame graph
-  min_overlap: 0.2       # minimum symmetric overlap needed to connect two frames
-  max_overlap: 0.9       # maximum symmetric overlap allowed to connect two frames
+  min_overlap: 0.3       # minimum symmetric overlap needed to connect two frames
+  max_overlap: 0.6       # maximum symmetric overlap allowed to connect two frames
   overlap_sample_step: 16  # pixel subsampling stride used during overlap estimation
   depth_tolerance: 0.05  # metres; depth consistency threshold for overlap checks
 
 output:
-  sample_output_dir: "datasets/sample_output"   # visualisation grids
-  sampled_data_dir:  "datasets/sampled_data"    # individual saved frames
+  sample_output_dir: "datasets/sample_output"          # temporal: visualisation grids
+  sampled_data_dir:  "datasets/sampled_data"           # temporal: individual saved frames
+  batch_size: 4
+  num_workers: 2
+
+graph_output:
+  sample_output_dir: "datasets/graph_sample_output"    # graph: visualisation grids
+  sampled_data_dir:  "datasets/graph_sampled_data"     # graph: individual saved frames
   batch_size: 4
   num_workers: 2
