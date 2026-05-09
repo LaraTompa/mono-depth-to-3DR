@@ -2,7 +2,6 @@ import os
 import argparse
 import numpy as np
 import cv2
-import matplotlib.pyplot as plt
 
 
 # ── Loaders ────────────────────────────────────────────────────────────────────
@@ -21,17 +20,6 @@ def load_pose(path):
         pose = np.vstack([pose, [0, 0, 0, 1]])
     assert pose.shape == (4, 4)
     return pose
-
-
-def load_image(path, as_gray=True):
-    img = cv2.imread(path)
-    if img is None:
-        raise FileNotFoundError(path)
-    if as_gray:
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    else:
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    return img.astype(np.float32) / 255.0
 
 
 def load_depth(path, scale=1.0):
@@ -112,34 +100,29 @@ def project_with_depth(depth, K, pose_src, pose_tgt, cam_to_world=True):
 # ── Metric ─────────────────────────────────────────────────────────────────────
 
 def compute_pixel_consistency(
-    img_src, img_tgt,
     gt_depth_src, pred_depth_src,
     gt_depth_tgt,
     K, pose_src, pose_tgt,
     cam_to_world=True,
-    visualize=False, vis_out=None
 ):
     """
-    Pixel consistency metric.
+    Pixel consistency via reprojection error.
 
     Algorithm
     ---------
     For every pixel p in frame src with valid GT depth:
-      1. Project p → frame tgt using GT depth          → position p_gt
-      2. Verify GT depth in tgt at p_gt is also valid  (real geometric correspondence)
-      3. Project p → frame tgt using predicted depth   → position p_pred
-      4. p is valid only if all three checks pass
-
-    Metric
-    ------
-    Compare intensity of img_tgt sampled at p_gt  vs  img_tgt sampled at p_pred
-    over the valid pixel set.
+      1. Project p → frame tgt using GT depth    → position p_gt
+      2. Verify GT depth in tgt at p_gt is valid  (real geometric correspondence)
+      3. Project p → frame tgt using pred depth  → position p_pred
+      4. Compute Euclidean pixel distance |p_gt - p_pred|
 
     Returns
     -------
-    mae, rmse, valid_ratio
+    mae        : mean reprojection error (pixels)
+    rmse       : root-mean-square reprojection error (pixels)
+    valid_ratio: fraction of source pixels that passed all validity checks
     """
-    H, W = img_src.shape[:2]
+    H, W = gt_depth_src.shape
 
     # ── Step 1: project with GT depth ────────────────────────────────────────
     x_gt, y_gt, valid_gt_proj = project_with_depth(
@@ -149,82 +132,37 @@ def compute_pixel_consistency(
     # ── Step 2: check GT depth validity at projected position in tgt ─────────
     x_gt_int = np.clip(np.round(x_gt).astype(np.int32), 0, W - 1)
     y_gt_int = np.clip(np.round(y_gt).astype(np.int32), 0, H - 1)
-    gt_depth_at_proj = gt_depth_tgt[y_gt_int, x_gt_int]
-    valid_gt_full = valid_gt_proj & (gt_depth_at_proj > 0)
+    valid_gt_full = valid_gt_proj & (gt_depth_tgt[y_gt_int, x_gt_int] > 0)
 
     # ── Step 3: project with predicted depth ─────────────────────────────────
     x_pred, y_pred, valid_pred_proj = project_with_depth(
         pred_depth_src, K, pose_src, pose_tgt, cam_to_world
     )
 
-    # ── Step 4: combined validity mask ───────────────────────────────────────
+    # ── Step 4: combined validity + reprojection error ────────────────────────
     valid = valid_gt_full & valid_pred_proj
 
     if np.sum(valid) < 100:
         return float("inf"), float("inf"), 0.0
 
-    # ── Warp tgt image at GT-projected and pred-projected positions ───────────
-    remap_kwargs = dict(
-        interpolation=cv2.INTER_LINEAR,
-        borderMode=cv2.BORDER_CONSTANT,
-        borderValue=0,
-    )
-    warped_gt   = cv2.remap(img_tgt, x_gt,   y_gt,   **remap_kwargs)
-    warped_pred = cv2.remap(img_tgt, x_pred, y_pred, **remap_kwargs)
+    dist = np.sqrt((x_gt - x_pred) ** 2 + (y_gt - y_pred) ** 2)  # (H, W), pixels
+    d    = dist[valid]
 
-    # ── Pixel-intensity error metrics ────────────────────────────────────────
-    diff = warped_gt - warped_pred           # signed difference over full image
-    d    = diff[valid]                       # restrict to valid pixels
-
-    mae  = np.mean(np.abs(d))
+    mae  = np.mean(d)
     rmse = np.sqrt(np.mean(d ** 2))
 
-    valid_ratio = np.mean(valid)
-
-    if visualize:
-        _visualize(warped_gt, warped_pred, valid, out_path=vis_out)
-
-    return mae, rmse, valid_ratio
-
-
-# ── Visualization ──────────────────────────────────────────────────────────────
-
-def _visualize(warped_gt, warped_pred, valid, out_path=None):
-    """Show GT-warped, pred-warped, and absolute-difference images side by side."""
-    def to_rgb(img):
-        return np.stack([img, img, img], axis=-1) if img.ndim == 2 else img
-
-    diff = np.abs(warped_gt - warped_pred)
-    if diff.ndim == 3:
-        diff = np.mean(diff, axis=-1)
-    diff_masked = diff.copy()
-    diff_masked[~valid] = 0
-
-    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
-    axes[0].imshow(to_rgb(warped_gt));   axes[0].set_title('Warped with GT depth');   axes[0].axis('off')
-    axes[1].imshow(to_rgb(warped_pred)); axes[1].set_title('Warped with Pred depth'); axes[1].axis('off')
-    axes[2].imshow(diff_masked, cmap='hot')
-    axes[2].set_title(f'|Difference| (valid={np.mean(valid):.2%})')
-    axes[2].axis('off')
-    plt.tight_layout()
-
-    if out_path:
-        plt.savefig(out_path, dpi=150, bbox_inches='tight')
-        print(f"Saved visualization to {out_path}")
-    plt.show()
+    return mae, rmse, np.mean(valid)
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 def main(args):
-    img1 = load_image(args.img1, as_gray=True)
-    img2 = load_image(args.img2, as_gray=True)
-    H, W = img1.shape[:2]
-
     gt_depth1   = load_depth(args.gt_depth1,   args.depth_scale_gt)
     gt_depth2   = load_depth(args.gt_depth2,   args.depth_scale_gt)
     pred_depth1 = load_depth(args.pred_depth1, args.depth_scale_pred)
     pred_depth2 = load_depth(args.pred_depth2, args.depth_scale_pred)
+
+    H, W = gt_depth1.shape
 
     def resize_if_needed(d, h, w):
         return cv2.resize(d, (w, h), interpolation=cv2.INTER_NEAREST) if d.shape != (h, w) else d
@@ -241,20 +179,16 @@ def main(args):
 
     print("Running forward pixel consistency (1 → 2)...")
     mae_12, rmse_12, vr_12 = compute_pixel_consistency(
-        img1, img2, gt_depth1, pred_depth1, gt_depth2,
+        gt_depth1, pred_depth1, gt_depth2,
         K, pose1, pose2,
         cam_to_world=args.cam_to_world,
-        visualize=args.visualize,
-        vis_out=args.vis_out_12 if args.visualize else None,
     )
 
     print("Running backward pixel consistency (2 → 1)...")
     mae_21, rmse_21, vr_21 = compute_pixel_consistency(
-        img2, img1, gt_depth2, pred_depth2, gt_depth1,
+        gt_depth2, pred_depth2, gt_depth1,
         K, pose2, pose1,
         cam_to_world=args.cam_to_world,
-        visualize=args.visualize,
-        vis_out=args.vis_out_21 if args.visualize else None,
     )
 
     print("\n=== RESULTS ===")
@@ -277,9 +211,6 @@ if __name__ == "__main__":
         description="Pixel consistency: compare where GT depth vs predicted depth project pixels."
     )
 
-    parser.add_argument("--img1",        required=True, help="RGB frame 1")
-    parser.add_argument("--img2",        required=True, help="RGB frame 2")
-
     parser.add_argument("--gt_depth1",   required=True, help="GT depth for frame 1")
     parser.add_argument("--gt_depth2",   required=True, help="GT depth for frame 2")
     parser.add_argument("--pred_depth1", required=True, help="Predicted depth for frame 1")
@@ -298,10 +229,6 @@ if __name__ == "__main__":
                         help="Poses are camera-to-world (default)")
     parser.add_argument("--world_to_cam", dest="cam_to_world", action="store_false",
                         help="Poses are world-to-camera")
-
-    parser.add_argument("--visualize",   action="store_true")
-    parser.add_argument("--vis_out_12",  type=str, default=None)
-    parser.add_argument("--vis_out_21",  type=str, default=None)
 
     args = parser.parse_args()
     main(args)

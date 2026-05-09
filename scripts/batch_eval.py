@@ -312,8 +312,6 @@ def run_scene_eval(scene_path, args):
 
             pixel_cmd = [
                 "python3", "scripts/pixel_consistency.py",
-                "--img1",        rgb_map[si],
-                "--img2",        rgb_map[sj],
                 "--gt_depth1",   gt_map[si],
                 "--gt_depth2",   gt_map[sj],
                 "--pred_depth1", pred_map[si],
