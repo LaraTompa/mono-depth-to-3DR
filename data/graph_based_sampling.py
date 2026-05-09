@@ -6,6 +6,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 from PIL import Image
+from tqdm import tqdm
 
 
 def load_pose(path):
@@ -34,6 +35,7 @@ class ScanNetGraphDataset(Dataset):
         max_overlap=0.9,
         overlap_sample_step=16,
         depth_tolerance=0.05,
+        max_frame_gap=50,
         transform=None,
         max_scenes=None
     ):
@@ -45,6 +47,7 @@ class ScanNetGraphDataset(Dataset):
         self.max_overlap = max_overlap
         self.overlap_sample_step = overlap_sample_step
         self.depth_tolerance = depth_tolerance
+        self.max_frame_gap = max_frame_gap
 
         self.scenes = sorted(os.listdir(root_dir))
         if max_scenes:
@@ -164,7 +167,7 @@ class ScanNetGraphDataset(Dataset):
     def _build_graph(self):
         scene_data = []
 
-        for scene in self.scenes:
+        for scene in tqdm(self.scenes, desc="Scenes", unit="scene"):
             scene_path = os.path.join(self.root_dir, scene)
 
             color_dir = os.path.join(scene_path, "color")
@@ -220,23 +223,28 @@ class ScanNetGraphDataset(Dataset):
             # nodes = individual frames; edge weight = how much the two views share
             graph = {fid: {} for fid in valid_fids}
 
-            for i, fid_i in enumerate(valid_fids):
-                for j in range(i + 1, len(valid_fids)):
-                    fid_j = valid_fids[j]
+            n = len(valid_fids)
+            total_pairs = sum(min(self.max_frame_gap, n - 1 - i) for i in range(n))
+            with tqdm(total=total_pairs, desc=f"  {scene} pairs", unit="pair", leave=False) as pbar:
+                for i, fid_i in enumerate(valid_fids):
+                    for j in range(i + 1, min(i + 1 + self.max_frame_gap, n)):
+                        fid_j = valid_fids[j]
 
-                    overlap = self._compute_pair_overlap(
-                        get_depth(fid_i),
-                        poses[fid_i],
-                        world_to_camera[fid_i],
-                        get_depth(fid_j),
-                        poses[fid_j],
-                        world_to_camera[fid_j],
-                        intrinsics,
-                    )
+                        overlap = self._compute_pair_overlap(
+                            get_depth(fid_i),
+                            poses[fid_i],
+                            world_to_camera[fid_i],
+                            get_depth(fid_j),
+                            poses[fid_j],
+                            world_to_camera[fid_j],
+                            intrinsics,
+                        )
 
-                    if self.min_overlap <= overlap <= self.max_overlap:
-                        graph[fid_i][fid_j] = overlap
-                        graph[fid_j][fid_i] = overlap
+                        if self.min_overlap <= overlap <= self.max_overlap:
+                            graph[fid_i][fid_j] = overlap
+                            graph[fid_j][fid_i] = overlap
+
+                        pbar.update(1)
 
             scene_data.append({
                 "scene": scene,
@@ -383,6 +391,7 @@ if __name__ == "__main__":
         max_overlap=graph_cfg["max_overlap"],
         overlap_sample_step=graph_cfg["overlap_sample_step"],
         depth_tolerance=graph_cfg["depth_tolerance"],
+        max_frame_gap=graph_cfg.get("max_frame_gap", 50),
         max_scenes=ds_cfg["max_scenes"],
     )
 
@@ -394,6 +403,7 @@ if __name__ == "__main__":
     print(f"Max overlap             : {dataset.max_overlap}")
     print(f"Overlap sample step     : {dataset.overlap_sample_step}")
     print(f"Depth tolerance         : {dataset.depth_tolerance}")
+    print(f"Max frame gap           : {dataset.max_frame_gap}")
     print(f"Saving visualisations to: {out_dir}/")
     print(f"Saving sampled frames to: {sample_dir}/\n")
 
