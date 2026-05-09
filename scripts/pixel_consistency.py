@@ -202,6 +202,7 @@ def main(args):
     print("\nValid pixel ratios:")
     print(f"  1→2: {vr_12:.3f}")
     print(f"  2→1: {vr_21:.3f}")
+    print(f"  Valid ratio avg: {(vr_12 + vr_21) / 2:.4f}")
 
 
 # ── CLI ────────────────────────────────────────────────────────────────────────

@@ -132,70 +132,76 @@ def parse_depth_consistency_output(output: str) -> dict:
     return {}
 
 def run_photometric_pair(photo_cmd, i, j, si, sj, args):
-    """Run one photometric pair and return (i, j, ssim, l2)."""
+    """Run one photometric pair and return (i, j, ssim, l2, valid_ratio)."""
     try:
         photo_result = subprocess.run(photo_cmd, capture_output=True, text=True, timeout=60)
         photo_output = photo_result.stdout + photo_result.stderr
-        ssim, l2 = parse_photometric_output(photo_output, debug=args.debug)
-        return (i, j, si, sj, ssim, l2, None)
+        ssim, l2, valid_ratio = parse_photometric_output(photo_output, debug=args.debug)
+        return (i, j, si, sj, ssim, l2, valid_ratio, None)
     except subprocess.TimeoutExpired:
-        return (i, j, si, sj, None, None, "timeout")
+        return (i, j, si, sj, None, None, None, "timeout")
     except Exception as e:
-        return (i, j, si, sj, None, None, str(e))
+        return (i, j, si, sj, None, None, None, str(e))
 
 def run_pixel_consistency_pair(pixel_cmd, i, j, si, sj, args):
-    """Run one pixel consistency pair and return (i, j, mae, rmse)."""
+    """Run one pixel consistency pair and return (i, j, mae, rmse, valid_ratio)."""
     try:
         result = subprocess.run(pixel_cmd, capture_output=True, text=True, timeout=60)
         output = result.stdout + result.stderr
-        mae, rmse = parse_pixel_consistency_output(output, debug=args.debug)
-        return (i, j, si, sj, mae, rmse, None)
+        mae, rmse, valid_ratio = parse_pixel_consistency_output(output, debug=args.debug)
+        return (i, j, si, sj, mae, rmse, valid_ratio, None)
     except subprocess.TimeoutExpired:
-        return (i, j, si, sj, None, None, "timeout")
+        return (i, j, si, sj, None, None, None, "timeout")
     except Exception as e:
-        return (i, j, si, sj, None, None, str(e))
+        return (i, j, si, sj, None, None, None, str(e))
 
 def parse_pixel_consistency_output(output, debug=False):
-    """Parse pixel_consistency.py output for MAE and RMSE averages."""
+    """Parse pixel_consistency.py output for MAE, RMSE and valid ratio averages."""
     output = output.replace('\xa0', ' ')
     float_re = r"([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)"
-    mae_avg, rmse_avg = None, None
+    mae_avg, rmse_avg, valid_ratio_avg = None, None, None
 
-    mae_match  = re.search(rf"MAE\s*(?:avg|AVG)?\s*[:=]\s*{float_re}",  output, flags=re.IGNORECASE)
-    rmse_match = re.search(rf"RMSE\s*(?:avg|AVG)?\s*[:=]\s*{float_re}", output, flags=re.IGNORECASE)
+    mae_match   = re.search(rf"MAE\s*(?:avg|AVG)?\s*[:=]\s*{float_re}",         output, flags=re.IGNORECASE)
+    rmse_match  = re.search(rf"RMSE\s*(?:avg|AVG)?\s*[:=]\s*{float_re}",        output, flags=re.IGNORECASE)
+    valid_match = re.search(rf"Valid\s*ratio\s*avg\s*[:=]\s*{float_re}",         output, flags=re.IGNORECASE)
 
     if mae_match:
         mae_avg  = float(mae_match.group(1))
     if rmse_match:
         rmse_avg = float(rmse_match.group(1))
+    if valid_match:
+        valid_ratio_avg = float(valid_match.group(1))
 
     if debug and (mae_avg is None or rmse_avg is None):
         print("      [DEBUG] Pixel consistency parse failed — raw subprocess output:")
         print("      " + "\n      ".join(output.splitlines()))
         print("      [DEBUG] End raw output")
 
-    return mae_avg, rmse_avg
+    return mae_avg, rmse_avg, valid_ratio_avg
 
 def parse_photometric_output(output, debug=False):
-    """Parse photometric consistency output for SSIM and L2 metrics."""
+    """Parse photometric consistency output for SSIM, L2 and valid ratio."""
     output = output.replace('\xa0', ' ')
     float_re = r"([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)"
-    ssim_avg, l2_avg = None, None
+    ssim_avg, l2_avg, valid_ratio_avg = None, None, None
 
-    ssim_match = re.search(rf"SSIM\s*(?:avg|AVG)?\s*[:=]\s*{float_re}", output, flags=re.IGNORECASE)
-    l2_match   = re.search(rf"L2\s*(?:avg|AVG)?\s*[:=]\s*{float_re}", output, flags=re.IGNORECASE)
+    ssim_match  = re.search(rf"SSIM\s*(?:avg|AVG)?\s*[:=]\s*{float_re}", output, flags=re.IGNORECASE)
+    l2_match    = re.search(rf"L2\s*(?:avg|AVG)?\s*[:=]\s*{float_re}",   output, flags=re.IGNORECASE)
+    valid_match = re.search(rf"Valid\s*ratio\s*avg\s*[:=]\s*{float_re}",  output, flags=re.IGNORECASE)
 
     if ssim_match:
         ssim_avg = float(ssim_match.group(1))
     if l2_match:
         l2_avg = float(l2_match.group(1))
+    if valid_match:
+        valid_ratio_avg = float(valid_match.group(1))
 
     if debug and (ssim_avg is None or l2_avg is None):
         print("      [DEBUG] Photometric parse failed — raw subprocess output:")
         print("      " + "\n      ".join(output.splitlines()))
         print("      [DEBUG] End raw output")
 
-    return ssim_avg, l2_avg
+    return ssim_avg, l2_avg, valid_ratio_avg
 
 
 def run_scene_eval(scene_path, args):
@@ -343,13 +349,13 @@ def run_scene_eval(scene_path, args):
 
         for future in as_completed(all_futures):
             kind = all_futures[future]
-            i, j, si, sj, val1, val2, error = future.result()
+            i, j, si, sj, val1, val2, val3, error = future.result()
 
             if val1 is not None and val2 is not None:
                 if kind == 'photo':
-                    results['photometric_pairs'].append((val1, val2))       # (ssim, l2)
+                    results['photometric_pairs'].append((val1, val2, val3))       # (ssim, l2, valid_ratio)
                 else:
-                    results['pixel_consistency_pairs'].append((val1, val2)) # (mae, rmse)
+                    results['pixel_consistency_pairs'].append((val1, val2, val3)) # (mae, rmse, valid_ratio)
             elif args.debug:
                 label = "Photometric" if kind == 'photo' else "Pixel"
                 if error == "timeout":
@@ -370,13 +376,13 @@ def run_scene_eval(scene_path, args):
     if depth.get('mae'):
         summary_parts.append(f"MAE={depth['mae']:.3f}")
     if photo_valid:
-        mean_ssim = np.mean([s for s, _ in photo_valid])
-        mean_l2   = np.mean([l for _, l in photo_valid])
+        mean_ssim = np.mean([s for s, _, _ in photo_valid])
+        mean_l2   = np.mean([l for _, l, _ in photo_valid])
         summary_parts.append(f"Photo-SSIM={mean_ssim:.3f}")
         summary_parts.append(f"Photo-L2={mean_l2:.4f}")
     if pixel_valid:
-        mean_mae  = np.mean([m for m, _ in pixel_valid])
-        mean_rmse = np.mean([r for _, r in pixel_valid])
+        mean_mae  = np.mean([m for m, _, _ in pixel_valid])
+        mean_rmse = np.mean([r for _, r, _ in pixel_valid])
         summary_parts.append(f"Pixel-MAE={mean_mae:.4f}")
         summary_parts.append(f"Pixel-RMSE={mean_rmse:.4f}")
     summary_parts.append(f"pairs={len(photo_valid)}")
@@ -394,22 +400,22 @@ def save_results_to_csv(all_results, output_dir):
     pairs_path = os.path.join(output_dir, "photometric_pairs_detailed.csv")
     with open(pairs_path, 'w', newline='') as f:
         writer = csv.writer(f)
-        writer.writerow(['batch', 'sample', 'scene', 'pair_index', 'ssim', 'l2'])
+        writer.writerow(['batch', 'sample', 'scene', 'pair_index', 'ssim', 'l2', 'valid_ratio'])
         for result in all_results:
-            for idx, (ssim, l2) in enumerate(result['photometric_pairs']):
+            for idx, (ssim, l2, valid_ratio) in enumerate(result['photometric_pairs']):
                 writer.writerow([result['batch'], result['sample'], result['scene'],
-                                 idx, ssim, l2])
+                                 idx, ssim, l2, valid_ratio])
     print(f"\n Per-pair photometric results saved to: {pairs_path}")
 
     # --- Per-pair pixel consistency CSV ---
     pixel_pairs_path = os.path.join(output_dir, "pixel_consistency_pairs_detailed.csv")
     with open(pixel_pairs_path, 'w', newline='') as f:
         writer = csv.writer(f)
-        writer.writerow(['batch', 'sample', 'scene', 'pair_index', 'mae', 'rmse'])
+        writer.writerow(['batch', 'sample', 'scene', 'pair_index', 'mae', 'rmse', 'valid_ratio'])
         for result in all_results:
-            for idx, (mae, rmse) in enumerate(result['pixel_consistency_pairs']):
+            for idx, (mae, rmse, valid_ratio) in enumerate(result['pixel_consistency_pairs']):
                 writer.writerow([result['batch'], result['sample'], result['scene'],
-                                 idx, mae, rmse])
+                                 idx, mae, rmse, valid_ratio])
     print(f" Per-pair pixel consistency results saved to: {pixel_pairs_path}")
 
     # --- Scene-level summary CSV ---
@@ -419,38 +425,42 @@ def save_results_to_csv(all_results, output_dir):
         writer.writerow([
             'batch', 'sample', 'scene',
             'rmse', 'mae', 'abs_rel', 'sq_rel', 'delta1', 'delta2', 'delta3',
-            'mean_photo_ssim', 'std_photo_ssim', 'mean_photo_l2', 'std_photo_l2', 'num_photo_pairs',
-            'mean_pixel_mae', 'std_pixel_mae', 'mean_pixel_rmse', 'std_pixel_rmse', 'num_pixel_pairs',
+            'mean_photo_ssim', 'std_photo_ssim', 'mean_photo_l2', 'std_photo_l2', 'mean_photo_valid_ratio', 'num_photo_pairs',
+            'mean_pixel_mae', 'std_pixel_mae', 'mean_pixel_rmse', 'std_pixel_rmse', 'mean_pixel_valid_ratio', 'num_pixel_pairs',
         ])
         for result in all_results:
             depth = result['depth_metrics']
 
             photo_valid = result['photometric_pairs']
             if photo_valid:
-                ssims = [s for s, _ in photo_valid]
-                l2s   = [l for _, l in photo_valid]
+                ssims  = [s for s, _, _ in photo_valid]
+                l2s    = [l for _, l, _ in photo_valid]
+                vrs_ph = [v for _, _, v in photo_valid if v is not None]
                 mean_photo_ssim, std_photo_ssim = np.mean(ssims), np.std(ssims)
                 mean_photo_l2,   std_photo_l2   = np.mean(l2s),   np.std(l2s)
+                mean_photo_valid_ratio = np.mean(vrs_ph) if vrs_ph else None
                 num_photo_pairs = len(photo_valid)
             else:
-                mean_photo_ssim = std_photo_ssim = mean_photo_l2 = std_photo_l2 = num_photo_pairs = None
+                mean_photo_ssim = std_photo_ssim = mean_photo_l2 = std_photo_l2 = mean_photo_valid_ratio = num_photo_pairs = None
 
             pixel_valid = result['pixel_consistency_pairs']
             if pixel_valid:
-                maes  = [m for m, _ in pixel_valid]
-                rmses = [r for _, r in pixel_valid]
+                maes   = [m for m, _, _ in pixel_valid]
+                rmses  = [r for _, r, _ in pixel_valid]
+                vrs_px = [v for _, _, v in pixel_valid if v is not None]
                 mean_pixel_mae,  std_pixel_mae  = np.mean(maes),  np.std(maes)
                 mean_pixel_rmse, std_pixel_rmse = np.mean(rmses), np.std(rmses)
+                mean_pixel_valid_ratio = np.mean(vrs_px) if vrs_px else None
                 num_pixel_pairs = len(pixel_valid)
             else:
-                mean_pixel_mae = std_pixel_mae = mean_pixel_rmse = std_pixel_rmse = num_pixel_pairs = None
+                mean_pixel_mae = std_pixel_mae = mean_pixel_rmse = std_pixel_rmse = mean_pixel_valid_ratio = num_pixel_pairs = None
 
             writer.writerow([
                 result['batch'], result['sample'], result['scene'],
                 depth.get('rmse'), depth.get('mae'), depth.get('abs_rel'),
                 depth.get('sq_rel'), depth.get('delta1'), depth.get('delta2'), depth.get('delta3'),
-                mean_photo_ssim, std_photo_ssim, mean_photo_l2, std_photo_l2, num_photo_pairs,
-                mean_pixel_mae, std_pixel_mae, mean_pixel_rmse, std_pixel_rmse, num_pixel_pairs,
+                mean_photo_ssim, std_photo_ssim, mean_photo_l2, std_photo_l2, mean_photo_valid_ratio, num_photo_pairs,
+                mean_pixel_mae, std_pixel_mae, mean_pixel_rmse, std_pixel_rmse, mean_pixel_valid_ratio, num_pixel_pairs,
             ])
     print(f" Scene summary saved to: {summary_path}")
 
@@ -463,10 +473,10 @@ def create_visualizations(all_results, output_dir):
     rmse_all, mae_all, abs_rel_all, delta1_all = [], [], [], []
 
     for result in all_results:
-        for ssim, l2 in result['photometric_pairs']:
+        for ssim, l2, _ in result['photometric_pairs']:
             photo_ssim_all.append(ssim)
             photo_l2_all.append(l2)
-        for mae, rmse in result['pixel_consistency_pairs']:
+        for mae, rmse, _ in result['pixel_consistency_pairs']:
             pixel_mae_all.append(mae)
             pixel_rmse_all.append(rmse)
 
