@@ -106,23 +106,21 @@ def compute_pixel_consistency(
     cam_to_world=True,
 ):
     """
-    Pixel consistency metric (pure geometric reprojection error).
+    Pixel consistency via reprojection error.
 
     Algorithm
     ---------
     For every pixel p in frame src with valid GT depth:
-      1. Project p → frame tgt using GT depth        → position p_gt
-      2. Verify GT depth in tgt at p_gt is also valid (real geometric match)
-      3. Project p → frame tgt using predicted depth → position p_pred
-      4. p is valid only when all three checks pass
-
-    Metric
-    ------
-    Euclidean pixel distance between p_gt and p_pred over the valid set.
+      1. Project p → frame tgt using GT depth    → position p_gt
+      2. Verify GT depth in tgt at p_gt is valid  (real geometric correspondence)
+      3. Project p → frame tgt using pred depth  → position p_pred
+      4. Compute Euclidean pixel distance |p_gt - p_pred|
 
     Returns
     -------
-    mae, rmse, valid_ratio
+    mae        : mean reprojection error (pixels)
+    rmse       : root-mean-square reprojection error (pixels)
+    valid_ratio: fraction of source pixels that passed all validity checks
     """
     H, W = gt_depth_src.shape
 
@@ -139,20 +137,19 @@ def compute_pixel_consistency(
         pred_depth_src, K, pose_src, pose_tgt, cam_to_world
     )
 
-    # Step 4: combined mask
+    # ── Step 4: combined validity + reprojection error ────────────────────────
     valid = valid_gt_full & valid_pred_proj
 
     if np.sum(valid) < 100:
         return float("inf"), float("inf"), 0.0
 
-    # Euclidean pixel distance between the two projected positions
-    dist = np.sqrt((x_gt - x_pred) ** 2 + (y_gt - y_pred) ** 2)
-    d = dist[valid]
+    dist = np.sqrt((x_gt - x_pred) ** 2 + (y_gt - y_pred) ** 2)  # (H, W), pixels
+    d    = dist[valid]
 
     mae  = np.mean(d)
     rmse = np.sqrt(np.mean(d ** 2))
 
-    return mae, rmse, float(np.mean(valid))
+    return mae, rmse, np.mean(valid)
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────
@@ -165,33 +162,41 @@ def main(args):
 
     H, W = gt_depth1.shape
 
-    def resize_if_needed(d):
-        return cv2.resize(d, (W, H), interpolation=cv2.INTER_NEAREST) if d.shape != (H, W) else d
+    def resize_if_needed(d, h, w):
+        return cv2.resize(d, (w, h), interpolation=cv2.INTER_NEAREST) if d.shape != (h, w) else d
 
-    gt_depth2   = resize_if_needed(gt_depth2)
-    pred_depth1 = resize_if_needed(pred_depth1)
-    pred_depth2 = resize_if_needed(pred_depth2)
+    gt_depth1   = resize_if_needed(gt_depth1,   H, W)
+    gt_depth2   = resize_if_needed(gt_depth2,   H, W)
+    pred_depth1 = resize_if_needed(pred_depth1, H, W)
+    pred_depth2 = resize_if_needed(pred_depth2, H, W)
 
     K     = load_intrinsics(args.intrinsics)
     pose1 = load_pose(args.pose1)
     pose2 = load_pose(args.pose2)
 
     mae_12, rmse_12, vr_12 = compute_pixel_consistency(
-        gt_depth1, pred_depth1, gt_depth2, K, pose1, pose2,
+        gt_depth1, pred_depth1, gt_depth2,
+        K, pose1, pose2,
         cam_to_world=args.cam_to_world,
     )
     mae_21, rmse_21, vr_21 = compute_pixel_consistency(
-        gt_depth2, pred_depth2, gt_depth1, K, pose2, pose1,
+        gt_depth2, pred_depth2, gt_depth1,
+        K, pose2, pose1,
         cam_to_world=args.cam_to_world,
     )
 
-    mae_avg  = (mae_12  + mae_21)  / 2
-    rmse_avg = (rmse_12 + rmse_21) / 2
-    vr_avg   = (vr_12   + vr_21)   / 2
-
-    print(f"MAE avg:   {mae_avg:.4f}")
-    print(f"RMSE avg:  {rmse_avg:.4f}")
-    print(f"Valid ratio avg: {vr_avg:.4f}")
+    print("\n=== RESULTS ===")
+    print("\nPixel Consistency:")
+    print(f"  MAE  (1→2): {mae_12:.4f}")
+    print(f"  MAE  (2→1): {mae_21:.4f}")
+    print(f"  MAE  avg:   {(mae_12 + mae_21) / 2:.4f}")
+    print(f"  RMSE (1→2): {rmse_12:.4f}")
+    print(f"  RMSE (2→1): {rmse_21:.4f}")
+    print(f"  RMSE avg:   {(rmse_12 + rmse_21) / 2:.4f}")
+    print("\nValid pixel ratios:")
+    print(f"  1→2: {vr_12:.3f}")
+    print(f"  2→1: {vr_21:.3f}")
+    print(f"  Valid ratio avg: {(vr_12 + vr_21) / 2:.4f}")
 
 
 # ── CLI ────────────────────────────────────────────────────────────────────────
@@ -210,7 +215,7 @@ if __name__ == "__main__":
     parser.add_argument("--pose1",       required=True)
     parser.add_argument("--pose2",       required=True)
 
-    parser.add_argument("--depth_scale_gt",   type=float, default=1000.0,
+    parser.add_argument("--depth_scale_gt",   type=float, default=1.0,
                         help="Divisor for GT depth (e.g. 1000 for ScanNet mm→m PNG)")
     parser.add_argument("--depth_scale_pred", type=float, default=1.0,
                         help="Divisor for predicted depth (usually 1.0 for .npz)")

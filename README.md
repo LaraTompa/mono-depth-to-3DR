@@ -57,6 +57,24 @@ python3 scripts/photometric_consistency.py \
   --cam_to_world \
   --visualize
 ```
+
+3) Pixel-wise reprojection consistency
+- Script: scripts/pixel_consistency.py
+- Typical args: --gt_depth1, --gt_depth2, --pred_depth1, --pred_depth2, --intrinsics_color, --pose1, --pose2, --depth_scale_gt, --depth_scale_pred, --cam_to_world / --world_to_cam.
+Example:
+
+```bash
+python3 scripts/pixel_consistency.py \
+  --gt_depth1 /path/to/gt_depth/frame_00000.png \
+  --gt_depth2 /path/to/gt_depth/frame_00001.png \
+  --pred_depth1 /path/to/pred_depth/frame_00000.png \
+  --pred_depth2 /path/to/pred_depth/frame_00001.png \
+  --intrinsics_color /path/to/calib/color_intrinsics.txt \
+  --pose1 /path/to/poses/pose_000000.txt \
+  --pose2 /path/to/poses/pose_000001.txt \
+  --depth_scale_gt 1.0 \
+  --depth_scale_pred 1.0 \
+  --cam_to_world
 ## Data
 
 ### ScanNet Temporal Dataset
