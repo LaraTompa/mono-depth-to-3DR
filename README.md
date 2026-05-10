@@ -21,14 +21,14 @@ pip install -r requirements.txt
 Use python3 to run the utilities from the project root (expand ~ or use absolute paths).
 
 1) Depth consistency check (per-RGB sample table)
-- Script: scripts/depth_consistency.py
+- Script: metrics/depth_consistency.py
 - Typical args: --rgb_dir, --gt_dir, --pred_dir
 
 Example:
 
 ```bash
 cd ~/Downloads/mono-depth-to-3DR
-python3 scripts/depth_consistency.py \
+python3 metrics/depth_consistency.py \
   --rgb_dir /path/to/rgb/frame_00000.jpg \
   --gt_dir  /path/to/gt_depth/frame_00000.png \
   --pred_dir /path/to/pred_depth_/frame_00000.png
@@ -39,13 +39,13 @@ Notes:
 - Make sure depth loader knows the PNG format (16-bit with scale 1000 → meters) if applicable.
 
 2) Photometric consistency (SSIM + L2 using depth + poses + intrinsics)
-- Script: scripts/photometric_consistency.py
+- Script: metrics/photometric_consistency.py
 - Typical args: --img1, --img2, --depth1, --depth2, --intrinsics_color, --pose1, --pose2, --depth_scale, --cam_to_world / --world_to_cam, --visualize.
 
 Example (camera-to-world poses, depth in uint16 mm):
 
 ```bash
-python3 scripts/photometric_consistency.py \
+python3 metrics/photometric_consistency.py \
   --img1 /path/to/rgb/frame_00000.jpg \
   --img2 /path/to/rgb/frame_00001.jpg \
   --depth1 /path/to/depth/frame_00000.png \
@@ -59,12 +59,12 @@ python3 scripts/photometric_consistency.py \
 ```
 
 3) Pixel-wise reprojection consistency
-- Script: scripts/pixel_consistency.py
+- Script: metrics/pixel_consistency.py
 - Typical args: --gt_depth1, --gt_depth2, --pred_depth1, --pred_depth2, --intrinsics_color, --pose1, --pose2, --depth_scale_gt, --depth_scale_pred, --cam_to_world / --world_to_cam.
 Example:
 
 ```bash
-python3 scripts/pixel_consistency.py \
+python3 metrics/pixel_consistency.py \
   --gt_depth1 /path/to/gt_depth/frame_00000.png \
   --gt_depth2 /path/to/gt_depth/frame_00001.png \
   --pred_depth1 /path/to/pred_depth/frame_00000.png \
