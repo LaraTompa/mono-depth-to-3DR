@@ -174,7 +174,6 @@ class DepthAlignNet(nn.Module):
             depth_mono=d1_s16,
             depth2_mono=d2_s16,
             feat_cross=feats1["s16"],
-            feat2=feats2["s16"],
             T_12=T_12,
             K=K_s16,
         )
@@ -183,7 +182,6 @@ class DepthAlignNet(nn.Module):
             depth_mono=d2_s16_v,
             depth2_mono=d1_s16_v,
             feat_cross=feats2_attended["s16"],
-            feat2=feats1["s16"],
             T_12=T_21,
             K=K_s16,
         )

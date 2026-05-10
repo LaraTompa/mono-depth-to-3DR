@@ -128,7 +128,7 @@ class IterativeRefinement(nn.Module):
     Iterative geometric refinement over N iterations.
 
     At each iteration it predicts residual corrections to the depth prior.
-    The depth estimate is updated and used to re-warp view-2 features for
+    The depth estimate is updated and used to re-warp view-2 depth for
     the next iteration (geometric re-anchoring).
 
     Parameters
@@ -165,7 +165,6 @@ class IterativeRefinement(nn.Module):
         depth_mono: torch.Tensor,
         depth2_mono: torch.Tensor,
         feat_cross: torch.Tensor,
-        feat2: torch.Tensor,
         T_12: torch.Tensor,
         K: torch.Tensor,
     ) -> dict:
@@ -175,7 +174,6 @@ class IterativeRefinement(nn.Module):
         depth_mono  : (B, 1, H, W)  monocular depth prior, view 1
         depth2_mono : (B, 1, H, W)  monocular depth prior, view 2 (for warping)
         feat_cross  : (B, C, H, W)  cross-attended feature (view1 query, view2 context)
-        feat2       : (B, C, H, W)  raw view-2 feature (for per-iter warping)
         T_12        : (B, 4, 4)     cam1 → cam2
         K           : (B, 3, 3)     intrinsics (at refinement resolution)
 
