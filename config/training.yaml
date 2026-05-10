@@ -25,9 +25,52 @@ loader:
   drop_last: true
 
 # ---------------------------------------------------------------------------
-# Model / Optimiser / Scheduler / Loss
+# Model
 # ---------------------------------------------------------------------------
-# (to be filled when losses.py and the model are implemented)
+model:
+  feat_dim:    128        # encoder output channels at each scale
+  hidden_dim:  128        # ConvGRU hidden state channels
+  num_iters:   4          # refinement iterations
+  num_heads:   4          # local attention heads
+  window_size: 7          # local attention window (pixels in feature space)
+  pretrained:  true       # load ImageNet ConvNeXt-Tiny weights
+
+  # Camera intrinsics fallback (used when dataset does not supply them per batch)
+  fx: 577.0
+  fy: 577.0
+  cx: 320.0
+  cy: 240.0
+
+# ---------------------------------------------------------------------------
+# Optimiser
+# ---------------------------------------------------------------------------
+optimizer:
+  type:         adamw
+  lr:           1.0e-4
+  weight_decay: 1.0e-4
+  betas:        [0.9, 0.999]
+
+# ---------------------------------------------------------------------------
+# LR scheduler
+# ---------------------------------------------------------------------------
+scheduler:
+  type:          cosine
+  warmup_epochs: 5
+  eta_min:       1.0e-6
+
+# ---------------------------------------------------------------------------
+# Loss weights
+# ---------------------------------------------------------------------------
+loss:
+  depth:            1.0    # scale-invariant log loss (supervised)
+  photometric:      0.1    # SSIM + L1 with differentiable warp
+  consistency:      0.1    # cross-view depth consistency
+  smooth:           0.05   # edge-aware smoothness
+  iter_supervision: 0.5    # deep supervision over refinement iterations
+
+# ---------------------------------------------------------------------------
+# Training
+# ---------------------------------------------------------------------------
 train:
   epochs: 50
   grad_clip: 1.0                 # max gradient norm; null → disabled
@@ -53,5 +96,4 @@ checkpoint:
 logging:
   project: "mono-depth-3DR"
   run_name: null                 # null → auto-generated timestamp
-  use_wandb: false
   log_dir: "runs/"

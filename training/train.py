@@ -2,7 +2,6 @@
 train.py — Training loop for mono-depth-to-3DR.
 
 All hyper-parameters are read from config/training.yaml.
-The model is a placeholder (torch.nn.Linear) until the real network is implemented.
 
 Usage
 -----
@@ -26,6 +25,8 @@ from torch.utils.data import DataLoader
 
 from data.temporal_sampling import ScanNetTemporalDataset
 from data.graph_based_sampling import ScanNetGraphDataset
+from models.network import DepthAlignNet
+from training.losses import total_loss as compute_total_loss
 
 
 # ---------------------------------------------------------------------------
@@ -181,28 +182,14 @@ def _keep_top_k(save_dir: str, monitor_tag: str, top_k: int) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Loss  (placeholder until losses.py is implemented)
+# Loss
 # ---------------------------------------------------------------------------
 
-def compute_loss(batch, pred, cfg: dict) -> tuple[torch.Tensor, dict]:
+def compute_loss(batch: dict, outputs: dict, cfg: dict, K: torch.Tensor):
     """
-    Placeholder loss — returns zero until losses.py is wired in.
-
-    Replace the body of this function once losses.py is ready:
-
-        from training.losses import depth_loss, photometric_loss, pixel_loss, smooth_loss
-        w = cfg["loss"]
-        total = (
-            w["depth_consistency"] * depth_loss(pred, batch["depths"]) +
-            w["photometric"]       * photometric_loss(...) +
-            w["pixel_consistency"] * pixel_loss(...) +
-            w["smooth"]            * smooth_loss(pred)
-        )
-        return total, {"depth": ..., "photo": ..., "pixel": ..., "smooth": ...}
+    Thin wrapper so train() stays clean.
     """
-    device = next(iter(batch.values())).device if isinstance(next(iter(batch.values())), torch.Tensor) else "cpu"
-    zero   = torch.tensor(0.0, device=device, requires_grad=True)
-    return zero, {"depth": 0.0, "photo": 0.0, "pixel": 0.0, "smooth": 0.0}
+    return compute_total_loss(outputs, batch, cfg.get("loss", {}), K)
 
 
 # ---------------------------------------------------------------------------
@@ -226,9 +213,16 @@ def run_epoch(
     use_amp   = train_cfg.get("mixed_precision", False) and device.type == "cuda"
     accum     = int(train_cfg.get("accumulate_grad_batches", 1))
 
-    totals    = {"loss": 0.0, "depth": 0.0, "photo": 0.0, "pixel": 0.0, "smooth": 0.0}
+    totals    = {"loss": 0.0, "depth": 0.0, "photo": 0.0, "consistency": 0.0, "smooth": 0.0, "iters": 0.0}
     n_batches = 0
     t0        = time.time()
+
+    # Build a fixed K from config (will be overridden per-batch if dataset provides it)
+    model_cfg = cfg.get("model", {})
+    fx = float(model_cfg.get("fx", 577.0))
+    fy = float(model_cfg.get("fy", 577.0))
+    cx = float(model_cfg.get("cx", 320.0))
+    cy = float(model_cfg.get("cy", 240.0))
 
     ctx = torch.no_grad() if not train else torch.enable_grad()
     with ctx:
@@ -239,9 +233,41 @@ def run_epoch(
                 for k, v in batch.items()
             }
 
+            B = batch["images"].shape[0]
+            H = batch["images"].shape[-2]
+            W = batch["images"].shape[-1]
+
+            # Per-batch intrinsics — use dataset-provided if available, else config fallback
+            if "intrinsics" in batch:
+                K = batch["intrinsics"]    # (B, 3, 3)
+            else:
+                K = torch.tensor(
+                    [[fx, 0, cx], [0, fy, cy], [0, 0, 1]],
+                    dtype=torch.float32, device=device
+                ).unsqueeze(0).expand(B, -1, -1)
+
+            imgs   = batch["images"]       # (B, N, 3, H, W)
+            depths = batch["depths"]       # (B, N, 1, H, W)
+            poses  = batch["poses"]        # (B, N, 4, 4)
+
+            rgb1        = imgs[:, 0]
+            rgb2        = imgs[:, 1]
+            depth_mono1 = depths[:, 0]
+            depth_mono2 = depths[:, 1]
+
+            # T_12 = inv(pose2) @ pose1  (cam1 → cam2)
+            T_12 = torch.linalg.inv(poses[:, 1]) @ poses[:, 0]
+
             with torch.autocast(device_type=device.type, enabled=use_amp):
-                pred = model(batch["images"])           # placeholder forward
-                loss, breakdown = compute_loss(batch, pred, cfg)
+                outputs = model(
+                    rgb1=rgb1,
+                    rgb2=rgb2,
+                    depth_mono1=depth_mono1,
+                    depth_mono2=depth_mono2,
+                    T_12=T_12,
+                    K=K,
+                )
+                loss, breakdown = compute_loss(batch, outputs, cfg, K)
                 if accum > 1:
                     loss = loss / accum
 
@@ -255,11 +281,12 @@ def run_epoch(
                     scaler.update()
                     optimizer.zero_grad(set_to_none=True)
 
-            totals["loss"]   += loss.item() * (accum if accum > 1 else 1)
-            totals["depth"]  += breakdown["depth"]
-            totals["photo"]  += breakdown["photo"]
-            totals["pixel"]  += breakdown["pixel"]
-            totals["smooth"] += breakdown["smooth"]
+            totals["loss"]        += loss.item() * (accum if accum > 1 else 1)
+            totals["depth"]       += breakdown.get("depth", 0.0)
+            totals["photo"]       += breakdown.get("photo", 0.0)
+            totals["consistency"] += breakdown.get("consistency", 0.0)
+            totals["smooth"]      += breakdown.get("smooth", 0.0)
+            totals["iters"]       += breakdown.get("iters", 0.0)
             n_batches += 1
 
             if train and (step + 1) % log_every == 0:
@@ -300,8 +327,16 @@ def train(cfg: dict, resume: str | None = None) -> None:
     print(f"[train] Batches train={len(train_loader)}  val={len(val_loader)}  "
           f"batch_size={cfg['loader']['batch_size']}")
 
-    # --- model (placeholder — replace with real network) ---
-    model = torch.nn.Linear(1, 1).to(device)
+    # --- model ---
+    model_cfg = cfg.get("model", {})
+    model = DepthAlignNet(
+        feat_dim    = int(model_cfg.get("feat_dim",    128)),
+        hidden_dim  = int(model_cfg.get("hidden_dim", 128)),
+        num_iters   = int(model_cfg.get("num_iters",    4)),
+        num_heads   = int(model_cfg.get("num_heads",    4)),
+        window_size = int(model_cfg.get("window_size",  7)),
+        pretrained  = bool(model_cfg.get("pretrained", True)),
+    ).to(device)
 
     optimizer  = build_optimizer(cfg, model)
     scheduler  = build_scheduler(cfg, optimizer, num_epochs=int(train_cfg["epochs"]))
