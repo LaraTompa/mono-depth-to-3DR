@@ -6,7 +6,7 @@
 # Dataset / scene root
 # ---------------------------------------------------------------------------
 dataset:
-  root_dir: "/storage/group/dataset_mirrors/scannet/scans"
+  root_dir: "datasets/sampled_data"
   # expected layout: root_dir/train/<scenes>  and  root_dir/val/<scenes>
   sampler_type: "temporal"       # "temporal" | "graph"
   num_frames: 6                  # frames per sequence
@@ -63,10 +63,11 @@ scheduler:
 # ---------------------------------------------------------------------------
 loss:
   depth:            1.0    # scale-invariant log loss (supervised)
-  photometric:      0.1    # SSIM + L1 with differentiable warp
-  consistency:      0.1    # cross-view depth consistency
   smooth:           0.05   # edge-aware smoothness
   iter_supervision: 0.5    # deep supervision over refinement iterations
+  # photometric and consistency re-enable once depths are reasonable:
+  # photometric:    0.1
+  # consistency:    0.1
 
 # ---------------------------------------------------------------------------
 # Training

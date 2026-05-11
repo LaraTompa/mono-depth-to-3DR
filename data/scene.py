@@ -33,6 +33,11 @@ def load_depth_png(path: str) -> np.ndarray:
     return np.array(Image.open(path)).astype(np.float32) / 1000.0
 
 
+def load_depth(path: str) -> np.ndarray:
+    """Load a .npy depth map (float32, metres)."""
+    return np.load(path).astype(np.float32)
+
+
 # ---------------------------------------------------------------------------
 # Scene class
 # ---------------------------------------------------------------------------
@@ -41,22 +46,19 @@ class ScanNetScene:
     """
     Lightweight wrapper around a single ScanNet scene directory.
 
-    Directory layout assumed::
+    Directory layout (sampled data format)::
 
         <scene_path>/
-            color/          {fid}.jpg
-            depth/          {fid}.png
+            color/          {fid}.png
+            depth/          {fid}.npy  (float32, shape (1,H,W), metres)
             pose/           {fid}.txt
             intrinsic/
                 intrinsic_depth.txt
                 intrinsic_color.txt
-
-    All heavy data is loaded lazily or on explicit request so that the object
-    is cheap to construct during scene discovery.
     """
 
-    COLOR_EXT = ".jpg"
-    DEPTH_EXT = ".png"
+    COLOR_EXT = ".png"
+    DEPTH_EXT = ".npy"
     POSE_EXT = ".txt"
     INTRINSIC_FNAME = "intrinsic_depth.txt"
 
@@ -94,7 +96,7 @@ class ScanNetScene:
 
     @property
     def frame_ids(self) -> list[str]:
-        """Sorted list of frame IDs derived from files in the color directory."""
+        """Sorted list of frame IDs derived from .png files in the color directory."""
         if self._frame_ids is None:
             self._frame_ids = sorted(
                 f[: -len(self.COLOR_EXT)]
@@ -154,3 +156,26 @@ class ScanNetScene:
 
     def __repr__(self) -> str:
         return f"ScanNetScene(name={self.name!r}, path={self.scene_path!r})"
+
+
+# ---------------------------------------------------------------------------
+# Recursive scene discovery
+# ---------------------------------------------------------------------------
+
+def find_scene_paths(root_dir: str) -> list[str]:
+    """
+    Recursively search root_dir for valid ScanNetScene directories.
+
+    A directory is considered a scene if it contains color/, depth/, pose/
+    and intrinsic/intrinsic_depth.txt.  This handles both flat layouts
+    (root_dir/<scene>/) and nested layouts (root_dir/batch/sample/<scene>/).
+
+    Returns a list of absolute scene directory paths.
+    """
+    scenes = []
+    for dirpath, dirnames, _ in os.walk(root_dir):
+        scene = ScanNetScene(dirpath)
+        if scene.is_valid() and scene.frame_ids:
+            scenes.append(dirpath)
+            dirnames.clear()   # don't recurse into a valid scene directory
+    return sorted(scenes)

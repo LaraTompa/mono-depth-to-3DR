@@ -7,10 +7,7 @@ from PIL import Image
 import random
 
 from graph_based_sampling import ScanNetGraphDataset
-from scene import ScanNetScene
-
-# Fixed spatial size all frames are resized to before batching
-IMAGE_H, IMAGE_W = 480, 640
+from scene import ScanNetScene, find_scene_paths
 
 
 class ScanNetTemporalDataset(Dataset):
@@ -23,6 +20,7 @@ class ScanNetTemporalDataset(Dataset):
         max_stride=10,
         transform=None,
         max_scenes=None,
+        scene_paths=None,   # pre-split list of scene dirs; overrides find_scene_paths
     ):
         self.root_dir = root_dir
         self.num_frames = num_frames
@@ -31,18 +29,19 @@ class ScanNetTemporalDataset(Dataset):
         self.max_stride = max_stride
         self.transform = transform
 
-        self.scenes = sorted(os.listdir(root_dir))
-        if max_scenes:
-            self.scenes = self.scenes[:max_scenes]
-
         # fixed seq_len per epoch; call resample_seq_len() to change between epochs
         self.seq_len = num_frames
 
         self.scene_data = []
 
-        for scene_name in self.scenes:
-            scene_path = os.path.join(root_dir, scene_name)
+        if scene_paths is None:
+            scene_paths = find_scene_paths(root_dir)
+        if max_scenes:
+            scene_paths = scene_paths[:max_scenes]
+
+        for scene_path in scene_paths:
             scene = ScanNetScene(scene_path)
+            scene_name = os.path.relpath(scene_path, root_dir)
 
             if not scene.is_valid() or not scene.frame_ids:
                 continue
@@ -53,6 +52,7 @@ class ScanNetTemporalDataset(Dataset):
                 "scene": scene_name,
                 "color_dir": scene.color_dir,
                 "depth_dir": scene.depth_dir,
+                "intrinsics": scene.intrinsics,   # (3, 3) float32
                 "poses": poses,
                 "frame_ids": valid_fids
             })
@@ -105,7 +105,7 @@ class ScanNetTemporalDataset(Dataset):
         return seq_ids
 
     def _load_image(self, path):
-        img = Image.open(path).convert("RGB").resize((IMAGE_W, IMAGE_H), Image.BILINEAR)
+        img = Image.open(path).convert("RGB")
         if self.transform:
             img = self.transform(img)
         else:
@@ -113,10 +113,9 @@ class ScanNetTemporalDataset(Dataset):
         return img
 
     def _load_depth(self, path):
-        depth = np.array(
-            Image.open(path).resize((IMAGE_W, IMAGE_H), Image.NEAREST)
-        ).astype(np.float32) / 1000.0
-        return torch.from_numpy(depth).unsqueeze(0)
+        arr = np.load(path).astype(np.float32)
+        t = torch.from_numpy(arr)
+        return t if t.ndim == 3 else t.unsqueeze(0)  # ensure (1, H, W)
 
     def __getitem__(self, idx):
         scene_info = random.choice(self.scene_data)
@@ -127,20 +126,24 @@ class ScanNetTemporalDataset(Dataset):
         depths = []
         poses = []
 
+        color_ext = ScanNetScene.COLOR_EXT
+        depth_ext = ScanNetScene.DEPTH_EXT
+
         for fid in seq_ids:
-            img_path = os.path.join(scene_info["color_dir"], f"{fid}.jpg")
-            depth_path = os.path.join(scene_info["depth_dir"], f"{fid}.png")
+            img_path = os.path.join(scene_info["color_dir"], f"{fid}{color_ext}")
+            depth_path = os.path.join(scene_info["depth_dir"], f"{fid}{depth_ext}")
 
             images.append(self._load_image(img_path))
             depths.append(self._load_depth(depth_path))
             poses.append(torch.from_numpy(scene_info["poses"][fid]).float())
 
         return {
-            "images": torch.stack(images),   # (N, 3, H, W)
-            "depths": torch.stack(depths),   # (N, 1, H, W)
-            "poses": torch.stack(poses),     # (N, 4, 4)
+            "images": torch.stack(images),                            # (N, 3, H, W)
+            "depths": torch.stack(depths),                            # (N, 1, H, W)
+            "poses": torch.stack(poses),                              # (N, 4, 4)
+            "intrinsics": torch.from_numpy(scene_info["intrinsics"]), # (3, 3)
             "scene": scene_info["scene"],
-            "frame_ids": seq_ids             # original frame names e.g. ["0", "15", "30"]
+            "frame_ids": seq_ids
         }
 
 

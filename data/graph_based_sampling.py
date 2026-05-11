@@ -9,7 +9,7 @@ from PIL import Image
 from tqdm import tqdm
 
 
-from scene import ScanNetScene, load_depth_png
+from scene import ScanNetScene, load_depth_png, load_depth, find_scene_paths
 
 
 class ScanNetGraphDataset(Dataset):
@@ -36,10 +36,7 @@ class ScanNetGraphDataset(Dataset):
         self.overlap_sample_step = overlap_sample_step
         self.depth_tolerance = depth_tolerance
         self.max_frame_gap = max_frame_gap
-
-        self.scenes = sorted(os.listdir(root_dir))
-        if max_scenes:
-            self.scenes = self.scenes[:max_scenes]
+        self.max_scenes = max_scenes
 
         # load or build graph
         if graph_cache and os.path.exists(graph_cache):
@@ -155,8 +152,12 @@ class ScanNetGraphDataset(Dataset):
     def _build_graph(self):
         scene_data = []
 
-        for scene_name in tqdm(self.scenes, desc="Scenes", unit="scene"):
-            scene_path = os.path.join(self.root_dir, scene_name)
+        scene_paths = find_scene_paths(self.root_dir)
+        if self.max_scenes:
+            scene_paths = scene_paths[:self.max_scenes]
+
+        for scene_path in tqdm(scene_paths, desc="Scenes", unit="scene"):
+            scene_name = os.path.relpath(scene_path, self.root_dir)
             scene = ScanNetScene(scene_path)
 
             if not scene.is_valid():
@@ -187,7 +188,7 @@ class ScanNetGraphDataset(Dataset):
             # avoiding the classic loop-closure bug
             def get_depth(fid, _scene=scene, _cache=depth_cache):
                 if fid not in _cache:
-                    _cache[fid] = load_depth_png(_scene.depth_path(fid))
+                    _cache[fid] = load_depth(_scene.depth_path(fid))
                 return _cache[fid]
 
             # weighted adjacency: graph[fid_i][fid_j] = symmetric overlap score
@@ -299,8 +300,9 @@ class ScanNetGraphDataset(Dataset):
         return img
 
     def _load_depth(self, path):
-        depth = np.array(Image.open(path)).astype(np.float32) / 1000.0
-        return torch.from_numpy(depth).unsqueeze(0)
+        arr = np.load(path).astype(np.float32)
+        t = torch.from_numpy(arr)
+        return t if t.ndim == 3 else t.unsqueeze(0)  # ensure (1, H, W)
 
     def __len__(self):
         return self.num_samples
@@ -313,8 +315,8 @@ class ScanNetGraphDataset(Dataset):
         images, depths, poses = [], [], []
 
         for fid in seq_ids:
-            img_path = os.path.join(scene_info["color_dir"], f"{fid}.jpg")
-            depth_path = os.path.join(scene_info["depth_dir"], f"{fid}.png")
+            img_path = os.path.join(scene_info["color_dir"], f"{fid}{ScanNetScene.COLOR_EXT}")
+            depth_path = os.path.join(scene_info["depth_dir"], f"{fid}{ScanNetScene.DEPTH_EXT}")
 
             images.append(self._load_image(img_path))
             depths.append(self._load_depth(depth_path))

@@ -12,6 +12,7 @@ Usage
 
 import argparse
 import os
+import random
 import sys
 import time
 
@@ -20,13 +21,15 @@ sys.path.insert(0, _REPO_ROOT)
 sys.path.insert(0, os.path.join(_REPO_ROOT, "data"))
 
 import torch
+import torch.nn.functional as F
 import yaml
 from torch.utils.data import DataLoader
 
 from data.temporal_sampling import ScanNetTemporalDataset
 from data.graph_based_sampling import ScanNetGraphDataset
-from models.network import DepthAlignNet
-from training.losses import total_loss as compute_total_loss
+from data.scene import find_scene_paths
+from models.model_image_depth.network import DepthAlignNet
+from training.losses import total_loss as compute_total_loss, compute_depth_metrics
 
 
 # ---------------------------------------------------------------------------
@@ -47,7 +50,7 @@ def seed_everything(seed: int) -> None:
 # Dataset factory
 # ---------------------------------------------------------------------------
 
-def build_dataset(cfg: dict, root_dir: str, num_samples: int):
+def build_dataset(cfg: dict, root_dir: str, num_samples: int, scene_paths=None):
     ds_cfg    = cfg["dataset"]
     graph_cfg = cfg.get("graph_sampling", {})
     sampler   = ds_cfg.get("sampler_type", "temporal")
@@ -59,6 +62,7 @@ def build_dataset(cfg: dict, root_dir: str, num_samples: int):
             num_samples=num_samples,
             min_stride=ds_cfg["min_stride"],
             max_stride=ds_cfg["max_stride"],
+            scene_paths=scene_paths,
         )
     elif sampler == "graph":
         return ScanNetGraphDataset(
@@ -213,7 +217,9 @@ def run_epoch(
     use_amp   = train_cfg.get("mixed_precision", False) and device.type == "cuda"
     accum     = int(train_cfg.get("accumulate_grad_batches", 1))
 
-    totals    = {"loss": 0.0, "depth": 0.0, "photo": 0.0, "consistency": 0.0, "smooth": 0.0, "iters": 0.0}
+    totals    = {"loss": 0.0, "depth": 0.0, "smooth": 0.0, "iters": 0.0}
+    metric_sums = {"abs_rel": 0.0, "rmse": 0.0, "delta1": 0.0}
+    metric_count = 0
     n_batches = 0
     t0        = time.time()
 
@@ -281,12 +287,20 @@ def run_epoch(
                     scaler.update()
                     optimizer.zero_grad(set_to_none=True)
 
-            totals["loss"]        += loss.item() * (accum if accum > 1 else 1)
-            totals["depth"]       += breakdown.get("depth", 0.0)
-            totals["photo"]       += breakdown.get("photo", 0.0)
-            totals["consistency"] += breakdown.get("consistency", 0.0)
-            totals["smooth"]      += breakdown.get("smooth", 0.0)
-            totals["iters"]       += breakdown.get("iters", 0.0)
+            totals["loss"]   += loss.item() * (accum if accum > 1 else 1)
+            totals["depth"]  += breakdown.get("depth", 0.0)
+            totals["smooth"] += breakdown.get("smooth", 0.0)
+            totals["iters"]  += breakdown.get("iters", 0.0)
+
+            if not train:
+                pred1 = outputs["depth1"]                         # (B,1,pH,pW)
+                gt1   = depths[:, 0]                              # (B,1,H,W)
+                gt1_s = F.interpolate(gt1, size=pred1.shape[-2:], mode="nearest")
+                m = compute_depth_metrics(pred1.detach(), gt1_s)
+                if not any(v != v for v in m.values()):           # skip NaN batches
+                    for k, v in m.items():
+                        metric_sums[k] += v
+                    metric_count += 1
             n_batches += 1
 
             if train and (step + 1) % log_every == 0:
@@ -298,7 +312,11 @@ def run_epoch(
                     f"  loss={avg_loss:.4f}  lr={lr:.2e}  {elapsed:.1f}s"
                 )
 
-    return {k: v / max(n_batches, 1) for k, v in totals.items()}
+    out = {k: v / max(n_batches, 1) for k, v in totals.items()}
+    if not train and metric_count > 0:
+        for k, v in metric_sums.items():
+            out[k] = v / metric_count
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -315,17 +333,35 @@ def train(cfg: dict, resume: str | None = None) -> None:
 
     # --- datasets ---
     root_dir = cfg["dataset"]["root_dir"]
-    n_train  = cfg["dataset"]["num_samples"]
-    n_val    = max(1, n_train // 4)    # ~20 % of train virtual length
+    # resolve relative paths from the repo root
+    if not os.path.isabs(root_dir):
+        root_dir = os.path.join(_REPO_ROOT, root_dir)
+    n_train = cfg["dataset"]["num_samples"]
+    n_val   = max(1, n_train // 8)   # ~10 % of train virtual length
+    n_test  = max(1, n_train // 8)
 
-    train_ds = build_dataset(cfg, root_dir=os.path.join(root_dir, "train"), num_samples=n_train)
-    val_ds   = build_dataset(cfg, root_dir=os.path.join(root_dir, "val"),   num_samples=n_val)
+    # 80/10/10 scene split (deterministic via fixed seed)
+    all_scene_paths = find_scene_paths(root_dir)
+    rng = random.Random(42)
+    rng.shuffle(all_scene_paths)
+    n = len(all_scene_paths)
+    s1 = int(n * 0.8)
+    s2 = int(n * 0.9)
+    train_paths = all_scene_paths[:s1]
+    val_paths   = all_scene_paths[s1:s2]
+    test_paths  = all_scene_paths[s2:]
+    print(f"[train] Scenes: {len(train_paths)} train / {len(val_paths)} val / {len(test_paths)} test")
+
+    train_ds = build_dataset(cfg, root_dir=root_dir, num_samples=n_train, scene_paths=train_paths)
+    val_ds   = build_dataset(cfg, root_dir=root_dir, num_samples=n_val,   scene_paths=val_paths)
+    test_ds  = build_dataset(cfg, root_dir=root_dir, num_samples=n_test,  scene_paths=test_paths)
 
     train_loader = build_loader(cfg, train_ds, shuffle=True)
     val_loader   = build_loader(cfg, val_ds,   shuffle=False)
+    test_loader  = build_loader(cfg, test_ds,  shuffle=False)
 
-    print(f"[train] Batches train={len(train_loader)}  val={len(val_loader)}  "
-          f"batch_size={cfg['loader']['batch_size']}")
+    print(f"[train] Batches train={len(train_loader)}  val={len(val_loader)}  test={len(test_loader)}"
+          f"  batch_size={cfg['loader']['batch_size']}")
 
     # --- model ---
     model_cfg = cfg.get("model", {})
@@ -384,7 +420,15 @@ def train(cfg: dict, resume: str | None = None) -> None:
         # --- logging ---
         lr  = optimizer.param_groups[0]["lr"]
         elapsed = time.time() - t_epoch
-        val_str = f"  val_loss={val_metrics.get('loss', float('nan')):.4f}" if val_metrics else ""
+        val_str = ""
+        if val_metrics:
+            val_str = f"  val_loss={val_metrics.get('loss', float('nan')):.4f}"
+            if "abs_rel" in val_metrics:
+                val_str += (
+                    f"  abs_rel={val_metrics['abs_rel']:.4f}"
+                    f"  rmse={val_metrics['rmse']:.4f}"
+                    f"  delta1={val_metrics['delta1']:.4f}"
+                )
         print(
             f"[epoch {epoch:03d}/{train_cfg['epochs']}]"
             f"  train_loss={train_metrics['loss']:.4f}{val_str}"
@@ -418,6 +462,21 @@ def train(cfg: dict, resume: str | None = None) -> None:
         _keep_top_k(save_dir, monitor, top_k)
 
     print(f"\n[train] Done. Best {monitor}={best_metric:.4f}")
+
+    # --- Final test evaluation on best checkpoint ---
+    print("\n[test] Loading best checkpoint for final evaluation...")
+    best_ckpt = os.path.join(save_dir, "best.pt")
+    if os.path.isfile(best_ckpt):
+        ckpt = torch.load(best_ckpt, map_location=device)
+        model.load_state_dict(ckpt["model"])
+    test_metrics = run_epoch(model, test_loader, None, scaler, cfg, device, train=False, epoch=0)
+    print(
+        f"[test] loss={test_metrics['loss']:.4f}"
+        + (f"  abs_rel={test_metrics['abs_rel']:.4f}"
+           f"  rmse={test_metrics['rmse']:.4f}"
+           f"  delta1={test_metrics['delta1']:.4f}"
+           if "abs_rel" in test_metrics else "")
+    )
 
 
 # ---------------------------------------------------------------------------
