@@ -6,7 +6,8 @@
 # Dataset / scene root
 # ---------------------------------------------------------------------------
 dataset:
-  root_dir: "datasets/sampled_data"
+  root_dir:   "datasets/sampled_data"
+  mde_source: "zoedepth"   # "zoedepth" | "depthpro"
 
 # ---------------------------------------------------------------------------
 # DataLoader
@@ -21,12 +22,13 @@ loader:
 # Model
 # ---------------------------------------------------------------------------
 model:
-  feat_dim:    128        # encoder output channels at each scale
-  hidden_dim:  128        # ConvGRU hidden state channels
-  num_iters:   4          # refinement iterations
-  num_heads:   4          # local attention heads
-  window_size: 7          # local attention window (pixels in feature space)
-  pretrained:  true       # load ImageNet ConvNeXt-Tiny weights
+  feat_dim:        128        # encoder output channels at each scale
+  hidden_dim:      128        # ConvGRU hidden state channels
+  num_iters:       4          # refinement iterations
+  num_heads:       4          # local attention heads
+  window_size:     7          # local attention window (pixels in feature space)
+  pretrained:      true       # load ImageNet ConvNeXt-Tiny weights
+  freeze_backbone: false      # freeze ConvNeXt stages (saves memory/compute)
 
 # ---------------------------------------------------------------------------
 # Optimiser

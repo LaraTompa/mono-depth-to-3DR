@@ -168,6 +168,9 @@ def train(cfg: dict, resume: str | None = None) -> None:
     all_scene_paths = find_scene_paths(root_dir)
     rng = random.Random(42)
     rng.shuffle(all_scene_paths)
+    max_scenes = cfg["dataset"].get("max_scenes")
+    if max_scenes:
+        all_scene_paths = all_scene_paths[:int(max_scenes)]
     n = len(all_scene_paths)
     s1 = int(n * 0.8)
     s2 = int(n * 0.9)
@@ -190,12 +193,13 @@ def train(cfg: dict, resume: str | None = None) -> None:
     # --- model ---
     model_cfg = cfg.get("model", {})
     model = DepthAlignNet(
-        feat_dim    = int(model_cfg.get("feat_dim",    128)),
-        hidden_dim  = int(model_cfg.get("hidden_dim", 128)),
-        num_iters   = int(model_cfg.get("num_iters",    4)),
-        num_heads   = int(model_cfg.get("num_heads",    4)),
-        window_size = int(model_cfg.get("window_size",  7)),
-        pretrained  = bool(model_cfg.get("pretrained", True)),
+        feat_dim        = int(model_cfg.get("feat_dim",       128)),
+        hidden_dim      = int(model_cfg.get("hidden_dim",    128)),
+        num_iters       = int(model_cfg.get("num_iters",       4)),
+        num_heads       = int(model_cfg.get("num_heads",       4)),
+        window_size     = int(model_cfg.get("window_size",    7)),
+        pretrained      = bool(model_cfg.get("pretrained",   True)),
+        freeze_backbone = bool(model_cfg.get("freeze_backbone", False)),
     ).to(device)
 
     optimizer  = build_optimizer(cfg, model)

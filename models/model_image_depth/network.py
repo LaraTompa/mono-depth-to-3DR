@@ -47,17 +47,18 @@ class DepthAlignNet(nn.Module):
 
     def __init__(
         self,
-        feat_dim    : int  = 128,
-        hidden_dim  : int  = 128,
-        num_iters   : int  = 4,
-        num_heads   : int  = 4,
-        window_size : int  = 7,
-        pretrained  : bool = True,
+        feat_dim        : int  = 128,
+        hidden_dim      : int  = 128,
+        num_iters       : int  = 4,
+        num_heads       : int  = 4,
+        window_size     : int  = 7,
+        pretrained      : bool = True,
+        freeze_backbone : bool = False,
     ):
         super().__init__()
 
         # Shared encoder (weight-tied across views)
-        self.encoder = SharedEncoder(pretrained=pretrained, out_channels=feat_dim)
+        self.encoder = SharedEncoder(pretrained=pretrained, out_channels=feat_dim, freeze_backbone=freeze_backbone)
 
         # Local geometry-aware cross-attention at each scale
         self.attn16 = LocalGeoCrossAttention(feat_dim, num_heads, window_size)

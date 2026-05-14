@@ -10,7 +10,8 @@ Expected on-disk layout
     <root_dir>/batch*/sample*/<scene>/
         color/          {fid}.png
         depth/          {fid}.npy          GT depth, float32, metres
-        zoe-depth_pred/ {fid}.png          MDE prior, uint16 PNG, millimetres
+        zoe-depth_pred/ {fid}.png          MDE prior, uint16 PNG, millimetres  (zoedepth)
+        depth_pro_pred/ {fid}.npz          MDE prior, float32 metres            (depthpro)
         pose/           {fid}.txt
         intrinsic/      intrinsic_depth.txt
 """
@@ -35,18 +36,20 @@ class PreSampledPairDataset(Dataset):
     Parameters
     ----------
     root_dir    : str   Path to datasets/sampled_data.
+    mde_source  : str   "zoedepth" (default) | "depthpro"
     scene_paths : list  Optional pre-split list of scene dirs (train/val/test
                         split computed in train.py).  When supplied, root_dir
                         is not searched again.
     """
 
-    def __init__(self, root_dir: str, scene_paths=None):
+    def __init__(self, root_dir: str, mde_source: str = "zoedepth", scene_paths=None):
         if scene_paths is None:
             scene_paths = find_scene_paths(root_dir)
 
+        self.mde_source = mde_source
         self.pairs = []
         for scene_path in scene_paths:
-            scene = ScanNetScene(scene_path)
+            scene = ScanNetScene(scene_path, mde_source=mde_source)
             if not scene.is_valid() or not scene.frame_ids:
                 continue
             poses, valid_fids = scene.load_all_poses()
@@ -57,6 +60,7 @@ class PreSampledPairDataset(Dataset):
                 "color_dir":     scene.color_dir,
                 "depth_dir":     scene.depth_dir,
                 "mde_depth_dir": scene.mde_depth_dir,
+                "mde_depth_ext": scene.mde_depth_ext,
                 "intrinsics":    scene.intrinsics,   # (3, 3) float32
                 "poses":         poses,              # dict[fid → 4×4 ndarray]
             }
@@ -83,8 +87,10 @@ class PreSampledPairDataset(Dataset):
                 os.path.join(info["color_dir"],     f"{fid}{ScanNetScene.COLOR_EXT}")))
             depths.append(self._load_npy(
                 os.path.join(info["depth_dir"],     f"{fid}{ScanNetScene.DEPTH_EXT}")))
-            mde_depths.append(self._load_png_depth(
-                os.path.join(info["mde_depth_dir"], f"{fid}{ScanNetScene.MDE_DEPTH_EXT}")))
+            mde_depths.append(self._load_mde_depth(
+                os.path.join(info["mde_depth_dir"], f"{fid}{info['mde_depth_ext']}"),
+                self.mde_source,
+            ))
             poses.append(torch.from_numpy(info["poses"][fid]).float())
 
         return {
@@ -112,7 +118,19 @@ class PreSampledPairDataset(Dataset):
         return t if t.ndim == 3 else t.unsqueeze(0)
 
     @staticmethod
-    def _load_png_depth(path: str) -> torch.Tensor:
-        """Load ZoeDepth prediction: uint16 PNG in mm → float32 metres."""
-        t = torch.from_numpy(np.array(Image.open(path)).astype(np.float32) / 1000.0)
+    def _load_mde_depth(path: str, mde_source: str) -> torch.Tensor:
+        if mde_source == "depthpro":
+            data = np.load(path)
+            for key in ["depth", "pred", "prediction", "arr_0"]:
+                if key in data:
+                    depth = data[key].astype(np.float32)
+                    break
+            else:
+                depth = data[list(data.keys())[0]].astype(np.float32)
+            if depth.ndim == 3 and depth.shape[0] == 1:
+                depth = depth[0]
+            t = torch.from_numpy(depth)
+        else:
+            # ZoeDepth: uint16 PNG in mm → float32 metres
+            t = torch.from_numpy(np.array(Image.open(path)).astype(np.float32) / 1000.0)
         return t if t.ndim == 3 else t.unsqueeze(0)

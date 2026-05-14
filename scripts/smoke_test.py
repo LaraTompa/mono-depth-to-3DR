@@ -21,8 +21,8 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
 import torch
 import torch.nn.functional as F
 
-# Make sure repo root and models/ are importable regardless of cwd
-_ROOT = os.path.dirname(os.path.abspath(__file__))
+# Make sure repo root is importable regardless of cwd
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _ROOT)
 
 # ── geometry utilities ───────────────────────────────────────────────────────
@@ -330,7 +330,6 @@ def demo_iterative_refinement(inp: dict, encoder: SharedEncoder) -> None:
             depth_mono=d1_s16,
             depth2_mono=d2_s16,
             feat_cross=f1["s16"],
-            feat2=f2["s16"],
             T_12=inp["T_12"],
             K=K_s16,
         )

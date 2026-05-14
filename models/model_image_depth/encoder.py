@@ -33,7 +33,7 @@ class SharedEncoder(nn.Module):
         Defaults to 128 — balances capacity vs. speed.
     """
 
-    def __init__(self, pretrained: bool = True, out_channels: int = 128):
+    def __init__(self, pretrained: bool = True, out_channels: int = 128, freeze_backbone: bool = False):
         super().__init__()
 
         # ── Load backbone ────────────────────────────────────────────────
@@ -86,6 +86,25 @@ class SharedEncoder(nn.Module):
         self.proj16 = nn.Conv2d(stage_channels[2], out_channels, 1)
 
         self.out_channels = out_channels
+
+        # ── Optionally freeze all backbone stages ────────────────────────
+        if freeze_backbone:
+            # Freeze all backbone parameters except the new conv's weights and bias
+            for name, p in backbone.named_parameters():
+                p.requires_grad = False
+
+            new_conv.weight.requires_grad = True
+            if new_conv.bias is not None:
+                new_conv.bias.requires_grad = True
+
+            def _mask_stem_grad(grad):
+                # grad shape: (out_ch, in_ch, kH, kW)
+                g = grad.clone()
+                # zero gradient for the first 3 input channels (RGB)
+                if g.size(1) >= 3:
+                    g[:, :3, ...] = 0.0
+                return g
+            new_conv.weight.register_hook(_mask_stem_grad)
 
     def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
         """
