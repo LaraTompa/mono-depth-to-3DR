@@ -228,3 +228,11 @@ if __name__ == "__main__":
             print(f"  {k}: {tuple(v.shape)}")
         elif isinstance(v, list):
             print(f"  {k}: list of {len(v)} × {tuple(v[0].shape)}")
+
+    #Print model size
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    trainable_names = [n for n, p in model.named_parameters() if p.requires_grad]
+    print(f"Total params:     {total_params/1e6:.2f}M")
+    print(f"Trainable params: {trainable_params/1e6:.2f}M")
+    print("Trainable names sample:", trainable_names[:20])
