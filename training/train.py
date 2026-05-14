@@ -202,6 +202,11 @@ def train(cfg: dict, resume: str | None = None) -> None:
         freeze_backbone = bool(model_cfg.get("freeze_backbone", False)),
     ).to(device)
 
+    # Print number of parameters and trainable parameters
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"[train] Model parameters: {total_params:,} total, {trainable_params:,} trainable")
+
     optimizer  = build_optimizer(cfg, model)
     scheduler  = build_scheduler(cfg, optimizer, num_epochs=int(train_cfg["epochs"]))
 
