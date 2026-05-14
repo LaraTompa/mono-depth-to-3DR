@@ -7,13 +7,6 @@
 # ---------------------------------------------------------------------------
 dataset:
   root_dir: "datasets/sampled_data"
-  # expected layout: root_dir/train/<scenes>  and  root_dir/val/<scenes>
-  sampler_type: "temporal"       # "temporal" | "graph"
-  num_frames: 6                  # frames per sequence
-  num_samples: 700               # virtual epoch length (DataLoader __len__)
-  min_stride: 40
-  max_stride: 90
-  max_scenes: null               # null → use all scenes; int → cap for debugging
 
 # ---------------------------------------------------------------------------
 # DataLoader
@@ -35,12 +28,6 @@ model:
   window_size: 7          # local attention window (pixels in feature space)
   pretrained:  true       # load ImageNet ConvNeXt-Tiny weights
 
-  # Camera intrinsics fallback (used when dataset does not supply them per batch)
-  fx: 577.0
-  fy: 577.0
-  cx: 320.0
-  cy: 240.0
-
 # ---------------------------------------------------------------------------
 # Optimiser
 # ---------------------------------------------------------------------------
@@ -55,7 +42,6 @@ optimizer:
 # ---------------------------------------------------------------------------
 scheduler:
   type:          cosine
-  warmup_epochs: 5
   eta_min:       1.0e-6
 
 # ---------------------------------------------------------------------------
@@ -65,9 +51,6 @@ loss:
   depth:            1.0    # scale-invariant log loss (supervised)
   smooth:           0.05   # edge-aware smoothness
   iter_supervision: 0.5    # deep supervision over refinement iterations
-  # photometric and consistency re-enable once depths are reasonable:
-  # photometric:    0.1
-  # consistency:    0.1
 
 # ---------------------------------------------------------------------------
 # Training
@@ -75,8 +58,6 @@ loss:
 train:
   epochs: 50
   grad_clip: 1.0                 # max gradient norm; null → disabled
-  mixed_precision: true          # torch.cuda.amp
-  accumulate_grad_batches: 1     # gradient accumulation steps
   val_every: 1                   # validate every N epochs
   log_every: 50                  # log every N batches
   seed: 0

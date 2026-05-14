@@ -222,6 +222,7 @@ class ScanNetGraphDataset(Dataset):
                 "scene": scene_name,
                 "color_dir": color_dir,
                 "depth_dir": depth_dir,
+                "mde_depth_dir": scene.mde_depth_dir,
                 "intrinsics": intrinsics,  # same camera for every frame in the scene
                 "poses": poses,
                 "graph": graph,
@@ -304,6 +305,12 @@ class ScanNetGraphDataset(Dataset):
         t = torch.from_numpy(arr)
         return t if t.ndim == 3 else t.unsqueeze(0)  # ensure (1, H, W)
 
+    def _load_mde_depth(self, path):
+        """Load a ZoeDepth prediction (uint16 PNG, stored in mm → convert to metres)."""
+        arr = np.array(Image.open(path)).astype(np.float32) / 1000.0
+        t = torch.from_numpy(arr)
+        return t if t.ndim == 3 else t.unsqueeze(0)  # ensure (1, H, W)
+
     def __len__(self):
         return self.num_samples
 
@@ -312,20 +319,23 @@ class ScanNetGraphDataset(Dataset):
 
         seq_ids = self._sample_sequence(scene_info)
 
-        images, depths, poses = [], [], []
+        images, depths, mde_depths, poses = [], [], [], []
 
         for fid in seq_ids:
-            img_path = os.path.join(scene_info["color_dir"], f"{fid}{ScanNetScene.COLOR_EXT}")
-            depth_path = os.path.join(scene_info["depth_dir"], f"{fid}{ScanNetScene.DEPTH_EXT}")
+            img_path   = os.path.join(scene_info["color_dir"],     f"{fid}{ScanNetScene.COLOR_EXT}")
+            depth_path = os.path.join(scene_info["depth_dir"],     f"{fid}{ScanNetScene.DEPTH_EXT}")
+            mde_path   = os.path.join(scene_info["mde_depth_dir"], f"{fid}{ScanNetScene.MDE_DEPTH_EXT}")
 
             images.append(self._load_image(img_path))
             depths.append(self._load_depth(depth_path))
+            mde_depths.append(self._load_mde_depth(mde_path))
             poses.append(torch.from_numpy(scene_info["poses"][fid]).float())
 
         return {
-            "images": torch.stack(images),
-            "depths": torch.stack(depths),
-            "poses": torch.stack(poses),
+            "images":     torch.stack(images),
+            "depths":     torch.stack(depths),                            # GT depths
+            "mde_depths": torch.stack(mde_depths),                        # MDE prior
+            "poses":      torch.stack(poses),
             "intrinsics": torch.from_numpy(scene_info["intrinsics"]).float(),
             "scene": scene_info["scene"],
             "frame_ids": seq_ids

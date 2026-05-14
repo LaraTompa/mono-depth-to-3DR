@@ -202,29 +202,3 @@ class DepthAlignNet(nn.Module):
             "scale2":       ref2["scale"],
             "bias2":        ref2["bias"],
         }
-
-
-# ---------------------------------------------------------------------------
-# Quick shape-check (no GPU required)
-# ---------------------------------------------------------------------------
-if __name__ == "__main__":
-    model = DepthAlignNet(pretrained=False, num_iters=2)
-    model.eval()
-
-    B, H, W = 2, 480, 640
-    rgb1  = torch.randn(B, 3, H, W)
-    rgb2  = torch.randn(B, 3, H, W)
-    dm1   = torch.rand(B, 1, H, W) + 0.1
-    dm2   = torch.rand(B, 1, H, W) + 0.1
-    T_12  = torch.eye(4).unsqueeze(0).expand(B, -1, -1)
-    fx = 577.0
-    K = torch.tensor([[fx, 0, W/2], [0, fx, H/2], [0, 0, 1]]).unsqueeze(0).expand(B, -1, -1)
-
-    with torch.no_grad():
-        out = model(rgb1, rgb2, dm1, dm2, T_12, K)
-
-    for k, v in out.items():
-        if isinstance(v, torch.Tensor):
-            print(f"  {k}: {tuple(v.shape)}")
-        elif isinstance(v, list):
-            print(f"  {k}: list of {len(v)} × {tuple(v[0].shape)}")

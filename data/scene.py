@@ -59,6 +59,8 @@ class ScanNetScene:
 
     COLOR_EXT = ".png"
     DEPTH_EXT = ".npy"
+    MDE_DEPTH_EXT = ".png"          # ZoeDepth predictions (uint16 PNG, mm → metres)
+    MDE_DEPTH_DIR = "zoe-depth_pred"
     POSE_EXT = ".txt"
     INTRINSIC_FNAME = "intrinsic_depth.txt"
 
@@ -68,6 +70,7 @@ class ScanNetScene:
 
         self.color_dir = os.path.join(scene_path, "color")
         self.depth_dir = os.path.join(scene_path, "depth")
+        self.mde_depth_dir = os.path.join(scene_path, self.MDE_DEPTH_DIR)
         self.pose_dir = os.path.join(scene_path, "pose")
         self.intrinsic_dir = os.path.join(scene_path, "intrinsic")
         self.intrinsic_path = os.path.join(
@@ -87,6 +90,7 @@ class ScanNetScene:
             os.path.isdir(self.color_dir)
             and os.path.isdir(self.depth_dir)
             and os.path.isdir(self.pose_dir)
+            and os.path.isdir(self.mde_depth_dir)
             and os.path.isfile(self.intrinsic_path)
         )
 
@@ -99,9 +103,12 @@ class ScanNetScene:
         """Sorted list of frame IDs derived from .png files in the color directory."""
         if self._frame_ids is None:
             self._frame_ids = sorted(
-                f[: -len(self.COLOR_EXT)]
-                for f in os.listdir(self.color_dir)
-                if f.endswith(self.COLOR_EXT)
+                (
+                    f[: -len(self.COLOR_EXT)]
+                    for f in os.listdir(self.color_dir)
+                    if f.endswith(self.COLOR_EXT)
+                ),
+                key=int,
             )
         return self._frame_ids
 
@@ -121,6 +128,9 @@ class ScanNetScene:
 
     def depth_path(self, fid: str) -> str:
         return os.path.join(self.depth_dir, f"{fid}{self.DEPTH_EXT}")
+
+    def mde_depth_path(self, fid: str) -> str:
+        return os.path.join(self.mde_depth_dir, f"{fid}{self.MDE_DEPTH_EXT}")
 
     def pose_path(self, fid: str) -> str:
         return os.path.join(self.pose_dir, f"{fid}{self.POSE_EXT}")

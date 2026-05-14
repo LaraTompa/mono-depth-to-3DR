@@ -25,175 +25,15 @@ import torch.nn.functional as F
 import yaml
 from torch.utils.data import DataLoader
 
-from data.temporal_sampling import ScanNetTemporalDataset
-from data.graph_based_sampling import ScanNetGraphDataset
 from data.scene import find_scene_paths
 from models.model_image_depth.network import DepthAlignNet
 from training.losses import total_loss as compute_total_loss, compute_depth_metrics
-
-
-# ---------------------------------------------------------------------------
-# Reproducibility
-# ---------------------------------------------------------------------------
-
-def seed_everything(seed: int) -> None:
-    import random
-    import numpy as np
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
-
-
-# ---------------------------------------------------------------------------
-# Dataset factory
-# ---------------------------------------------------------------------------
-
-def build_dataset(cfg: dict, root_dir: str, num_samples: int, scene_paths=None):
-    ds_cfg    = cfg["dataset"]
-    graph_cfg = cfg.get("graph_sampling", {})
-    sampler   = ds_cfg.get("sampler_type", "temporal")
-
-    if sampler == "temporal":
-        return ScanNetTemporalDataset(
-            root_dir=root_dir,
-            num_frames=ds_cfg["num_frames"],
-            num_samples=num_samples,
-            min_stride=ds_cfg["min_stride"],
-            max_stride=ds_cfg["max_stride"],
-            scene_paths=scene_paths,
-        )
-    elif sampler == "graph":
-        return ScanNetGraphDataset(
-            root_dir=root_dir,
-            num_frames=ds_cfg["num_frames"],
-            num_samples=num_samples,
-            graph_cache=graph_cfg.get("graph_cache"),
-            min_overlap=graph_cfg["min_overlap"],
-            max_overlap=graph_cfg["max_overlap"],
-            overlap_sample_step=graph_cfg["overlap_sample_step"],
-            depth_tolerance=graph_cfg["depth_tolerance"],
-            max_frame_gap=graph_cfg.get("max_frame_gap", 50),
-        )
-    else:
-        raise ValueError(f"Unknown sampler_type: '{sampler}'")
-
-
-def build_loader(cfg: dict, dataset, shuffle: bool) -> DataLoader:
-    ldr = cfg["loader"]
-    return DataLoader(
-        dataset,
-        batch_size=ldr["batch_size"],
-        num_workers=ldr["num_workers"],
-        pin_memory=ldr.get("pin_memory", True),
-        drop_last=ldr.get("drop_last", True),
-        shuffle=shuffle,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Optimiser / scheduler
-# ---------------------------------------------------------------------------
-
-def build_optimizer(cfg: dict, model: torch.nn.Module) -> torch.optim.Optimizer:
-    opt_cfg = cfg["optimizer"]
-    kind    = opt_cfg.get("type", "adamw").lower()
-    lr      = float(opt_cfg["lr"])
-    wd      = float(opt_cfg.get("weight_decay", 0.0))
-
-    if kind == "adamw":
-        betas = tuple(opt_cfg.get("betas", [0.9, 0.999]))
-        return torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=wd, betas=betas)
-    elif kind == "adam":
-        betas = tuple(opt_cfg.get("betas", [0.9, 0.999]))
-        return torch.optim.Adam(model.parameters(), lr=lr, weight_decay=wd, betas=betas)
-    elif kind == "sgd":
-        return torch.optim.SGD(model.parameters(), lr=lr, weight_decay=wd, momentum=0.9)
-    else:
-        raise ValueError(f"Unknown optimizer type: '{kind}'")
-
-
-def build_scheduler(cfg: dict, optimizer: torch.optim.Optimizer, num_epochs: int):
-    sch_cfg = cfg["scheduler"]
-    kind    = sch_cfg.get("type", "cosine").lower()
-    warmup  = int(sch_cfg.get("warmup_epochs", 0))
-
-    def make_base():
-        if kind == "cosine":
-            return torch.optim.lr_scheduler.CosineAnnealingLR(
-                optimizer,
-                T_max=int(sch_cfg.get("T_max", num_epochs)),
-                eta_min=float(sch_cfg.get("eta_min", 1e-6)),
-            )
-        elif kind == "step":
-            return torch.optim.lr_scheduler.StepLR(
-                optimizer,
-                step_size=int(sch_cfg.get("step_size", 10)),
-                gamma=float(sch_cfg.get("gamma", 0.5)),
-            )
-        elif kind == "plateau":
-            return torch.optim.lr_scheduler.ReduceLROnPlateau(
-                optimizer,
-                patience=int(sch_cfg.get("patience", 5)),
-                factor=float(sch_cfg.get("gamma", 0.5)),
-            )
-        elif kind == "none":
-            return None
-        else:
-            raise ValueError(f"Unknown scheduler type: '{kind}'")
-
-    base = make_base()
-    if warmup > 0 and base is not None:
-        warmup_sched = torch.optim.lr_scheduler.LinearLR(
-            optimizer, start_factor=1e-3, end_factor=1.0, total_iters=warmup
-        )
-        return torch.optim.lr_scheduler.SequentialLR(
-            optimizer, schedulers=[warmup_sched, base], milestones=[warmup]
-        )
-    return base
-
-
-# ---------------------------------------------------------------------------
-# Checkpoint helpers
-# ---------------------------------------------------------------------------
-
-def save_checkpoint(state: dict, path: str) -> None:
-    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-    torch.save(state, path)
-
-
-def load_checkpoint(path: str, model, optimizer, scheduler, device):
-    ckpt = torch.load(path, map_location=device)
-    model.load_state_dict(ckpt["model"])
-    optimizer.load_state_dict(ckpt["optimizer"])
-    if scheduler is not None and ckpt.get("scheduler"):
-        scheduler.load_state_dict(ckpt["scheduler"])
-    start_epoch = ckpt.get("epoch", 0) + 1
-    best_metric = ckpt.get("best_metric", float("inf"))
-    print(f"[ckpt] Resumed from {path}  (epoch {ckpt.get('epoch', 0)}, best={best_metric:.4f})")
-    return start_epoch, best_metric
-
-
-def _keep_top_k(save_dir: str, monitor_tag: str, top_k: int) -> None:
-    """Remove oldest checkpoints if more than top_k exist."""
-    ckpts = sorted(
-        [f for f in os.listdir(save_dir) if f.startswith("epoch_") and f.endswith(".pt")],
-        key=lambda f: os.path.getmtime(os.path.join(save_dir, f)),
-    )
-    for old in ckpts[:-top_k]:
-        os.remove(os.path.join(save_dir, old))
-
-
-# ---------------------------------------------------------------------------
-# Loss
-# ---------------------------------------------------------------------------
-
-def compute_loss(batch: dict, outputs: dict, cfg: dict, K: torch.Tensor):
-    """
-    Thin wrapper so train() stays clean.
-    """
-    return compute_total_loss(outputs, batch, cfg.get("loss", {}), K)
+from training.utils import (
+    seed_everything, build_dataset, build_loader,
+    build_optimizer, build_scheduler,
+    save_checkpoint, load_checkpoint, keep_top_k,
+    optimizer_step, fallback_intrinsics, debug_depth_check,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -204,7 +44,6 @@ def run_epoch(
     model,
     loader: DataLoader,
     optimizer,
-    scaler,
     cfg: dict,
     device,
     train: bool,
@@ -214,8 +53,6 @@ def run_epoch(
     train_cfg = cfg["train"]
     log_every = int(train_cfg.get("log_every", 50))
     grad_clip = train_cfg.get("grad_clip")
-    use_amp   = train_cfg.get("mixed_precision", False) and device.type == "cuda"
-    accum     = int(train_cfg.get("accumulate_grad_batches", 1))
 
     totals    = {"loss": 0.0, "depth": 0.0, "smooth": 0.0, "iters": 0.0}
     metric_sums = {"abs_rel": 0.0, "rmse": 0.0, "delta1": 0.0}
@@ -223,12 +60,6 @@ def run_epoch(
     n_batches = 0
     t0        = time.time()
 
-    # Build a fixed K from config (will be overridden per-batch if dataset provides it)
-    model_cfg = cfg.get("model", {})
-    fx = float(model_cfg.get("fx", 577.0))
-    fy = float(model_cfg.get("fy", 577.0))
-    cx = float(model_cfg.get("cx", 320.0))
-    cy = float(model_cfg.get("cy", 240.0))
 
     ctx = torch.no_grad() if not train else torch.enable_grad()
     with ctx:
@@ -240,54 +71,50 @@ def run_epoch(
             }
 
             B = batch["images"].shape[0]
-            H = batch["images"].shape[-2]
-            W = batch["images"].shape[-1]
 
             # Per-batch intrinsics — use dataset-provided if available, else config fallback
-            if "intrinsics" in batch:
-                K = batch["intrinsics"]    # (B, 3, 3)
-            else:
-                K = torch.tensor(
-                    [[fx, 0, cx], [0, fy, cy], [0, 0, 1]],
-                    dtype=torch.float32, device=device
-                ).unsqueeze(0).expand(B, -1, -1)
+            K = batch["intrinsics"] if "intrinsics" in batch else fallback_intrinsics(cfg, B, device)
 
             imgs   = batch["images"]       # (B, N, 3, H, W)
-            depths = batch["depths"]       # (B, N, 1, H, W)
+            depths = batch["depths"]       # (B, N, 1, H, W)  ground-truth depths
             poses  = batch["poses"]        # (B, N, 4, 4)
+
+            # MDE predictions used as the monocular prior fed to the model.
+            # These come from zoe-depth_pred/ — NOT the GT sensor depths.
+            if "mde_depths" not in batch:
+                raise KeyError(
+                    "[BUG] 'mde_depths' missing from batch. "
+                    "Dataset must supply ZoeDepth predictions separately from GT depths."
+                )
+            mde_depths = batch["mde_depths"]   # (B, N, 1, H, W)
 
             rgb1        = imgs[:, 0]
             rgb2        = imgs[:, 1]
-            depth_mono1 = depths[:, 0]
-            depth_mono2 = depths[:, 1]
+            depth_mono1 = mde_depths[:, 0]   # MDE prior for view 1
+            depth_mono2 = mde_depths[:, 1]   # MDE prior for view 2
+
+            # --- debug prints (first step of first epoch only) ---
+            if epoch == 1 and step == 0 and train:
+                debug_depth_check(depths, mde_depths)
 
             # T_12 = inv(pose2) @ pose1  (cam1 → cam2)
             T_12 = torch.linalg.inv(poses[:, 1]) @ poses[:, 0]
 
-            with torch.autocast(device_type=device.type, enabled=use_amp):
-                outputs = model(
-                    rgb1=rgb1,
-                    rgb2=rgb2,
-                    depth_mono1=depth_mono1,
-                    depth_mono2=depth_mono2,
-                    T_12=T_12,
-                    K=K,
-                )
-                loss, breakdown = compute_loss(batch, outputs, cfg, K)
-                if accum > 1:
-                    loss = loss / accum
+            outputs = model(
+                rgb1=rgb1,
+                rgb2=rgb2,
+                depth_mono1=depth_mono1,
+                depth_mono2=depth_mono2,
+                T_12=T_12,
+                K=K,
+            )
+            loss, breakdown = compute_total_loss(outputs, batch, cfg.get("loss", {}), K)
 
             if train:
-                scaler.scale(loss).backward()
-                if (step + 1) % accum == 0:
-                    if grad_clip:
-                        scaler.unscale_(optimizer)
-                        torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-                    scaler.step(optimizer)
-                    scaler.update()
-                    optimizer.zero_grad(set_to_none=True)
+                loss.backward()
+                optimizer_step(optimizer, model, grad_clip)
 
-            totals["loss"]   += loss.item() * (accum if accum > 1 else 1)
+            totals["loss"]   += loss.item()
             totals["depth"]  += breakdown.get("depth", 0.0)
             totals["smooth"] += breakdown.get("smooth", 0.0)
             totals["iters"]  += breakdown.get("iters", 0.0)
@@ -336,9 +163,6 @@ def train(cfg: dict, resume: str | None = None) -> None:
     # resolve relative paths from the repo root
     if not os.path.isabs(root_dir):
         root_dir = os.path.join(_REPO_ROOT, root_dir)
-    n_train = cfg["dataset"]["num_samples"]
-    n_val   = max(1, n_train // 8)   # ~10 % of train virtual length
-    n_test  = max(1, n_train // 8)
 
     # 80/10/10 scene split (deterministic via fixed seed)
     all_scene_paths = find_scene_paths(root_dir)
@@ -352,9 +176,9 @@ def train(cfg: dict, resume: str | None = None) -> None:
     test_paths  = all_scene_paths[s2:]
     print(f"[train] Scenes: {len(train_paths)} train / {len(val_paths)} val / {len(test_paths)} test")
 
-    train_ds = build_dataset(cfg, root_dir=root_dir, num_samples=n_train, scene_paths=train_paths)
-    val_ds   = build_dataset(cfg, root_dir=root_dir, num_samples=n_val,   scene_paths=val_paths)
-    test_ds  = build_dataset(cfg, root_dir=root_dir, num_samples=n_test,  scene_paths=test_paths)
+    train_ds = build_dataset(cfg, root_dir=root_dir, scene_paths=train_paths)
+    val_ds   = build_dataset(cfg, root_dir=root_dir, scene_paths=val_paths)
+    test_ds  = build_dataset(cfg, root_dir=root_dir, scene_paths=test_paths)
 
     train_loader = build_loader(cfg, train_ds, shuffle=True)
     val_loader   = build_loader(cfg, val_ds,   shuffle=False)
@@ -376,9 +200,6 @@ def train(cfg: dict, resume: str | None = None) -> None:
 
     optimizer  = build_optimizer(cfg, model)
     scheduler  = build_scheduler(cfg, optimizer, num_epochs=int(train_cfg["epochs"]))
-    scaler     = torch.cuda.amp.GradScaler(enabled=(
-        train_cfg.get("mixed_precision", False) and device.type == "cuda"
-    ))
 
     # --- resume ---
     start_epoch = 1
@@ -400,13 +221,13 @@ def train(cfg: dict, resume: str | None = None) -> None:
         t_epoch = time.time()
 
         train_metrics = run_epoch(
-            model, train_loader, optimizer, scaler, cfg, device, train=True, epoch=epoch
+            model, train_loader, optimizer, cfg, device, train=True, epoch=epoch
         )
 
         val_metrics = {}
         if epoch % val_every == 0:
             val_metrics = run_epoch(
-                model, val_loader, None, scaler, cfg, device, train=False, epoch=epoch
+                model, val_loader, None, cfg, device, train=False, epoch=epoch
             )
 
         # --- scheduler step ---
@@ -459,7 +280,7 @@ def train(cfg: dict, resume: str | None = None) -> None:
 
         epoch_path = os.path.join(save_dir, f"epoch_{epoch:04d}.pt")
         save_checkpoint(state, epoch_path)
-        _keep_top_k(save_dir, monitor, top_k)
+        keep_top_k(save_dir, monitor, top_k)
 
     print(f"\n[train] Done. Best {monitor}={best_metric:.4f}")
 
@@ -469,7 +290,7 @@ def train(cfg: dict, resume: str | None = None) -> None:
     if os.path.isfile(best_ckpt):
         ckpt = torch.load(best_ckpt, map_location=device)
         model.load_state_dict(ckpt["model"])
-    test_metrics = run_epoch(model, test_loader, None, scaler, cfg, device, train=False, epoch=0)
+    test_metrics = run_epoch(model, test_loader, None, cfg, device, train=False, epoch=0)
     print(
         f"[test] loss={test_metrics['loss']:.4f}"
         + (f"  abs_rel={test_metrics['abs_rel']:.4f}"

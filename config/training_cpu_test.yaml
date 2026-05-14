@@ -1,0 +1,57 @@
+checkpoint:
+  mode: min
+  monitor: val/abs_rel
+  resume: null
+  save_dir: checkpoints/
+  save_top_k: 3
+dataset:
+  max_scenes: 20
+  max_stride: 90
+  min_stride: 40
+  num_frames: 2
+  num_samples: 16
+  root_dir: datasets/sampled_data
+  sampler_type: temporal
+loader:
+  batch_size: 2
+  drop_last: true
+  num_workers: 0
+  pin_memory: true
+logging:
+  log_dir: runs/
+  project: mono-depth-3DR
+  run_name: null
+loss:
+  depth: 1.0
+  iter_supervision: 0.5
+  smooth: 0.05
+model:
+  cx: 320.0
+  cy: 240.0
+  feat_dim: 128
+  fx: 577.0
+  fy: 577.0
+  hidden_dim: 128
+  num_heads: 4
+  num_iters: 4
+  pretrained: false
+  window_size: 7
+optimizer:
+  betas:
+  - 0.9
+  - 0.999
+  lr: 0.0001
+  type: adamw
+  weight_decay: 0.0001
+scheduler:
+  eta_min: 1.0e-06
+  type: cosine
+  warmup_epochs: 5
+train:
+  accumulate_grad_batches: 1
+  epochs: 5
+  grad_clip: 1.0
+  log_every: 50
+  mixed_precision: false
+  seed: 0
+  val_every: 1
