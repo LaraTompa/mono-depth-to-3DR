@@ -61,16 +61,24 @@ class ScanNetScene:
     DEPTH_EXT = ".npy"
     MDE_DEPTH_EXT = ".png"          # ZoeDepth predictions (uint16 PNG, mm → metres)
     MDE_DEPTH_DIR = "zoe-depth_pred"
+    DEPTHPRO_EXT = ".npz"           # DepthPro predictions (float32 metres)
+    DEPTHPRO_DIR = "depth_pro_pred"
     POSE_EXT = ".txt"
     INTRINSIC_FNAME = "intrinsic_depth.txt"
 
-    def __init__(self, scene_path: str):
+    def __init__(self, scene_path: str, mde_source: str = "zoedepth"):
         self.scene_path = scene_path
         self.name = os.path.basename(scene_path)
+        self.mde_source = mde_source
 
         self.color_dir = os.path.join(scene_path, "color")
         self.depth_dir = os.path.join(scene_path, "depth")
-        self.mde_depth_dir = os.path.join(scene_path, self.MDE_DEPTH_DIR)
+        if mde_source == "depthpro":
+            self.mde_depth_dir = os.path.join(scene_path, self.DEPTHPRO_DIR)
+            self.mde_depth_ext = self.DEPTHPRO_EXT
+        else:
+            self.mde_depth_dir = os.path.join(scene_path, self.MDE_DEPTH_DIR)
+            self.mde_depth_ext = self.MDE_DEPTH_EXT
         self.pose_dir = os.path.join(scene_path, "pose")
         self.intrinsic_dir = os.path.join(scene_path, "intrinsic")
         self.intrinsic_path = os.path.join(

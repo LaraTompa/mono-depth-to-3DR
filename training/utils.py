@@ -24,8 +24,10 @@ def seed_everything(seed: int) -> None:
 # ---------------------------------------------------------------------------
 
 def build_dataset(cfg: dict, root_dir: str, scene_paths=None):
+    mde_source = cfg.get("dataset", {}).get("mde_source", "zoedepth")
     return PreSampledPairDataset(
         root_dir=root_dir,
+        mde_source=mde_source,
         scene_paths=scene_paths,
     )
 
