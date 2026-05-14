@@ -8,7 +8,7 @@ encoder:
 
 attention:
   num_heads: 4
-  window_size: 14
+  window_size: 7
 
 refinement:
   enabled: false                 # false → skip IterativeRefinement entirely
