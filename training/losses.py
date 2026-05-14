@@ -108,6 +108,8 @@ def iter_supervision_loss(
     Later iterations get higher weight.
     """
     n = len(depth_iters)
+    if n == 0:
+        return torch.tensor(0.0, device=gt_depth.device, requires_grad=False)
     if weights is None:
         # exponential increase: [1, 2, 4, 8] → normalised
         w = [2 ** i for i in range(n)]
