@@ -150,7 +150,7 @@ def run_epoch(
 # Main training loop
 # ---------------------------------------------------------------------------
 
-def train(cfg: dict, resume: str | None = None) -> None:
+def train(cfg: dict, arch_cfg: dict, resume: str | None = None) -> None:
     train_cfg = cfg["train"]
     ckpt_cfg  = cfg["checkpoint"]
 
@@ -191,15 +191,20 @@ def train(cfg: dict, resume: str | None = None) -> None:
           f"  batch_size={cfg['loader']['batch_size']}")
 
     # --- model ---
-    model_cfg = cfg.get("model", {})
+    enc_cfg = arch_cfg.get("encoder",    {})
+    att_cfg = arch_cfg.get("attention",  {})
+    ref_cfg = arch_cfg.get("refinement", {})
+    dec_cfg = arch_cfg.get("decoder",    {})
     model = DepthAlignNet(
-        feat_dim        = int(model_cfg.get("feat_dim",       128)),
-        hidden_dim      = int(model_cfg.get("hidden_dim",    128)),
-        num_iters       = int(model_cfg.get("num_iters",       4)),
-        num_heads       = int(model_cfg.get("num_heads",       4)),
-        window_size     = int(model_cfg.get("window_size",    7)),
-        pretrained      = bool(model_cfg.get("pretrained",   True)),
-        freeze_backbone = bool(model_cfg.get("freeze_backbone", False)),
+        feat_dim        = int(enc_cfg.get("out_channels",      128)),
+        hidden_dim      = int(ref_cfg.get("hidden_dim",        128)),
+        num_iters       = int(ref_cfg.get("num_iters",           4)),
+        num_heads       = int(att_cfg.get("num_heads",           4)),
+        window_size     = int(att_cfg.get("window_size",         7)),
+        pretrained      = bool(enc_cfg.get("pretrained",      True)),
+        freeze_backbone = bool(enc_cfg.get("freeze_backbone", False)),
+        use_refinement  = bool(ref_cfg.get("enabled",         True)),
+        decoder_hidden  = int(dec_cfg.get("hidden_dim",         64)),
     ).to(device)
 
     optimizer  = build_optimizer(cfg, model)
@@ -316,6 +321,11 @@ if __name__ == "__main__":
         help="Path to training.yaml",
     )
     parser.add_argument(
+        "--arch",
+        default=os.path.join(_REPO_ROOT, "config", "arch.yaml"),
+        help="Path to arch.yaml (architecture definition).",
+    )
+    parser.add_argument(
         "--resume",
         default=None,
         help="Path to a checkpoint to resume from (overrides training.yaml resume).",
@@ -324,6 +334,8 @@ if __name__ == "__main__":
 
     with open(args.config) as f:
         cfg = yaml.safe_load(f)
+    with open(args.arch) as f:
+        arch_cfg = yaml.safe_load(f)
 
     resume = args.resume or cfg.get("checkpoint", {}).get("resume")
-    train(cfg, resume=resume)
+    train(cfg, arch_cfg, resume=resume)
