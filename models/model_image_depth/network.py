@@ -54,8 +54,11 @@ class DepthAlignNet(nn.Module):
         window_size     : int  = 7,
         pretrained      : bool = True,
         freeze_backbone : bool = False,
+        use_refinement  : bool = True,
+        decoder_hidden  : int  = 64,
     ):
         super().__init__()
+        self.use_refinement = use_refinement
 
         # Shared encoder (weight-tied across views)
         self.encoder = SharedEncoder(pretrained=pretrained, out_channels=feat_dim, freeze_backbone=freeze_backbone)
@@ -64,13 +67,14 @@ class DepthAlignNet(nn.Module):
         self.attn16 = LocalGeoCrossAttention(feat_dim, num_heads, window_size)
         self.attn8  = LocalGeoCrossAttention(feat_dim, num_heads, window_size)
 
-        # Iterative refinement operates at 1/16 resolution for speed
-        self.refine = IterativeRefinement(
-            feat_dim=feat_dim, hidden_dim=hidden_dim, num_iters=num_iters
-        )
+        # Iterative refinement operates at 1/16 resolution for speed (optional)
+        if use_refinement:
+            self.refine = IterativeRefinement(
+                feat_dim=feat_dim, hidden_dim=hidden_dim, num_iters=num_iters
+            )
 
         # Decoder
-        self.decoder = DepthDecoder(feat_dim=feat_dim, hidden=feat_dim // 2)
+        self.decoder = DepthDecoder(feat_dim=feat_dim, hidden=decoder_hidden)
 
     # ------------------------------------------------------------------
     # Intrinsics scaling
@@ -171,37 +175,50 @@ class DepthAlignNet(nn.Module):
         )
 
         # ── Iterative refinement (at s16 resolution) ────────────────────
-        ref1 = self.refine(
-            depth_mono=d1_s16,
-            depth2_mono=d2_s16,
-            feat_cross=feats1["s16"],
-            T_12=T_12,
-            K=K_s16,
-        )
-
-        ref2 = self.refine(
-            depth_mono=d2_s16_v,
-            depth2_mono=d1_s16_v,
-            feat_cross=feats2_attended["s16"],
-            T_12=T_21,
-            K=K_s16,
-        )
+        if self.use_refinement:
+            ref1 = self.refine(
+                depth_mono=d1_s16,
+                depth2_mono=d2_s16,
+                feat_cross=feats1["s16"],
+                T_12=T_12,
+                K=K_s16,
+            )
+            ref2 = self.refine(
+                depth_mono=d2_s16_v,
+                depth2_mono=d1_s16_v,
+                feat_cross=feats2_attended["s16"],
+                T_12=T_21,
+                K=K_s16,
+            )
+            depth1_refined = ref1["depth"]
+            depth2_refined = ref2["depth"]
+            depth1_iters   = ref1["depth_iters"]
+            depth2_iters   = ref2["depth_iters"]
+            scale1, bias1  = ref1["scale"], ref1["bias"]
+            scale2, bias2  = ref2["scale"], ref2["bias"]
+        else:
+            # Skip refinement — pass MDE prior directly to the decoder
+            depth1_refined = d1_s16
+            depth2_refined = d2_s16_v
+            depth1_iters   = []
+            depth2_iters   = []
+            scale1 = bias1 = scale2 = bias2 = None
 
         # ── Decoder (upsample to H/2, W/2) ──────────────────────────────
-        dec1 = self.decoder(feats1,          ref1["depth"], depth_mono1)
-        dec2 = self.decoder(feats2_attended, ref2["depth"], depth_mono2)
+        dec1 = self.decoder(feats1,          depth1_refined, depth_mono1)
+        dec2 = self.decoder(feats2_attended, depth2_refined, depth_mono2)
 
         return {
             "depth1":       dec1["depth"],        # (B, 1, H/2, W/2)
             "depth2":       dec2["depth"],
             "confidence1":  dec1["confidence"],
             "confidence2":  dec2["confidence"],
-            "depth1_iters": ref1["depth_iters"],  # list[(B, 1, H/16, W/16)]
-            "depth2_iters": ref2["depth_iters"],
-            "scale1":       ref1["scale"],
-            "bias1":        ref1["bias"],
-            "scale2":       ref2["scale"],
-            "bias2":        ref2["bias"],
+            "depth1_iters": depth1_iters,         # list[(B, 1, H/16, W/16)] or []
+            "depth2_iters": depth2_iters,
+            "scale1":       scale1,
+            "bias1":        bias1,
+            "scale2":       scale2,
+            "bias2":        bias2,
         }
 
 
@@ -209,7 +226,7 @@ class DepthAlignNet(nn.Module):
 # Quick shape-check (no GPU required)
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
-    model = DepthAlignNet(pretrained=False, num_iters=2)
+    model = DepthAlignNet(pretrained=True, num_iters=2, freeze_backbone=True, use_refinement=False)
     model.eval()
 
     B, H, W = 2, 480, 640
@@ -228,7 +245,10 @@ if __name__ == "__main__":
         if isinstance(v, torch.Tensor):
             print(f"  {k}: {tuple(v.shape)}")
         elif isinstance(v, list):
-            print(f"  {k}: list of {len(v)} × {tuple(v[0].shape)}")
+            if len(v) == 0:
+                print(f"  {k}: empty list")
+            else:
+                print(f"  {k}: list of {len(v)} × {tuple(v[0].shape)}")
 
     #Print model size
     total_params = sum(p.numel() for p in model.parameters())
