@@ -3,56 +3,7 @@ import argparse
 import numpy as np
 import cv2
 
-
-# ── Loaders ────────────────────────────────────────────────────────────────────
-
-def load_intrinsics(path):
-    K = np.loadtxt(path)
-    if K.shape == (4, 4):
-        K = K[:3, :3]
-    assert K.shape == (3, 3)
-    return K
-
-
-def load_pose(path):
-    pose = np.loadtxt(path)
-    if pose.shape == (3, 4):
-        pose = np.vstack([pose, [0, 0, 0, 1]])
-    assert pose.shape == (4, 4)
-    return pose
-
-
-def load_depth(path, scale=1.0):
-    """Load a depth map from .npz, .npy, or image file."""
-    if path.endswith(".npz"):
-        data = np.load(path)
-        for key in ["depth", "pred", "prediction", "arr_0"]:
-            if key in data:
-                depth = data[key]
-                break
-        else:
-            depth = data[list(data.keys())[0]]
-        depth = np.asarray(depth).astype(np.float32)
-        if depth.ndim == 3 and depth.shape[0] == 1:
-            depth = depth[0]
-        if depth.ndim == 3 and depth.shape[-1] in (1, 3, 4):
-            depth = depth[..., 0]
-        return depth
-    elif path.endswith(".npy"):
-        depth = np.load(path).astype(np.float32)
-        if depth.ndim == 3 and depth.shape[0] == 1:
-            depth = depth[0]
-        if depth.ndim == 3 and depth.shape[-1] in (1, 3, 4):
-            depth = depth[..., 0]
-        return depth
-    else:
-        depth = cv2.imread(path, cv2.IMREAD_UNCHANGED)
-        if depth is None:
-            raise FileNotFoundError(path)
-        depth = depth.astype(np.float32)
-        if depth.ndim == 3:
-            depth = cv2.cvtColor(depth, cv2.COLOR_BGR2GRAY)
-        return depth / scale
+from .utils import load_intrinsics, load_pose, load_depth
 
 
 # ── Geometry ───────────────────────────────────────────────────────────────────
