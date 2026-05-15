@@ -253,7 +253,80 @@ python3 scripts/batch_eval.py \
   --window 1 \
   --max_batches 50 \
 ```
+## DepthAlignNet
 
+A lightweight network that takes monocular depth predictions and stereo RGB pairs and produces **multiview-consistent aligned depths** together with **predicted camera intrinsics and relative pose** — no GT camera parameters required at test time.
+
+### Architecture
+
+```
+RGB + mono-depth (×2 views)
+        │
+        ▼
+SharedEncoder  (ConvNeXt-Tiny, weight-tied across views)
+  → s4  (H/4,  W/4,  C)
+  → s8  (H/8,  W/8,  C)
+  → s16 (H/16, W/16, C)
+        │
+        ▼  (called twice: v1→v2 and v2→v1)
+Cross-Attention  (single shared MultiheadAttention)
+  s16: [camera_token | s16_flat] attends to other view's [camera_token | s16_flat]
+       ├─ token at pos 0  →  CameraHead  (K, T_c2w, log-confidence)
+       └─ tokens at pos 1: →  s16 spatial features  (decoder path)
+  s8:  s8_flat attends to other view's s8_flat  (same shared weights)
+        │
+        ▼
+DepthDecoder  (FPN-style, s4 + s8 + s16 → H/2, W/2)
+  → aligned depth  (B, 1, H/2, W/2)
+  → confidence     (B, 1, H/2, W/2)
+```
+
+**Camera token** a single learnable token is prepended to each view's s16 feature sequence before cross-attention. After attending to the other view's full sequence, the token at position 0 is decoded by the shared `CameraHead` into intrinsics K and camera-to-world pose T_c2w. Both views share the token parameter and the head weights — differentiation comes entirely from the attended context.
+
+**Iterative camera initialisation** (training): K is initialised from a focal-length prior and T_12 to identity. The network runs for `num_pose_iters` iterations, feeding its own predictions back as the next iteration's pose prior.
+
+**Heteroscedastic confidence:** the camera head outputs log-confidence scalars for intrinsics and pose. Losses are weighted by `exp(-s)·L + s` (Kendall & Gal 2017), letting the network learn its own uncertainty.
+
+### Configuration
+
+`config/arch.yaml` controls all architecture hyper-parameters:
+
+```yaml
+encoder:
+  backbone: "convnext_tiny"
+  pretrained: true
+  freeze_backbone: true
+  out_channels: 64          # feat_dim C
+
+attention:
+  num_heads: 4
+
+refinement:
+  enabled: false            # set true to add IterativeRefinement at s16
+  num_iters: 4
+  hidden_dim: 64
+
+decoder:
+  hidden_dim: 32
+```
+
+### Training
+
+```bash
+python training/train.py
+python training/train.py --config config/training.yaml
+python training/train.py --config config/training.yaml --resume checkpoints/last.pt
+```
+
+Training hyper-parameters live in `config/training.yaml`. Checkpoints are saved to `checkpoints/` (`best.pt` and `last.pt`).
+
+### Smoke test
+
+Verifies all module shapes and that gradients flow end-to-end (CPU, no data required):
+
+```bash
+python scripts/smoke_test.py
+```
 
 ## References
 1. ScanNet: Angela Dai, Angel X. Chang, Manolis Savva, Maciej Halber, Thomas Funkhouser, Matthias Nießner, "ScanNet: Richly-annotated 3D Reconstructions of Indoor Scenes", arXiv, 2017, url: https://arxiv.org/abs/1702.04405
