@@ -179,19 +179,44 @@ def normalized_translation_loss(
 def pose_identity_loss(
     T_12: torch.Tensor,   # (B, 4, 4)
     T_21: torch.Tensor,   # (B, 4, 4)
+    rot_weight: float = 1.0,
+    trans_weight: float = 1.0,
 ) -> torch.Tensor:
     """
-    Frobenius norm of T_12 @ T_21 − I_4.
+    Identity / round-trip loss computed separately for rotation and translation.
 
-    Analytically this is zero when T_21 = T_12^{-1}, but gradients through
-    SVD orthogonalisation and torch.linalg.inv accumulate floating-point
-    drift.  This loss acts as a soft numerical regulariser that explicitly
-    re-enforces the round-trip identity constraint.
+    We form the round-trip transform:
+        T_rt = T_12 @ T_21
+    which should be the identity.  Split into rotation and translation parts:
 
-    Returns a scalar.
+      R_rt = T_rt[:3,:3]     -> rotation residual (should be I_3)
+      t_rt = T_rt[:3,  3]    -> translation residual (should be 0)
+
+    Rotation term: geodesic distance on SO(3) between R_rt and I_3
+    Translation term: L2 norm of t_rt
+
+    Returns a single scalar: rot_weight * mean(rot_error) + trans_weight * mean(trans_error)
     """
-    I4 = torch.eye(4, device=T_12.device, dtype=T_12.dtype).unsqueeze(0)
-    return (T_12 @ T_21 - I4).norm(dim=(-2, -1)).mean()
+    B = T_12.shape[0]
+
+    # round-trip transform
+    T_rt = T_12 @ T_21
+
+    # rotation residual and its geodesic angle to identity
+    R_rt = T_rt[:, :3, :3]                   # (B,3,3)
+    I3 = torch.eye(3, device=R_rt.device, dtype=R_rt.dtype).unsqueeze(0).expand(B, -1, -1)
+    # reuse existing geodesic rotation implementation
+    rot_err = geodesic_rotation_loss(R_rt, I3)    # (B,) radians
+
+    # translation residual (should be zero)
+    t_rt = T_rt[:, :3, 3]                     # (B,3)
+    trans_err = t_rt.norm(dim=-1)             # (B,)
+
+    # mean over batch and weighted sum
+    rot_term = rot_err.mean()
+    trans_term = trans_err.mean()
+
+    return float(rot_weight) * rot_term + float(trans_weight) * trans_term
 
 
 # ---------------------------------------------------------------------------

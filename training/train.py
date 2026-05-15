@@ -229,6 +229,7 @@ def train(cfg: dict, arch_cfg: dict, resume: str | None = None) -> None:
     att_cfg = arch_cfg.get("attention",  {})
     ref_cfg = arch_cfg.get("refinement", {})
     dec_cfg = arch_cfg.get("decoder",    {})
+    cam_cfg = arch_cfg.get("camera_head", {})
     model = DepthAlignNet(
         feat_dim        = int(enc_cfg.get("out_channels",      128)),
         hidden_dim      = int(ref_cfg.get("hidden_dim",        128)),
@@ -239,6 +240,7 @@ def train(cfg: dict, arch_cfg: dict, resume: str | None = None) -> None:
         freeze_backbone = bool(enc_cfg.get("freeze_backbone", False)),
         use_refinement  = bool(ref_cfg.get("enabled",         True)),
         decoder_hidden  = int(dec_cfg.get("hidden_dim",         64)),
+        camera_head_hidden = int(cam_cfg.get("hidden_dim", 64)),
     ).to(device)
 
     # Print number of parameters and trainable parameters

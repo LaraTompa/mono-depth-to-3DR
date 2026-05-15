@@ -168,6 +168,7 @@ class DepthAlignNet(nn.Module):
         freeze_backbone : bool = False,
         use_refinement  : bool = True,
         decoder_hidden  : int  = 64,
+        camera_head_hidden: int  = 64,
     ):
         super().__init__()
         self.use_refinement = use_refinement
@@ -206,7 +207,7 @@ class DepthAlignNet(nn.Module):
         nn.init.trunc_normal_(self.camera_token_2, std=0.02)
 
         # Weight-tied prediction head (same physical camera for both views).
-        self.camera_head = CameraHead(feat_dim)
+        self.camera_head = CameraHead(feat_dim, hidden=camera_head_hidden)
 
     # ------------------------------------------------------------------
     # Intrinsics scaling
