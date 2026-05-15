@@ -74,7 +74,7 @@ class CameraHead(nn.Module):
             nn.GELU(),
         )
         self.to_intrinsics    = nn.Linear(hidden, 4)    # fx_n, fy_n, cx_n, cy_n
-        self.to_pose          = nn.Linear(hidden, 12)   # 9D raw rotation + 3D translation
+        self.to_pose          = nn.Linear(hidden, 9)    # 6D rotation + 3D translation
         self.to_log_conf_K    = nn.Linear(hidden, 1)    # log-confidence for intrinsics
         self.to_log_conf_pose = nn.Linear(hidden, 1)    # log-confidence for pose
 
@@ -82,13 +82,15 @@ class CameraHead(nn.Module):
         nn.init.zeros_(self.to_intrinsics.weight)
         nn.init.zeros_(self.to_intrinsics.bias)
 
-        # Rotation: bias = flattened identity → SVD(I) = I (identity pose prior).
-        # Translation bias = 0.  Together: T_c2w = I at init.
+        # Rotation: use 6D representation (Zhou et al. 2019) via rot6d_to_matrix.
+        # Bias = identity in 6D [col0 | col1 of I] = [1,0,0, 0,1,0] + zero translation.
+        # This avoids the SVD backward instability that occurs when singular values
+        # are equal (as with the identity matrix), which produces NaN gradients.
         nn.init.zeros_(self.to_pose.weight)
         with torch.no_grad():
             self.to_pose.bias.copy_(
-                torch.tensor([1., 0., 0., 0., 1., 0., 0., 0., 1.,   # I_3 row-major
-                               0., 0., 0.])                           # zero translation
+                torch.tensor([1., 0., 0., 0., 1., 0.,   # identity in 6D
+                               0., 0., 0.])               # zero translation
             )
 
         # Confidence: zero init → log_conf=0 → σ=1 (no scaling at start).
@@ -121,10 +123,9 @@ class CameraHead(nn.Module):
         K[:, 0, 2] = cx;  K[:, 1, 2] = cy
         K[:, 2, 2] = 1.0
 
-        pose_raw = self.to_pose(h)                           # (B, 12)
-        M_raw    = pose_raw[:, :9].reshape(B, 3, 3)          # (B, 3, 3) raw rotation
-        t        = pose_raw[:, 9:]                           # (B, 3)
-        R        = svd_orthogonalize(M_raw)                  # (B, 3, 3) ∈ SO(3)
+        pose_raw = self.to_pose(h)                           # (B, 9)
+        R        = rot6d_to_matrix(pose_raw[:, :6])          # (B, 3, 3) ∈ SO(3)  — Gram-Schmidt
+        t        = pose_raw[:, 6:]                           # (B, 3)
 
         T_c2w = (torch.eye(4, device=cam_embed.device, dtype=cam_embed.dtype)
                      .unsqueeze(0).expand(B, -1, -1).clone())

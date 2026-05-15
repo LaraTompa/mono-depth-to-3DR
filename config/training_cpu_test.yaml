@@ -38,3 +38,4 @@ train:
   seed: 0
   val_every: 1
   patience: 5
+  num_pose_iters: 1
