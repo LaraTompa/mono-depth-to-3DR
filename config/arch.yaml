@@ -4,7 +4,7 @@ encoder:
   backbone: "convnext_tiny"     # future: "convnext_small" | "resnet50" | ...
   pretrained: true
   freeze_backbone: true
-  out_channels: 128             # feat_dim
+  out_channels: 64             # feat_dim
 
 attention:
   num_heads: 4
@@ -13,7 +13,7 @@ attention:
 refinement:
   enabled: false                 # false → skip IterativeRefinement entirely
   num_iters: 4
-  hidden_dim: 128
+  hidden_dim: 64
 
 decoder:
-  hidden_dim: 64
+  hidden_dim: 32

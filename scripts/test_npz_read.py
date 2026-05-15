@@ -24,7 +24,7 @@ def plot_depth_heatmap(depth_map, cmap='hot', outpath=None, show=True):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Inspect .npz / .npy depth maps and plot heatmap.')
-    parser.add_argument('input_file', type=str, help='Path to the input .npz or .npy file')
+    parser.add_argument('--input_file', type=str, help='Path to the input .npz or .npy file')
     parser.add_argument('--key', '-k', default=None, help='Key inside .npz (default: first)')
     parser.add_argument('--index', '-i', type=int, default=0, help='Index for first dimension (N,H,W) to plot')
     parser.add_argument('--height', type=int, default=None, help='Height to reshape flattened maps')
@@ -69,8 +69,10 @@ if __name__ == "__main__":
                 # maybe color image stack -> convert first channel
                 depth_map = depth_map[..., 0]
     elif data.ndim == 2:
-        # either (H,W) single map or (N, L) flattened rows
-        if data.shape[0] == 1 and data.shape[1] > 1:
+        # if dimensions already match provided H,W, accept as (H,W)
+        if args.height and args.width and data.shape == (args.height, args.width):
+            depth_map = data
+        elif data.shape[0] == 1 and data.shape[1] > 1:
             vec = data[0]
             if args.height and args.width:
                 depth_map = vec.reshape((args.height, args.width))

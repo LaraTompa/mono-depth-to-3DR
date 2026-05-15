@@ -241,6 +241,11 @@ def train(cfg: dict, arch_cfg: dict, resume: str | None = None) -> None:
         decoder_hidden  = int(dec_cfg.get("hidden_dim",         64)),
     ).to(device)
 
+    # Print number of parameters and trainable parameters
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"[train] Model parameters: {total_params:,} total, {trainable_params:,} trainable")
+
     optimizer  = build_optimizer(cfg, model)
     scheduler  = build_scheduler(cfg, optimizer, num_epochs=int(train_cfg["epochs"]))
 
@@ -260,6 +265,9 @@ def train(cfg: dict, arch_cfg: dict, resume: str | None = None) -> None:
         return new < best if mode == "min" else new > best
 
     # --- epoch loop ---
+
+    patience = int(train_cfg.get("patience", 0)) # number of epochs with no improvement to wait before stopping (0 disables)
+    epochs_no_improve = 0
     for epoch in range(start_epoch, int(train_cfg["epochs"]) + 1):
         t_epoch = time.time()
 
@@ -320,6 +328,13 @@ def train(cfg: dict, arch_cfg: dict, resume: str | None = None) -> None:
             state["best_metric"] = best_metric
             save_checkpoint(state, os.path.join(save_dir, "best.pt"))
             print(f"  [ckpt] New best {monitor}={best_metric:.4f}  →  {save_dir}/best.pt")
+            epochs_no_improve = 0
+        else:
+            epochs_no_improve += 1
+            if patience > 0 and epochs_no_improve >= patience:
+                print(f"[train] Early stopping (no improvement for {epochs_no_improve} epochs), patience={patience}")
+                save_checkpoint(state, os.path.join(save_dir, f"epoch_{epoch:04d}_early_stop.pt"))
+                break
 
         epoch_path = os.path.join(save_dir, f"epoch_{epoch:04d}.pt")
         save_checkpoint(state, epoch_path)
