@@ -175,9 +175,16 @@ class DepthAlignNet(nn.Module):
         # Shared encoder (weight-tied across views)
         self.encoder = SharedEncoder(pretrained=pretrained, out_channels=feat_dim, freeze_backbone=freeze_backbone)
 
-        # Local geometry-aware cross-attention at each scale
-        self.attn16 = LocalGeoCrossAttention(feat_dim, num_heads, window_size)
-        self.attn8  = LocalGeoCrossAttention(feat_dim, num_heads, window_size)
+        # s16: global cross-attention over the augmented token sequence
+        # [camera_token | spatial_features_flat].  The camera token attends to
+        # the other view's full sequence (including its camera token), enabling
+        # cross-view camera reasoning in one shared block (ViSTA-SLAM style).
+        self.attn16_mha    = nn.MultiheadAttention(feat_dim, num_heads, batch_first=True)
+        self.attn16_norm_q  = nn.LayerNorm(feat_dim)
+        self.attn16_norm_kv = nn.LayerNorm(feat_dim)
+
+        # s8: local geometry-aware cross-attention (unchanged)
+        self.attn8 = LocalGeoCrossAttention(feat_dim, num_heads, window_size)
 
         # Iterative refinement operates at 1/16 resolution for speed (optional)
         if use_refinement:
@@ -188,17 +195,15 @@ class DepthAlignNet(nn.Module):
         # Decoder
         self.decoder = DepthDecoder(feat_dim=feat_dim, hidden=decoder_hidden)
 
-        # ── Camera token & prediction head ────────────────────────────────────
-        # One learnable token per view (expanded to batch size at runtime),
-        # initialised with ViT-style trunc-normal (std=0.02).
-        self.camera_token = nn.Parameter(torch.empty(1, 1, feat_dim))
-        nn.init.trunc_normal_(self.camera_token, std=0.02)
-
-        # The camera token cross-attends to the s16 spatial features (K/V).
-        # Spatial features are read but NOT written, keeping the geometry
-        # cross-attention path equivalent to the original network.
-        self.cam_mha  = nn.MultiheadAttention(feat_dim, num_heads, batch_first=True)
-        self.cam_norm = nn.LayerNorm(feat_dim)
+        # ── Two learnable camera tokens — one per view (ViSTA-SLAM style) ────
+        # Each token is prepended to its view's s16 feature sequence before the
+        # cross-attention block, allowing it to attend to the other view's full
+        # sequence jointly with the spatial features.  Separate parameters give
+        # each view a distinct initial prior; the shared CameraHead ties weights.
+        self.camera_token_1 = nn.Parameter(torch.empty(1, 1, feat_dim))
+        self.camera_token_2 = nn.Parameter(torch.empty(1, 1, feat_dim))
+        nn.init.trunc_normal_(self.camera_token_1, std=0.02)
+        nn.init.trunc_normal_(self.camera_token_2, std=0.02)
 
         # Weight-tied prediction head (same physical camera for both views).
         self.camera_head = CameraHead(feat_dim)
@@ -217,71 +222,65 @@ class DepthAlignNet(nn.Module):
         return K
 
     # ------------------------------------------------------------------
-    # Camera token prediction  (per view, weight-tied)
-    # ------------------------------------------------------------------
-    def _camera_predict(
-        self,
-        feats_s16: torch.Tensor,   # (B, C, H16, W16)
-        H_orig: int,
-        W_orig: int,
-    ) -> dict:
-        """
-        The learnable camera token cross-attends (as query) over the s16
-        spatial features (key / value) of a single view.  Spatial features
-        are not modified, so the subsequent geometry cross-attention receives
-        exactly the same feature map as before.
-
-        Returns {"K": (B,3,3), "T_c2w": (B,4,4)}.
-        """
-        B, C, H16, W16 = feats_s16.shape
-        # Flatten spatial feature map to a token sequence: (B, H16*W16, C)
-        spatial = feats_s16.permute(0, 2, 3, 1).reshape(B, H16 * W16, C)
-        # Expand shared camera token to batch: (B, 1, C)
-        cam_tok = self.camera_token.expand(B, -1, -1)
-        # Camera token queries spatial features; spatial tokens unchanged
-        attn_out, _ = self.cam_mha(cam_tok, spatial, spatial)  # (B, 1, C)
-        cam_embed = self.cam_norm(cam_tok + attn_out)[:, 0]     # (B, C)
-        return self.camera_head(cam_embed, H_orig, W_orig)
-
-    # ------------------------------------------------------------------
     # Per-view cross-attention  (operates on pre-encoded features)
     # ------------------------------------------------------------------
     def _cross_attend(
         self,
-        feats_q:   dict,           # pre-encoded query features {s4, s8, s16}
-        feats_ctx: dict,           # pre-encoded context features
-        depth_q:   torch.Tensor,   # (B, 1, H, W) mono depth of query view
-        depth_ctx: torch.Tensor,   # (B, 1, H, W) mono depth of context view
-        T_q2ctx:   torch.Tensor,   # (B, 4, 4) cam_q → cam_ctx
-        K:         torch.Tensor,   # (B, 3, 3) full-resolution intrinsics
-        H: int, W: int,            # original image dimensions
+        feats_q:       dict,            # pre-encoded query features {s4, s8, s16}
+        feats_ctx:     dict,            # pre-encoded context features
+        cam_token_q:   torch.Tensor,    # (B, 1, C) camera token for query view
+        cam_token_ctx: torch.Tensor,    # (B, 1, C) camera token for context view
+        depth_q:       torch.Tensor,    # (B, 1, H, W) mono depth of query view
+        depth_ctx:     torch.Tensor,    # (B, 1, H, W) mono depth of context view
+        T_q2ctx:       torch.Tensor,    # (B, 4, 4) cam_q → cam_ctx
+        K:             torch.Tensor,    # (B, 3, 3) full-resolution intrinsics
+        H: int, W: int,                 # original image dimensions
     ) -> tuple:
         """
-        Apply local geometry-aware cross-attention at s16 and s8 using
-        already-encoded feature maps.  K and T_q2ctx are the current
-        estimates supplied by the outer iterative loop in train.py.
+        s16 — global cross-attention over the augmented sequence
+              [camera_token | spatial_features_flat].
+              The camera token at position 0 attends to ALL tokens of the
+              context view (including its camera token).  After attention the
+              camera token is extracted for CameraHead; the spatial tokens
+              (positions 1:) are reshaped back to (B, C, H16, W16) for the
+              decoder.
+        s8  — local geometry-aware cross-attention (unchanged).
 
-        Returns (attended_feats_q, depth_q_s16, depth_ctx_s16, K_s16).
+        Returns (attended_feats_q, cam_embed, depth_q_s16, depth_ctx_s16, K_s16).
         """
-        _, _, H16, W16 = feats_q["s16"].shape
-        K_s16 = self._scale_K(K, H, W, H16, W16)
+        B, C, H16, W16 = feats_q["s16"].shape
+        _, _,  H8,  W8 = feats_q["s8"].shape
 
-        _, _, H8, W8 = feats_q["s8"].shape
+        K_s16 = self._scale_K(K, H, W, H16, W16)
         K_s8  = self._scale_K(K, H, W, H8,  W8)
 
         depth_q_s16   = F.interpolate(depth_q,   size=(H16, W16), mode="nearest")
         depth_ctx_s16 = F.interpolate(depth_ctx, size=(H16, W16), mode="nearest")
         depth_q_s8    = F.interpolate(depth_q,   size=(H8,  W8),  mode="nearest")
 
-        f16 = self.attn16(
-            feats_q["s16"], feats_ctx["s16"], depth_q_s16, T_q2ctx, K_s16,
-        )
+        # ── s16: global cross-attention with prepended camera tokens ─────
+        # Flatten spatial features → token sequences
+        sp_q   = feats_q["s16"].permute(0, 2, 3, 1).reshape(B, H16 * W16, C)
+        sp_ctx = feats_ctx["s16"].permute(0, 2, 3, 1).reshape(B, H16 * W16, C)
+        # Prepend camera tokens: (B, 1 + H16*W16, C)
+        seq_q   = torch.cat([cam_token_q,   sp_q],   dim=1)
+        seq_ctx = torch.cat([cam_token_ctx, sp_ctx], dim=1)
+        # Pre-norm cross-attention: query sequence attends to context sequence
+        nq  = self.attn16_norm_q(seq_q)
+        nkv = self.attn16_norm_kv(seq_ctx)
+        out, _ = self.attn16_mha(nq, nkv, nkv)   # (B, 1 + H16*W16, C)
+        seq_q  = seq_q + out                       # residual
+        # Extract camera embedding (pos 0) and spatial features (pos 1:)
+        cam_embed = seq_q[:, 0, :]                                              # (B, C)
+        f16       = seq_q[:, 1:, :].reshape(B, H16, W16, C).permute(0, 3, 1, 2)  # (B,C,H16,W16)
+
+        # ── s8: local geometry-aware cross-attention ─────────────────────
         f8 = self.attn8(
-            feats_q["s8"],  feats_ctx["s8"],  depth_q_s8,  T_q2ctx, K_s8,
+            feats_q["s8"], feats_ctx["s8"], depth_q_s8, T_q2ctx, K_s8,
         )
 
         attended = {"s4": feats_q["s4"], "s8": f8, "s16": f16}
-        return attended, depth_q_s16, depth_ctx_s16, K_s16
+        return attended, cam_embed, depth_q_s16, depth_ctx_s16, K_s16
 
     # ------------------------------------------------------------------
     # Forward
@@ -311,26 +310,34 @@ class DepthAlignNet(nn.Module):
         feats1_raw = self.encoder(x1)                  # {"s4", "s8", "s16"}
         feats2_raw = self.encoder(x2)
 
-        # ── Predict cameras from s16 features (before cross-attention) ───
-        # The camera token reads spatial features without modifying them,
-        # so the geometry cross-attention below is unaffected.
-        cam1 = self._camera_predict(feats1_raw["s16"], H, W)
-        cam2 = self._camera_predict(feats2_raw["s16"], H, W)
+        # ── Expand camera tokens to batch size ───────────────────────────
+        cam_tok_1 = self.camera_token_1.expand(B, -1, -1)   # (B, 1, C)
+        cam_tok_2 = self.camera_token_2.expand(B, -1, -1)   # (B, 1, C)
+
+        # ── Cross-attend: s16 global (camera token prepended) + s8 geometry ──
+        # camera token at position 0 of each view's sequence cross-attends to
+        # the other view's full [camera_token | spatial] sequence, then is
+        # extracted as the camera embedding for CameraHead.
+        feats1, cam_embed_1, d1_s16, d2_s16, K_s16 = self._cross_attend(
+            feats1_raw, feats2_raw,
+            cam_tok_1, cam_tok_2,
+            depth_mono1, depth_mono2, T_12, K, H, W,
+        )
+        feats2_attended, cam_embed_2, d2_s16_v, d1_s16_v, _ = self._cross_attend(
+            feats2_raw, feats1_raw,
+            cam_tok_2, cam_tok_1,
+            depth_mono2, depth_mono1, T_21, K, H, W,
+        )
+
+        # ── Camera predictions from attended tokens ───────────────────────
+        cam1 = self.camera_head(cam_embed_1, H, W)
+        cam2 = self.camera_head(cam_embed_2, H, W)
         # Average intrinsics and confidence scores (same physical camera)
         K_pred         = (cam1["K"]             + cam2["K"])             * 0.5
         log_conf_K     = (cam1["log_conf_K"]    + cam2["log_conf_K"])    * 0.5
         log_conf_pose  = (cam1["log_conf_pose"] + cam2["log_conf_pose"]) * 0.5
         # Relative pose from absolute camera-to-world poses
         T_12_pred = torch.linalg.inv(cam2["T_c2w"]) @ cam1["T_c2w"]
-
-        # ── Local geometry cross-attention using *current* K / T_12 ──────
-        # (identity + focal prior on iter 0; predicted values on iter ≥ 1)
-        feats1, d1_s16, d2_s16, K_s16 = self._cross_attend(
-            feats1_raw, feats2_raw, depth_mono1, depth_mono2, T_12, K, H, W
-        )
-        feats2_attended, d2_s16_v, d1_s16_v, _ = self._cross_attend(
-            feats2_raw, feats1_raw, depth_mono2, depth_mono1, T_21, K, H, W
-        )
 
         # ── Iterative refinement (at s16 resolution) ─────────────────────
         if self.use_refinement:

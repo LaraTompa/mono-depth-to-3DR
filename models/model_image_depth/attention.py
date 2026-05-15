@@ -118,18 +118,7 @@ class LocalGeoCrossAttention(nn.Module):
         self.norm_kv   = nn.GroupNorm(1, dim)
         self.norm_out  = nn.GroupNorm(1, dim)
 
-        self.pose_enc  = PoseEncoder(embed_dim=dim)
 
-    def _film_modulate(
-        self,
-        feat: torch.Tensor,
-        gamma: torch.Tensor,
-        beta: torch.Tensor,
-    ) -> torch.Tensor:
-        """Apply FiLM: gamma * feat + beta. gamma/beta are (B, C) → (B, C, 1, 1)."""
-        g = gamma.view(-1, gamma.shape[1], 1, 1)
-        b = beta.view(-1, beta.shape[1], 1, 1)
-        return g * feat + b
 
     def forward(
         self,
@@ -176,14 +165,9 @@ class LocalGeoCrossAttention(nn.Module):
         pts_in_2 = transform_pts(unproject(depth1, K), T_12)  # (B, 3, H, W)
         proj_z = pts_in_2[:, 2:3]                             # (B, 1, H, W)
 
-        # ----------------------------------------------------------------
-        # Pose FiLM + linear projections
-        # ----------------------------------------------------------------
-        gk, bk, gv, bv = self.pose_enc(T_12)
-
         Q  = self.to_q(self.norm_q(feat1))                             # (B, C, H, W)
-        K_ = self._film_modulate(self.to_k(self.norm_kv(feat2)), gk, bk)
-        V_ = self._film_modulate(self.to_v(self.norm_kv(feat2)), gv, bv)
+        K_ = self.to_k(self.norm_kv(feat2))                             # (B, C, H, W)
+        V_ = self.to_v(self.norm_kv(feat2))                             # (B, C, H, W)
 
         # ----------------------------------------------------------------
         # Step 2: sample local ws x ws patch around (u2, v2)
