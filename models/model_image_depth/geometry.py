@@ -276,6 +276,12 @@ def svd_orthogonalize(M: torch.Tensor) -> torch.Tensor:
     M : (B, 3, 3)   — raw (not necessarily orthonormal) matrix
     Returns R : (B, 3, 3)  ∈ SO(3)
     """
+    # Guard: replace any sample whose matrix contains NaN/Inf with identity
+    # so that a single bad sample does not corrupt the whole batch via SVD.
+    bad = ~torch.isfinite(M).all(dim=-1).all(dim=-1)   # (B,)
+    if bad.any():
+        M = M.clone()
+        M[bad] = torch.eye(3, device=M.device, dtype=M.dtype)
     U, _, Vh = torch.linalg.svd(M)                         # U, S, Vh; M = U@diag(S)@Vh
     # det(U @ Vh) ∈ {±1}; flip the last singular direction when −1
     # so that det(R) = det(U) · det(D) · det(Vh) = +1 always.

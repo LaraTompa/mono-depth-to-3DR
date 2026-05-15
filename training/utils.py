@@ -66,7 +66,11 @@ def build_optimizer(cfg: dict, model: torch.nn.Module) -> torch.optim.Optimizer:
     
 def optimizer_step(optimizer, model, grad_clip) -> None:
     if grad_clip:
-        torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+        total_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+        if not torch.isfinite(total_norm):
+            print(f"[NaN grad] total_norm={total_norm:.4f} — skipping update")
+            optimizer.zero_grad(set_to_none=True)
+            return
     optimizer.step()
     optimizer.zero_grad(set_to_none=True)
 

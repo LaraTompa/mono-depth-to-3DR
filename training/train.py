@@ -129,10 +129,27 @@ def run_epoch(
                     # Feed predictions into next iteration.
                     # .detach() avoids backpropagating through the unrolled
                     # initialisation graph; remove to enable full unrolling.
-                    K_iter    = outputs["K_pred"].detach()
-                    T_12_iter = outputs["T_12_pred"].detach()
+                    K_pred_it    = outputs["K_pred"].detach()
+                    T_pred_it    = outputs["T_12_pred"].detach()
+                    # Guard: only accept if both tensors are fully finite;
+                    # if NaN crept in, keep the previous-iteration values.
+                    if torch.isfinite(K_pred_it).all() and torch.isfinite(T_pred_it).all():
+                        K_iter    = K_pred_it
+                        T_12_iter = T_pred_it
+                    else:
+                        print(f"[NaN guard] iter {pose_it}: non-finite K/T pred "
+                              f"at step {step}; keeping previous init values.")
 
             loss, breakdown = compute_total_loss(outputs, batch, cfg.get("loss", {}), K_iter)
+
+            # ── Global NaN detector ───────────────────────────────────────────
+            if train and not torch.isfinite(loss):
+                nan_keys = [k for k, v in outputs.items()
+                            if isinstance(v, torch.Tensor) and not torch.isfinite(v).all()]
+                print(f"[NaN] step {step}  loss={float(loss):.4f}  "
+                      f"non-finite outputs: {nan_keys}")
+                optimizer.zero_grad(set_to_none=True)
+                continue
 
             if train:
                 loss.backward()

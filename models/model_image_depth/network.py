@@ -181,6 +181,9 @@ class DepthAlignNet(nn.Module):
         self.attn_cross   = nn.MultiheadAttention(feat_dim, num_heads, batch_first=True)
         self.attn_norm_q  = nn.LayerNorm(feat_dim)
         self.attn_norm_kv = nn.LayerNorm(feat_dim)
+        # Normalise raw encoder features before building attention sequences.
+        # Keeps feature magnitudes bounded as the projection layers train.
+        self.feat_norm    = nn.LayerNorm(feat_dim)
 
         # Iterative refinement operates at 1/16 resolution for speed (optional)
         if use_refinement:
@@ -242,8 +245,8 @@ class DepthAlignNet(nn.Module):
         depth_ctx_s16 = F.interpolate(depth_ctx, size=(H16, W16), mode="nearest")
 
         # ── s16: prepend camera token then cross-attend ───────────────────
-        sp_q   = feats_q["s16"].permute(0, 2, 3, 1).reshape(B, H16 * W16, C)
-        sp_ctx = feats_ctx["s16"].permute(0, 2, 3, 1).reshape(B, H16 * W16, C)
+        sp_q   = self.feat_norm(feats_q["s16"].permute(0, 2, 3, 1).reshape(B, H16 * W16, C))
+        sp_ctx = self.feat_norm(feats_ctx["s16"].permute(0, 2, 3, 1).reshape(B, H16 * W16, C))
         seq_q   = torch.cat([cam_token, sp_q],   dim=1)   # (B, 1+H16*W16, C)
         seq_ctx = torch.cat([cam_token, sp_ctx], dim=1)
         out, _ = self.attn_cross(self.attn_norm_q(seq_q), self.attn_norm_kv(seq_ctx), self.attn_norm_kv(seq_ctx))
@@ -252,8 +255,8 @@ class DepthAlignNet(nn.Module):
         f16 = seq_q[:, 1:, :].reshape(B, H16, W16, C).permute(0, 3, 1, 2)      # (B,C,H16,W16)
 
         # ── s8: shared cross-attention, spatial tokens only ───────────────
-        s8_q   = feats_q["s8"].permute(0, 2, 3, 1).reshape(B, H8 * W8, C)
-        s8_ctx = feats_ctx["s8"].permute(0, 2, 3, 1).reshape(B, H8 * W8, C)
+        s8_q   = self.feat_norm(feats_q["s8"].permute(0, 2, 3, 1).reshape(B, H8 * W8, C))
+        s8_ctx = self.feat_norm(feats_ctx["s8"].permute(0, 2, 3, 1).reshape(B, H8 * W8, C))
         out8, _ = self.attn_cross(self.attn_norm_q(s8_q), self.attn_norm_kv(s8_ctx), self.attn_norm_kv(s8_ctx))
         f8 = (s8_q + out8).reshape(B, H8, W8, C).permute(0, 3, 1, 2)           # (B,C,H8,W8)
 
