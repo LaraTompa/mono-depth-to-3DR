@@ -54,7 +54,8 @@ def run_epoch(
     log_every = int(train_cfg.get("log_every", 50))
     grad_clip = train_cfg.get("grad_clip")
 
-    totals    = {"loss": 0.0, "depth": 0.0, "smooth": 0.0, "iters": 0.0}
+    totals    = {"loss": 0.0, "depth": 0.0, "smooth": 0.0, "iters": 0.0,
+                 "cam_pose": 0.0, "cam_rot": 0.0, "cam_trans": 0.0, "cam_K": 0.0}
     metric_sums = {"abs_rel": 0.0, "rmse": 0.0, "delta1": 0.0}
     metric_count = 0
     n_batches = 0
@@ -71,9 +72,6 @@ def run_epoch(
             }
 
             B = batch["images"].shape[0]
-
-            # Per-batch intrinsics — use dataset-provided if available, else config fallback
-            K = batch["intrinsics"] if "intrinsics" in batch else fallback_intrinsics(cfg, B, device)
 
             imgs   = batch["images"]       # (B, N, 3, H, W)
             depths = batch["depths"]       # (B, N, 1, H, W)  ground-truth depths
@@ -97,27 +95,57 @@ def run_epoch(
             if epoch == 1 and step == 0 and train:
                 debug_depth_check(depths, mde_depths)
 
-            # T_12 = inv(pose2) @ pose1  (cam1 → cam2)
-            T_12 = torch.linalg.inv(poses[:, 1]) @ poses[:, 0]
+            # GT poses / intrinsics retained for future pose-supervision losses.
+            K_gt    = batch["intrinsics"] if "intrinsics" in batch else fallback_intrinsics(cfg, B, device)
+            T_12_gt = torch.linalg.inv(poses[:, 1]) @ poses[:, 0]
 
-            outputs = model(
-                rgb1=rgb1,
-                rgb2=rgb2,
-                depth_mono1=depth_mono1,
-                depth_mono2=depth_mono2,
-                T_12=T_12,
-                K=K,
-            )
-            loss, breakdown = compute_total_loss(outputs, batch, cfg.get("loss", {}), K)
+            # ── Iterative camera-pose initialisation ─────────────────────────
+            # Iteration 0: identity relative pose + focal-length prior.
+            # Justification: 0.9 × max(H, W) gives fx ≈ fy ≈ 576 px for
+            # 640×480 (close to ScanNet's actual ~577) and is a safe starting
+            # point for ~60° diagonal FoV without any calibration data.
+            H_img, W_img = rgb1.shape[-2:]
+            f_init = float(max(H_img, W_img)) * 0.9
+            K_iter = torch.tensor(
+                [[f_init, 0.0,    W_img / 2.0],
+                 [0.0,    f_init, H_img / 2.0],
+                 [0.0,    0.0,    1.0]],
+                dtype=torch.float32, device=device,
+            ).unsqueeze(0).expand(B, -1, -1).contiguous()
+            T_12_iter = (torch.eye(4, device=device, dtype=torch.float32)
+                         .unsqueeze(0).expand(B, -1, -1).contiguous())
+
+            num_pose_iters = train_cfg.get("num_pose_iters", 2)
+            for pose_it in range(num_pose_iters):
+                outputs = model(
+                    rgb1=rgb1,
+                    rgb2=rgb2,
+                    depth_mono1=depth_mono1,
+                    depth_mono2=depth_mono2,
+                    T_12=T_12_iter,
+                    K=K_iter,
+                )
+                if pose_it < num_pose_iters - 1:
+                    # Feed predictions into next iteration.
+                    # .detach() avoids backpropagating through the unrolled
+                    # initialisation graph; remove to enable full unrolling.
+                    K_iter    = outputs["K_pred"].detach()
+                    T_12_iter = outputs["T_12_pred"].detach()
+
+            loss, breakdown = compute_total_loss(outputs, batch, cfg.get("loss", {}), K_iter)
 
             if train:
                 loss.backward()
                 optimizer_step(optimizer, model, grad_clip)
 
-            totals["loss"]   += loss.item()
-            totals["depth"]  += breakdown.get("depth", 0.0)
-            totals["smooth"] += breakdown.get("smooth", 0.0)
-            totals["iters"]  += breakdown.get("iters", 0.0)
+            totals["loss"]       += loss.item()
+            totals["depth"]      += breakdown.get("depth",     0.0)
+            totals["smooth"]     += breakdown.get("smooth",    0.0)
+            totals["iters"]      += breakdown.get("iters",     0.0)
+            totals["cam_pose"]   += breakdown.get("cam_pose",  0.0)
+            totals["cam_rot"]    += breakdown.get("cam_rot",   0.0)
+            totals["cam_trans"]  += breakdown.get("cam_trans", 0.0)
+            totals["cam_K"]      += breakdown.get("cam_K",     0.0)
 
             if not train:
                 pred1 = outputs["depth1"]                         # (B,1,pH,pW)
@@ -132,11 +160,17 @@ def run_epoch(
 
             if train and (step + 1) % log_every == 0:
                 elapsed = time.time() - t0
-                avg_loss = totals["loss"] / n_batches
+                n = n_batches
+                avg_loss    = totals["loss"]     / n
+                avg_cam     = totals["cam_pose"] / n
+                avg_rot     = totals["cam_rot"]  / n
+                avg_trans   = totals["cam_trans"]/ n
                 lr = optimizer.param_groups[0]["lr"]
                 print(
                     f"  epoch {epoch:03d}  step {step+1:04d}/{len(loader):04d}"
-                    f"  loss={avg_loss:.4f}  lr={lr:.2e}  {elapsed:.1f}s"
+                    f"  loss={avg_loss:.4f}"
+                    f"  cam={avg_cam:.4f} (rot={avg_rot:.3f} trans={avg_trans:.3f})"
+                    f"  lr={lr:.2e}  {elapsed:.1f}s"
                 )
 
     out = {k: v / max(n_batches, 1) for k, v in totals.items()}

@@ -3,11 +3,15 @@ losses.py — All training losses for DepthAlignNet.
 
 Active
 ------
-1. si_log_loss           — Scale-invariant log loss (supervised depth)
-2. smooth_loss           — Edge-aware depth smoothness
-3. iter_supervision      — Deep supervision over refinement iterations
-4. compute_depth_metrics — abs_rel / rmse / delta1 (validation only)
-5. total_loss            — Weighted sum with breakdown dict for logging
+1. si_log_loss              — Scale-invariant log loss (supervised depth)
+2. smooth_loss              — Edge-aware depth smoothness
+3. iter_supervision         — Deep supervision over refinement iterations
+4. geodesic_rotation_loss   — Geodesic distance on SO(3) between R_pred and R_gt
+5. normalized_trans_loss    — L2 between unit-normalised predicted/GT translations
+6. pose_identity_loss       — ||T_12 @ T_21 − I||_F  (numerical round-trip check)
+7. camera_pose_loss         — Confidence-weighted composite camera loss
+8. compute_depth_metrics    — abs_rel / rmse / delta1 (validation only)
+9. total_loss               — Weighted sum with full breakdown dict for logging
 
 Commented out (re-enable once network produces reasonable depths)
 -----------------------------------------------------------------
@@ -125,7 +129,168 @@ def iter_supervision_loss(
 
 
 # ---------------------------------------------------------------------------
-# 6. Total loss — called from train.py compute_loss
+# 6. Geodesic rotation loss
+# ---------------------------------------------------------------------------
+
+def geodesic_rotation_loss(
+    R_pred: torch.Tensor,   # (B, 3, 3) predicted rotation
+    R_gt:   torch.Tensor,   # (B, 3, 3) ground-truth rotation
+) -> torch.Tensor:
+    """
+    Per-sample geodesic (great-circle) distance on SO(3):
+        d(R_pred, R_gt) = arccos( (trace(R_pred^T R_gt) − 1) / 2 )
+
+    Returns (B,) tensor of angles in radians.
+    The trace formula gives the rotation angle of the relative rotation
+    R_pred^T R_gt; the geodesic is the shortest arc on the unit sphere.
+    """
+    R_rel   = R_pred.transpose(-1, -2) @ R_gt              # (B, 3, 3)
+    cos_ang = (R_rel.diagonal(dim1=-2, dim2=-1).sum(-1) - 1.0) * 0.5
+    cos_ang = cos_ang.clamp(-1.0 + EPS, 1.0 - EPS)        # numerical safety
+    return torch.acos(cos_ang)                              # (B,)
+
+
+# ---------------------------------------------------------------------------
+# 7. Normalised translation loss
+# ---------------------------------------------------------------------------
+
+def normalized_translation_loss(
+    t_pred: torch.Tensor,   # (B, 3) predicted translation
+    t_gt:   torch.Tensor,   # (B, 3) ground-truth translation
+) -> torch.Tensor:
+    """
+    L2 distance between unit-normalised translations.
+
+    Normalisation removes scale ambiguity: we care about the direction of
+    the baseline, not its magnitude.  Zero-norm vectors (pure-rotation
+    pairs) are handled by F.normalize's eps.
+
+    Returns (B,) tensor.
+    """
+    t_pred_n = F.normalize(t_pred, dim=-1)
+    t_gt_n   = F.normalize(t_gt,   dim=-1)
+    return (t_pred_n - t_gt_n).norm(dim=-1)                # (B,)
+
+
+# ---------------------------------------------------------------------------
+# 8. Pose identity (round-trip consistency) loss
+# ---------------------------------------------------------------------------
+
+def pose_identity_loss(
+    T_12: torch.Tensor,   # (B, 4, 4)
+    T_21: torch.Tensor,   # (B, 4, 4)
+) -> torch.Tensor:
+    """
+    Frobenius norm of T_12 @ T_21 − I_4.
+
+    Analytically this is zero when T_21 = T_12^{-1}, but gradients through
+    SVD orthogonalisation and torch.linalg.inv accumulate floating-point
+    drift.  This loss acts as a soft numerical regulariser that explicitly
+    re-enforces the round-trip identity constraint.
+
+    Returns a scalar.
+    """
+    I4 = torch.eye(4, device=T_12.device, dtype=T_12.dtype).unsqueeze(0)
+    return (T_12 @ T_21 - I4).norm(dim=(-2, -1)).mean()
+
+
+# ---------------------------------------------------------------------------
+# 9. Composite camera-pose loss with confidence weighting
+# ---------------------------------------------------------------------------
+
+def camera_pose_loss(
+    outputs:  dict,
+    T_12_gt:  torch.Tensor,          # (B, 4, 4) GT relative pose (cam1→cam2)
+    K_gt:     torch.Tensor | None,   # (B, 3, 3) GT intrinsics, or None
+    weights:  dict,
+) -> tuple[torch.Tensor, dict]:
+    """
+    Confidence-weighted camera parameter losses.
+
+    Pose losses (geodesic rotation + normalised translation) are combined
+    and weighted by a per-sample heteroscedastic confidence score following
+    Kendall & Gal (NeurIPS 2017):
+
+        L_pose = exp(−s_pose) · (w_rot·L_rot + w_trans·L_trans) + s_pose
+
+    Intrinsics regression (relative L1 vs GT) is similarly weighted:
+
+        L_K = exp(−s_K) · L_K_data + s_K
+
+    The "+s" terms prevent the network from collapsing the loss to zero by
+    inflating uncertainty.  The pose identity loss is added unweighted as a
+    geometric regulariser.
+
+    Parameters
+    ----------
+    outputs  : DepthAlignNet output dict (must contain T_12_pred, T_c2w_1/2,
+               K_pred, log_conf_K, log_conf_pose)
+    T_12_gt  : (B, 4, 4) ground-truth relative pose
+    K_gt     : (B, 3, 3) ground-truth intrinsics, or None (skips K loss)
+    weights  : loss weight dict (keys: rot, trans, K_reg, identity, camera)
+
+    Returns
+    -------
+    total_camera_loss : scalar tensor
+    parts             : dict of float scalars for logging
+    """
+    T_12_pred    = outputs["T_12_pred"]     # (B, 4, 4)
+    T_c2w_1      = outputs["T_c2w_1"]       # (B, 4, 4)
+    T_c2w_2      = outputs["T_c2w_2"]       # (B, 4, 4)
+    K_pred       = outputs["K_pred"]        # (B, 3, 3)
+    s_pose       = outputs["log_conf_pose"] # (B,)
+    s_K          = outputs["log_conf_K"]    # (B,)
+
+    R_pred = T_12_pred[:, :3, :3]          # (B, 3, 3)
+    t_pred = T_12_pred[:, :3,  3]          # (B, 3)
+    R_gt   = T_12_gt[:, :3, :3]
+    t_gt   = T_12_gt[:, :3,  3]
+
+    # ── Geodesic rotation loss ────────────────────────────────────────────
+    l_rot   = geodesic_rotation_loss(R_pred, R_gt)    # (B,)
+
+    # ── Normalised translation loss ───────────────────────────────────────
+    l_trans = normalized_translation_loss(t_pred, t_gt)  # (B,)
+
+    # ── Confidence-weighted pose loss ─────────────────────────────────────
+    w_rot   = float(weights.get("rot",   1.0))
+    w_trans = float(weights.get("trans", 1.0))
+    l_pose_data = w_rot * l_rot + w_trans * l_trans      # (B,)
+    l_pose      = (torch.exp(-s_pose) * l_pose_data + s_pose).mean()
+
+    # ── Intrinsics regression loss ────────────────────────────────────────
+    l_K = T_12_pred.new_tensor(0.0)
+    if K_gt is not None:
+        K_gt_vec   = torch.stack([K_gt[:,  0,0], K_gt[:,  1,1],
+                                  K_gt[:,  0,2], K_gt[:,  1,2]], dim=-1)  # (B,4)
+        K_pred_vec = torch.stack([K_pred[:,0,0], K_pred[:,1,1],
+                                  K_pred[:,0,2], K_pred[:,1,2]], dim=-1)  # (B,4)
+        # Relative L1 error per intrinsic parameter
+        l_K_data = ((K_pred_vec - K_gt_vec) / K_gt_vec.clamp(min=EPS)).abs().mean(-1)  # (B,)
+        l_K      = (torch.exp(-s_K) * l_K_data + s_K).mean()
+
+    # ── Pose identity (round-trip) regulariser ────────────────────────────
+    # T_21 = T_c2w_1^{−1} @ T_c2w_2  (cam2→cam1 from absolute poses)
+    T_21_pred = torch.linalg.inv(T_c2w_1) @ T_c2w_2
+    l_id      = pose_identity_loss(T_12_pred, T_21_pred)
+
+    # ── Combine ───────────────────────────────────────────────────────────
+    w_K_reg   = float(weights.get("K_reg",    0.5))
+    w_id      = float(weights.get("identity", 0.1))
+    total_cam = l_pose + w_K_reg * l_K + w_id * l_id
+
+    parts = {
+        "cam_rot":      float(l_rot.mean().detach()),
+        "cam_trans":    float(l_trans.mean().detach()),
+        "cam_pose":     float(l_pose.detach()),
+        "cam_K":        float(l_K.detach()),
+        "cam_identity": float(l_id.detach()),
+    }
+    return total_cam, parts
+
+
+# ---------------------------------------------------------------------------
+# 10. Total loss — called from train.py
 # ---------------------------------------------------------------------------
 
 def total_loss(
@@ -204,6 +369,16 @@ def total_loss(
         "smooth": float(l_smooth.detach()),
         "iters":  float(l_iters.detach()),
     }
+
+    # --- Camera pose / intrinsics losses ---
+    if "poses" in batch and "T_12_pred" in outputs:
+        poses   = batch["poses"]                                 # (B, N, 4, 4)
+        T_12_gt = torch.linalg.inv(poses[:, 1]) @ poses[:, 0]  # cam1→cam2 GT
+        K_gt    = batch.get("intrinsics")                        # (B, 3, 3) or None
+        l_cam, cam_parts = camera_pose_loss(outputs, T_12_gt, K_gt, w)
+        total   = total + float(w.get("camera", 0.5)) * l_cam
+        parts.update(cam_parts)
+
     return total, parts
 
 

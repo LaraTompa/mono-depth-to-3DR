@@ -29,6 +29,118 @@ from .encoder    import SharedEncoder
 from .attention  import LocalGeoCrossAttention
 from .refinement import IterativeRefinement
 from .decoder    import DepthDecoder
+from .geometry   import rot6d_to_matrix, svd_orthogonalize
+
+
+# ---------------------------------------------------------------------------
+# Camera parameter prediction head
+# ---------------------------------------------------------------------------
+
+class CameraHead(nn.Module):
+    """
+    Decode a single camera-token embedding into intrinsics, a camera-to-world
+    pose, and per-prediction confidence scores.
+
+    Intrinsics — normalised by image size so the head is resolution-agnostic:
+      fx = (softplus(·) + 0.3) * W   →  always positive; default ≈ 0.99 W
+      fy = (softplus(·) + 0.3) * H
+      cx = sigmoid(·) * W            →  ∈ (0, W); default = 0.5 W
+      cy = sigmoid(·) * H
+
+    Pose — camera-to-world (ScanNet convention):
+      Rotation: raw 3×3 output projected onto SO(3) via SVD Procrustes
+        (Shiu & Ahmad, 1987; Umeyama, 1991).  SVD is chosen over the 6-D
+        Gram-Schmidt approach because it handles degenerate / near-zero
+        network outputs gracefully and is the true nearest-rotation solution
+        in Frobenius norm.  Bias is initialised to the flattened identity
+        matrix so the prior pose is the identity transform.
+      Translation: direct 3-D vector in world units (metres for ScanNet).
+
+    Confidence — log-scale scalars s_K, s_pose for heteroscedastic
+      uncertainty weighting (Kendall & Gal, NeurIPS 2017):
+        L_weighted = exp(−s) · L_data + s
+      The "+s" term prevents the network from collapsing to s → −∞.
+      Both initialised to 0 (σ = 1, neutral weighting at start).
+
+    The head is shared (weight-tied) across both views: the same camera
+    is assumed for all views in a pair.
+    """
+
+    def __init__(self, feat_dim: int, hidden: int = 256):
+        super().__init__()
+        self.mlp = nn.Sequential(
+            nn.Linear(feat_dim, hidden),
+            nn.GELU(),
+            nn.Linear(hidden, hidden),
+            nn.GELU(),
+        )
+        self.to_intrinsics    = nn.Linear(hidden, 4)    # fx_n, fy_n, cx_n, cy_n
+        self.to_pose          = nn.Linear(hidden, 12)   # 9D raw rotation + 3D translation
+        self.to_log_conf_K    = nn.Linear(hidden, 1)    # log-confidence for intrinsics
+        self.to_log_conf_pose = nn.Linear(hidden, 1)    # log-confidence for pose
+
+        # Intrinsics: zero init → softplus(0)+0.3≈0.99 focal, sigmoid(0)=0.5 pp.
+        nn.init.zeros_(self.to_intrinsics.weight)
+        nn.init.zeros_(self.to_intrinsics.bias)
+
+        # Rotation: bias = flattened identity → SVD(I) = I (identity pose prior).
+        # Translation bias = 0.  Together: T_c2w = I at init.
+        nn.init.zeros_(self.to_pose.weight)
+        with torch.no_grad():
+            self.to_pose.bias.copy_(
+                torch.tensor([1., 0., 0., 0., 1., 0., 0., 0., 1.,   # I_3 row-major
+                               0., 0., 0.])                           # zero translation
+            )
+
+        # Confidence: zero init → log_conf=0 → σ=1 (no scaling at start).
+        for layer in (self.to_log_conf_K, self.to_log_conf_pose):
+            nn.init.zeros_(layer.weight)
+            nn.init.zeros_(layer.bias)
+
+    def forward(self, cam_embed: torch.Tensor, H: int, W: int) -> dict:
+        """
+        cam_embed : (B, feat_dim)
+        H, W      : original image height / width (pixels)
+        Returns {
+            "K":             (B, 3, 3),
+            "T_c2w":         (B, 4, 4),
+            "log_conf_K":    (B,)   log-confidence for intrinsics,
+            "log_conf_pose": (B,)   log-confidence for pose,
+        }
+        """
+        h    = self.mlp(cam_embed)                           # (B, hidden)
+        intr = self.to_intrinsics(h)                         # (B, 4)
+
+        fx = (F.softplus(intr[:, 0]) + 0.3) * W
+        fy = (F.softplus(intr[:, 1]) + 0.3) * H
+        cx = torch.sigmoid(intr[:, 2]) * W
+        cy = torch.sigmoid(intr[:, 3]) * H
+
+        B = cam_embed.shape[0]
+        K = torch.zeros(B, 3, 3, device=cam_embed.device, dtype=cam_embed.dtype)
+        K[:, 0, 0] = fx;  K[:, 1, 1] = fy
+        K[:, 0, 2] = cx;  K[:, 1, 2] = cy
+        K[:, 2, 2] = 1.0
+
+        pose_raw = self.to_pose(h)                           # (B, 12)
+        M_raw    = pose_raw[:, :9].reshape(B, 3, 3)          # (B, 3, 3) raw rotation
+        t        = pose_raw[:, 9:]                           # (B, 3)
+        R        = svd_orthogonalize(M_raw)                  # (B, 3, 3) ∈ SO(3)
+
+        T_c2w = (torch.eye(4, device=cam_embed.device, dtype=cam_embed.dtype)
+                     .unsqueeze(0).expand(B, -1, -1).clone())
+        T_c2w[:, :3, :3] = R
+        T_c2w[:, :3,  3] = t
+
+        log_conf_K    = self.to_log_conf_K(h).squeeze(-1)    # (B,)
+        log_conf_pose = self.to_log_conf_pose(h).squeeze(-1) # (B,)
+
+        return {
+            "K":             K,
+            "T_c2w":         T_c2w,
+            "log_conf_K":    log_conf_K,
+            "log_conf_pose": log_conf_pose,
+        }
 
 
 class DepthAlignNet(nn.Module):
@@ -76,6 +188,21 @@ class DepthAlignNet(nn.Module):
         # Decoder
         self.decoder = DepthDecoder(feat_dim=feat_dim, hidden=decoder_hidden)
 
+        # ── Camera token & prediction head ────────────────────────────────────
+        # One learnable token per view (expanded to batch size at runtime),
+        # initialised with ViT-style trunc-normal (std=0.02).
+        self.camera_token = nn.Parameter(torch.empty(1, 1, feat_dim))
+        nn.init.trunc_normal_(self.camera_token, std=0.02)
+
+        # The camera token cross-attends to the s16 spatial features (K/V).
+        # Spatial features are read but NOT written, keeping the geometry
+        # cross-attention path equivalent to the original network.
+        self.cam_mha  = nn.MultiheadAttention(feat_dim, num_heads, batch_first=True)
+        self.cam_norm = nn.LayerNorm(feat_dim)
+
+        # Weight-tied prediction head (same physical camera for both views).
+        self.camera_head = CameraHead(feat_dim)
+
     # ------------------------------------------------------------------
     # Intrinsics scaling
     # ------------------------------------------------------------------
@@ -90,64 +217,71 @@ class DepthAlignNet(nn.Module):
         return K
 
     # ------------------------------------------------------------------
-    # Per-view processing (encoder + attention, symmetric)
+    # Camera token prediction  (per view, weight-tied)
     # ------------------------------------------------------------------
-    def _encode_and_attend(
+    def _camera_predict(
         self,
-        rgb_q, depth_q,          # query view
-        rgb_ctx, depth_ctx,      # context view
-        T_q2ctx,                 # cam_q → cam_ctx
-        K,                       # full-resolution intrinsics
-    ):
+        feats_s16: torch.Tensor,   # (B, C, H16, W16)
+        H_orig: int,
+        W_orig: int,
+    ) -> dict:
         """
-        Encode both views with the shared encoder, then apply local
-        cross-attention from query → context at s16 and s8.
+        The learnable camera token cross-attends (as query) over the s16
+        spatial features (key / value) of a single view.  Spatial features
+        are not modified, so the subsequent geometry cross-attention receives
+        exactly the same feature map as before.
 
-        Returns feats_q (attended), feats_ctx (raw), depth_q_s16, K_s16
+        Returns {"K": (B,3,3), "T_c2w": (B,4,4)}.
         """
-        B, _, H, W = rgb_q.shape
+        B, C, H16, W16 = feats_s16.shape
+        # Flatten spatial feature map to a token sequence: (B, H16*W16, C)
+        spatial = feats_s16.permute(0, 2, 3, 1).reshape(B, H16 * W16, C)
+        # Expand shared camera token to batch: (B, 1, C)
+        cam_tok = self.camera_token.expand(B, -1, -1)
+        # Camera token queries spatial features; spatial tokens unchanged
+        attn_out, _ = self.cam_mha(cam_tok, spatial, spatial)  # (B, 1, C)
+        cam_embed = self.cam_norm(cam_tok + attn_out)[:, 0]     # (B, C)
+        return self.camera_head(cam_embed, H_orig, W_orig)
 
-        # Concatenate RGB + mono depth along channel dim
-        x_q   = torch.cat([rgb_q,   depth_q],   dim=1)   # (B, 4, H, W)
-        x_ctx = torch.cat([rgb_ctx, depth_ctx], dim=1)
+    # ------------------------------------------------------------------
+    # Per-view cross-attention  (operates on pre-encoded features)
+    # ------------------------------------------------------------------
+    def _cross_attend(
+        self,
+        feats_q:   dict,           # pre-encoded query features {s4, s8, s16}
+        feats_ctx: dict,           # pre-encoded context features
+        depth_q:   torch.Tensor,   # (B, 1, H, W) mono depth of query view
+        depth_ctx: torch.Tensor,   # (B, 1, H, W) mono depth of context view
+        T_q2ctx:   torch.Tensor,   # (B, 4, 4) cam_q → cam_ctx
+        K:         torch.Tensor,   # (B, 3, 3) full-resolution intrinsics
+        H: int, W: int,            # original image dimensions
+    ) -> tuple:
+        """
+        Apply local geometry-aware cross-attention at s16 and s8 using
+        already-encoded feature maps.  K and T_q2ctx are the current
+        estimates supplied by the outer iterative loop in train.py.
 
-        feats_q   = self.encoder(x_q)     # {"s4", "s8", "s16"}
-        feats_ctx = self.encoder(x_ctx)
-
-        # Scale K to s16 resolution for geometry ops in attention/refinement
+        Returns (attended_feats_q, depth_q_s16, depth_ctx_s16, K_s16).
+        """
         _, _, H16, W16 = feats_q["s16"].shape
         K_s16 = self._scale_K(K, H, W, H16, W16)
 
-        # Scale K to s8 resolution
         _, _, H8, W8 = feats_q["s8"].shape
-        K_s8 = self._scale_K(K, H, W, H8, W8)
+        K_s8  = self._scale_K(K, H, W, H8,  W8)
 
-        # Resize mono depth to s16 for geometry
         depth_q_s16   = F.interpolate(depth_q,   size=(H16, W16), mode="nearest")
         depth_ctx_s16 = F.interpolate(depth_ctx, size=(H16, W16), mode="nearest")
+        depth_q_s8    = F.interpolate(depth_q,   size=(H8,  W8),  mode="nearest")
 
-        # Resize mono depth to s8
-        depth_q_s8 = F.interpolate(depth_q, size=(H8, W8), mode="nearest")
-
-        # Cross-attention at s16: query uses view-q, context is view-ctx
         f16 = self.attn16(
-            feats_q["s16"], feats_ctx["s16"],
-            depth_q_s16, T_q2ctx, K_s16,
+            feats_q["s16"], feats_ctx["s16"], depth_q_s16, T_q2ctx, K_s16,
         )
-
-        # Cross-attention at s8
         f8 = self.attn8(
-            feats_q["s8"], feats_ctx["s8"],
-            depth_q_s8, T_q2ctx, K_s8,
+            feats_q["s8"],  feats_ctx["s8"],  depth_q_s8,  T_q2ctx, K_s8,
         )
 
-        # Return attended features for q, raw for ctx, and geometry helpers
-        attended_feats_q = {
-            "s4":  feats_q["s4"],
-            "s8":  f8,
-            "s16": f16,
-        }
-        return attended_feats_q, feats_ctx, depth_q_s16, depth_ctx_s16, K_s16
+        attended = {"s4": feats_q["s4"], "s8": f8, "s16": f16}
+        return attended, depth_q_s16, depth_ctx_s16, K_s16
 
     # ------------------------------------------------------------------
     # Forward
@@ -158,23 +292,47 @@ class DepthAlignNet(nn.Module):
         rgb2:        torch.Tensor,
         depth_mono1: torch.Tensor,
         depth_mono2: torch.Tensor,
-        T_12:        torch.Tensor,
-        K:           torch.Tensor,
+        T_12:        torch.Tensor,   # current relative-pose estimate (cam1→cam2)
+        K:           torch.Tensor,   # current intrinsics estimate
     ) -> dict:
+        """
+        T_12 and K are treated as *current estimates* fed from the iterative
+        loop in train.py (identity pose + focal-length prior on the first
+        iteration; network predictions on subsequent iterations).
+        The camera head predicts updated K_pred / T_12_pred which are
+        returned in the output dict for the next iteration.
+        """
         B, _, H, W = rgb1.shape
         T_21 = torch.linalg.inv(T_12)
 
-        # ── View 1: query, View 2: context ──────────────────────────────
-        feats1, feats2, d1_s16, d2_s16, K_s16 = self._encode_and_attend(
-            rgb1, depth_mono1, rgb2, depth_mono2, T_12, K
+        # ── Encode both views once (weight-tied encoder) ─────────────────
+        x1 = torch.cat([rgb1, depth_mono1], dim=1)   # (B, 4, H, W)
+        x2 = torch.cat([rgb2, depth_mono2], dim=1)
+        feats1_raw = self.encoder(x1)                  # {"s4", "s8", "s16"}
+        feats2_raw = self.encoder(x2)
+
+        # ── Predict cameras from s16 features (before cross-attention) ───
+        # The camera token reads spatial features without modifying them,
+        # so the geometry cross-attention below is unaffected.
+        cam1 = self._camera_predict(feats1_raw["s16"], H, W)
+        cam2 = self._camera_predict(feats2_raw["s16"], H, W)
+        # Average intrinsics and confidence scores (same physical camera)
+        K_pred         = (cam1["K"]             + cam2["K"])             * 0.5
+        log_conf_K     = (cam1["log_conf_K"]    + cam2["log_conf_K"])    * 0.5
+        log_conf_pose  = (cam1["log_conf_pose"] + cam2["log_conf_pose"]) * 0.5
+        # Relative pose from absolute camera-to-world poses
+        T_12_pred = torch.linalg.inv(cam2["T_c2w"]) @ cam1["T_c2w"]
+
+        # ── Local geometry cross-attention using *current* K / T_12 ──────
+        # (identity + focal prior on iter 0; predicted values on iter ≥ 1)
+        feats1, d1_s16, d2_s16, K_s16 = self._cross_attend(
+            feats1_raw, feats2_raw, depth_mono1, depth_mono2, T_12, K, H, W
+        )
+        feats2_attended, d2_s16_v, d1_s16_v, _ = self._cross_attend(
+            feats2_raw, feats1_raw, depth_mono2, depth_mono1, T_21, K, H, W
         )
 
-        # ── View 2: query, View 1: context ──────────────────────────────
-        feats2_attended, _, d2_s16_v, d1_s16_v, _ = self._encode_and_attend(
-            rgb2, depth_mono2, rgb1, depth_mono1, T_21, K
-        )
-
-        # ── Iterative refinement (at s16 resolution) ────────────────────
+        # ── Iterative refinement (at s16 resolution) ─────────────────────
         if self.use_refinement:
             ref1 = self.refine(
                 depth_mono=d1_s16,
@@ -197,14 +355,13 @@ class DepthAlignNet(nn.Module):
             scale1, bias1  = ref1["scale"], ref1["bias"]
             scale2, bias2  = ref2["scale"], ref2["bias"]
         else:
-            # Skip refinement — pass MDE prior directly to the decoder
             depth1_refined = d1_s16
             depth2_refined = d2_s16_v
             depth1_iters   = []
             depth2_iters   = []
             scale1 = bias1 = scale2 = bias2 = None
 
-        # ── Decoder (upsample to H/2, W/2) ──────────────────────────────
+        # ── Decoder (upsample to H/2, W/2) ───────────────────────────────
         dec1 = self.decoder(feats1,          depth1_refined, depth_mono1)
         dec2 = self.decoder(feats2_attended, depth2_refined, depth_mono2)
 
@@ -219,6 +376,13 @@ class DepthAlignNet(nn.Module):
             "bias1":        bias1,
             "scale2":       scale2,
             "bias2":        bias2,
+            # Camera predictions — fed back as K / T_12 on the next iteration
+            "K_pred":        K_pred,               # (B, 3, 3)
+            "T_12_pred":     T_12_pred,             # (B, 4, 4)  cam1→cam2
+            "T_c2w_1":       cam1["T_c2w"],         # (B, 4, 4)  cam1→world
+            "T_c2w_2":       cam2["T_c2w"],         # (B, 4, 4)  cam2→world
+            "log_conf_K":    log_conf_K,            # (B,)  log-confidence for intrinsics
+            "log_conf_pose": log_conf_pose,         # (B,)  log-confidence for pose
         }
 
 
@@ -234,13 +398,16 @@ if __name__ == "__main__":
     rgb2  = torch.randn(B, 3, H, W)
     dm1   = torch.rand(B, 1, H, W) + 0.1
     dm2   = torch.rand(B, 1, H, W) + 0.1
-    T_12  = torch.eye(4).unsqueeze(0).expand(B, -1, -1)
-    fx = 577.0
-    K = torch.tensor([[fx, 0, W/2], [0, fx, H/2], [0, 0, 1]]).unsqueeze(0).expand(B, -1, -1)
+    # K and T_12 here are the *initial estimates* (as in training iteration 0)
+    T_12  = torch.eye(4).unsqueeze(0).expand(B, -1, -1).contiguous()
+    fx    = float(max(H, W)) * 0.9
+    K     = torch.tensor([[fx, 0, W/2], [0, fx, H/2], [0, 0, 1]],
+                          dtype=torch.float32).unsqueeze(0).expand(B, -1, -1).contiguous()
 
     with torch.no_grad():
         out = model(rgb1, rgb2, dm1, dm2, T_12, K)
 
+    print("── Depth / feature outputs ──")
     for k, v in out.items():
         if isinstance(v, torch.Tensor):
             print(f"  {k}: {tuple(v.shape)}")
@@ -250,10 +417,16 @@ if __name__ == "__main__":
             else:
                 print(f"  {k}: list of {len(v)} × {tuple(v[0].shape)}")
 
+    print("\n── Predicted camera parameters (first sample in batch) ──")
+    K_p = out["K_pred"][0]
+    print(f"  K_pred  fx={K_p[0,0]:.1f}  fy={K_p[1,1]:.1f}"
+          f"  cx={K_p[0,2]:.1f}  cy={K_p[1,2]:.1f}")
+    print(f"  T_12_pred:\n{out['T_12_pred'][0].numpy()}")
+
     #Print model size
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     trainable_names = [n for n, p in model.named_parameters() if p.requires_grad]
-    print(f"Total params:     {total_params/1e6:.2f}M")
+    print(f"\nTotal params:     {total_params/1e6:.2f}M")
     print(f"Trainable params: {trainable_params/1e6:.2f}M")
     print("Trainable names sample:", trainable_names[:20])

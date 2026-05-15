@@ -239,3 +239,48 @@ def rot_to_6d(R: torch.Tensor) -> torch.Tensor:
     R : (B, 3, 3)  →  6d : (B, 6)  (first two columns of R, row-major)
     """
     return R[:, :, :2].permute(0, 2, 1).reshape(-1, 6)   # (B, 6)
+
+
+def rot6d_to_matrix(v: torch.Tensor) -> torch.Tensor:
+    """
+    Convert 6D rotation representation (Zhou et al. 2019) to a 3×3 rotation
+    matrix via Gram-Schmidt orthonormalisation.
+
+    The 6D vector encodes the first two columns of the rotation matrix
+    (same layout produced by rot_to_6d).  The third column is recovered as
+    their cross-product, so the output is guaranteed to be in SO(3).
+
+    v : (B, 6)  — [col0 ; col1] (not necessarily unit / orthogonal)
+    Returns R : (B, 3, 3)
+    """
+    b0 = v[:, 0:3]                                          # first column
+    b1 = v[:, 3:6]                                          # second column (raw)
+    b0 = F.normalize(b0, dim=-1)                            # unit first column
+    b1 = b1 - (b1 * b0).sum(dim=-1, keepdim=True) * b0     # Gram-Schmidt
+    b1 = F.normalize(b1, dim=-1)
+    b2 = torch.cross(b0, b1, dim=-1)                        # third column
+    return torch.stack([b0, b1, b2], dim=-1)                # (B, 3, 3) — columns
+
+
+def svd_orthogonalize(M: torch.Tensor) -> torch.Tensor:
+    """
+    Project a raw 3×3 matrix onto SO(3) using the SVD Procrustes solution.
+
+    Given any (possibly non-orthonormal) matrix M the nearest rotation in
+    Frobenius norm is  R = U @ D @ Vh  where M = U @ diag(S) @ Vh and
+    D = diag(1, 1, det(U @ Vh)) corrects for reflections (det = −1 case).
+
+    This is strictly more robust than Gram-Schmidt when the network output
+    has large norm or nearly-degenerate columns, and guarantees det(R) = +1.
+
+    M : (B, 3, 3)   — raw (not necessarily orthonormal) matrix
+    Returns R : (B, 3, 3)  ∈ SO(3)
+    """
+    U, _, Vh = torch.linalg.svd(M)                         # U, S, Vh; M = U@diag(S)@Vh
+    # det(U @ Vh) ∈ {±1}; flip the last singular direction when −1
+    # so that det(R) = det(U) · det(D) · det(Vh) = +1 always.
+    d = torch.linalg.det(U @ Vh)                           # (B,)
+    D = torch.diag_embed(
+        torch.stack([torch.ones_like(d), torch.ones_like(d), d], dim=-1)
+    )                                                        # (B, 3, 3)
+    return U @ D @ Vh                                        # (B, 3, 3) ∈ SO(3)
