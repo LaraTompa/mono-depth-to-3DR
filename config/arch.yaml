@@ -17,3 +17,6 @@ refinement:
 
 decoder:
   hidden_dim: 32
+
+camera_head:
+  hidden_dim: 64
