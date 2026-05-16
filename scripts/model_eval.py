@@ -44,180 +44,11 @@ import yaml
 from models.model_image_depth.network import DepthAlignNet
 from models.model_image_depth.geometry import se3_inv
 
+from metrics.utils import load_intrinsics, load_pose, load_depth, load_image
+from metrics.pixel_consistency import compute_pixel_consistency, project_with_depth
+from metrics.depth_consistency import depth_metrics
 
-# ─── Loaders ────────────────────────────────────────────────────────────────
-
-def load_image(path, as_rgb=True):
-    """Load RGB image normalized to [0,1] float32."""
-    img = cv2.imread(path)
-    if img is None:
-        raise FileNotFoundError(f"Image not found: {path}")
-    if as_rgb:
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    return img.astype(np.float32) / 255.0
-
-
-def load_depth(path, scale=1.0):
-    """
-    Load depth from .npz, .npy, or image file.
-    Returns float32 array in metres.
-    """
-    ext = os.path.splitext(path)[1].lower()
-    if ext == ".npz":
-        data = np.load(path, allow_pickle=True)
-        for key in ["depth", "pred", "prediction", "arr_0"]:
-            if key in data:
-                depth = data[key]
-                break
-        else:
-            depth = data[list(data.keys())[0]]
-        depth = np.asarray(depth).astype(np.float32)
-        if depth.ndim == 3 and depth.shape[0] == 1:
-            depth = depth[0]
-        if depth.ndim == 3 and depth.shape[-1] in (1, 3, 4):
-            depth = depth[..., 0]
-        return depth
-    elif ext == ".npy":
-        depth = np.load(path).astype(np.float32)
-        if depth.ndim == 3 and depth.shape[0] == 1:
-            depth = depth[0]
-        if depth.ndim == 3 and depth.shape[-1] in (1, 3, 4):
-            depth = depth[..., 0]
-        return depth
-    else:
-        # PNG/TIFF/JPG
-        depth = cv2.imread(path, cv2.IMREAD_UNCHANGED)
-        if depth is None:
-            raise FileNotFoundError(f"Depth file not found: {path}")
-        depth = depth.astype(np.float32)
-        if depth.ndim == 3:
-            depth = cv2.cvtColor(depth, cv2.COLOR_BGR2GRAY)
-        return depth / scale
-
-
-def load_intrinsics(path):
-    """Load 3×3 or 4×4 intrinsics matrix."""
-    K = np.loadtxt(path, dtype=np.float32)
-    if K.shape == (4, 4):
-        K = K[:3, :3]
-    assert K.shape == (3, 3), f"Invalid intrinsics shape: {K.shape}"
-    return K
-
-
-def load_pose(path):
-    """Load 4×4 camera-to-world pose."""
-    pose = np.loadtxt(path, dtype=np.float32)
-    if pose.shape == (3, 4):
-        pose = np.vstack([pose, [0, 0, 0, 1]])
-    assert pose.shape == (4, 4), f"Invalid pose shape: {pose.shape}"
-    return pose
-
-
-# ─── Depth metrics (same as losses.py) ─────────────────────────────────────
-
-def compute_depth_metrics(pred, gt, min_depth=1e-3, max_depth=80.0):
-    """
-    pred, gt: (H, W) numpy arrays in metres.
-    Returns dict with abs_rel, rmse, delta1.
-    """
-    mask = (gt > min_depth) & (gt < max_depth) & np.isfinite(gt) & (pred > 1e-8)
-    if mask.sum() < 100:
-        return {"abs_rel": float("nan"), "rmse": float("nan"), "delta1": float("nan")}
-
-    p = pred[mask]
-    g = gt[mask]
-
-    abs_rel = np.mean(np.abs(p - g) / g)
-    rmse = np.sqrt(np.mean((p - g) ** 2))
-    ratio = np.maximum(p / g, g / p)
-    delta1 = np.mean(ratio < 1.25)
-
-    return {"abs_rel": abs_rel, "rmse": rmse, "delta1": delta1}
-
-
-# ─── Geometric projection for photometric/pixel consistency ────────────────
-
-def project_points(depth, K, pose_src, pose_tgt):
-    """
-    Unproject source depth → 3D → transform → project to target.
-    Returns x_proj, y_proj (float32), valid (bool).
-    """
-    H, W = depth.shape
-    y_idx, x_idx = np.meshgrid(np.arange(H), np.arange(W), indexing='ij')
-
-    K_inv = np.linalg.inv(K)
-    xy1 = np.stack([x_idx, y_idx, np.ones_like(x_idx)], axis=-1)  # (H,W,3)
-    xyz = (K_inv @ xy1[..., None])[..., 0] * depth[..., None]     # (H,W,3)
-
-    # cam-to-world: T = inv(pose_tgt) @ pose_src
-    T = np.linalg.inv(pose_tgt) @ pose_src
-    xyz_tgt = (T[:3, :3] @ xyz[..., None])[..., 0] + T[:3, 3]
-
-    proj = (K @ xyz_tgt[..., None])[..., 0]
-    z = proj[..., 2]
-    x_proj = proj[..., 0] / (z + 1e-6)
-    y_proj = proj[..., 1] / (z + 1e-6)
-
-    valid = (
-        (z > 0) &
-        (depth > 0) &
-        (x_proj >= 0) & (x_proj < W - 1) &
-        (y_proj >= 0) & (y_proj < H - 1)
-    )
-
-    return x_proj.astype(np.float32), y_proj.astype(np.float32), valid
-
-
-def compute_photometric_consistency(img_src, img_tgt, depth_src, K, pose_src, pose_tgt):
-    """
-    Warp target → source using depth_src, compute L2 error over valid pixels.
-    Returns l2, valid_ratio.
-    """
-    x_proj, y_proj, valid = project_points(depth_src, K, pose_src, pose_tgt)
-
-    if np.sum(valid) < 100:
-        return float("inf"), 0.0
-
-    warped = cv2.remap(
-        img_tgt, x_proj, y_proj,
-        interpolation=cv2.INTER_LINEAR,
-        borderMode=cv2.BORDER_CONSTANT,
-        borderValue=0
-    )
-
-    l2 = np.mean(((img_src - warped)[valid] ** 2))
-    valid_ratio = np.mean(valid)
-
-    return l2, valid_ratio
-
-
-def compute_pixel_consistency(gt_depth_src, pred_depth_src, gt_depth_tgt, K, pose_src, pose_tgt):
-    """
-    Project GT depth src→tgt (p_gt), then pred depth src→tgt (p_pred).
-    Compute pixel distance |p_gt - p_pred|.
-    Returns mae, rmse, valid_ratio.
-    """
-    H, W = gt_depth_src.shape
-
-    x_gt, y_gt, valid_gt_proj = project_points(gt_depth_src, K, pose_src, pose_tgt)
-    x_gt_int = np.clip(np.round(x_gt).astype(np.int32), 0, W - 1)
-    y_gt_int = np.clip(np.round(y_gt).astype(np.int32), 0, H - 1)
-    valid_gt_full = valid_gt_proj & (gt_depth_tgt[y_gt_int, x_gt_int] > 0)
-
-    x_pred, y_pred, valid_pred_proj = project_points(pred_depth_src, K, pose_src, pose_tgt)
-
-    valid = valid_gt_full & valid_pred_proj
-
-    if np.sum(valid) < 100:
-        return float("inf"), float("inf"), 0.0
-
-    dist = np.sqrt((x_gt - x_pred) ** 2 + (y_gt - y_pred) ** 2)
-    d = dist[valid]
-
-    mae = np.mean(d)
-    rmse = np.sqrt(np.mean(d ** 2))
-
-    return mae, rmse, np.mean(valid)
+from metrics.photometric_consistency import compute_photometric
 
 
 # ─── Save outputs ───────────────────────────────────────────────────────────
@@ -304,8 +135,11 @@ def main(args):
 
     # ── Load inputs ──────────────────────────────────────────────────────────
     print("[eval] Loading inputs...")
-    img1_np = load_image(args.img1, as_rgb=True)                         # (H,W,3) float32
-    img2_np = load_image(args.img2, as_rgb=True)
+    img1_np = load_image(args.img1, as_gray=False)                         # (H,W,1) float32
+    img2_np = load_image(args.img2, as_gray=False)
+    # Grayscale copies for photometric metrics (consistent with photometric_consistency.py main())
+    img1_gray = cv2.cvtColor(img1_np, cv2.COLOR_RGB2GRAY)  # (H,W) float32
+    img2_gray = cv2.cvtColor(img2_np, cv2.COLOR_RGB2GRAY)
     pred_depth1_np = load_depth(args.pred_depth1, args.depth_scale_pred)  # (H,W) float32
     pred_depth2_np = load_depth(args.pred_depth2, args.depth_scale_pred)
 
@@ -318,7 +152,7 @@ def main(args):
         pred_depth2_np = cv2.resize(pred_depth2_np, (W, H), interpolation=cv2.INTER_NEAREST)
 
     # Convert to torch tensors (B=1)
-    rgb1 = torch.from_numpy(img1_np).permute(2, 0, 1).unsqueeze(0).to(device)           # (1,3,H,W)
+    rgb1 = torch.from_numpy(img1_np).permute(2, 0, 1).unsqueeze(0).to(device)           # (1,1,H,W)
     rgb2 = torch.from_numpy(img2_np).permute(2, 0, 1).unsqueeze(0).to(device)
     depth_mono1 = torch.from_numpy(pred_depth1_np).unsqueeze(0).unsqueeze(0).to(device)  # (1,1,H,W)
     depth_mono2 = torch.from_numpy(pred_depth2_np).unsqueeze(0).unsqueeze(0).to(device)
@@ -328,7 +162,7 @@ def main(args):
         K_np = load_intrinsics(args.intrinsics)
     else:
         # Fallback: assume fx=fy=focal_length, cx=W/2, cy=H/2
-        fx = args.focal_length if args.focal_length else 0.8 * W  # heuristic
+        fx = args.focal_length if args.focal_length else 0.9 * max(H, W)  # heuristic
         K_np = np.array([
             [fx,  0.0, W / 2.0],
             [0.0, fx,  H / 2.0],
@@ -350,21 +184,11 @@ def main(args):
         T_12_init = torch.eye(4, device=device, dtype=torch.float32).unsqueeze(0)
         print("[eval] No poses provided; using identity as initial T_12 estimate.")
 
-    # ── Forward pass ─────────────────────────────────────────────────────────
+    # ── Forward pass ───────────────────────────────────────────────────────────────
     print("[eval] Running model forward pass...")
     H_img, W_img = rgb1.shape[-2:]
  
-    # Build initial K estimate (same heuristic as train.py)
-    if args.intrinsics:
-        K_iter = K  # use loaded intrinsics as initial estimate
-    else:
-        f_init = float(max(H_img, W_img)) * 0.9
-        K_iter = torch.tensor(
-            [[f_init, 0.0,    W_img / 2.0],
-             [0.0,    f_init, H_img / 2.0],
-             [0.0,    0.0,    1.0]],
-            dtype=torch.float32, device=device,
-        ).unsqueeze(0)
+    K_iter = K
  
     T_12_iter = T_12_init
     # Get num_pose_iters from checkpoint config (not CLI arg anymore)
@@ -411,8 +235,6 @@ def main(args):
 
     # Upsample to full resolution for saving/evaluation
     pred1_full = cv2.resize(pred1_out, (W, H), interpolation=cv2.INTER_LINEAR)
-    # Upsample to full resolution for saving/evaluation
-    pred1_full = cv2.resize(pred1_out, (W, H), interpolation=cv2.INTER_LINEAR)
     pred2_full = cv2.resize(pred2_out, (W, H), interpolation=cv2.INTER_LINEAR)
 
     # ── Save outputs ─────────────────────────────────────────────────────────
@@ -442,28 +264,34 @@ def main(args):
 
         # ── Depth metrics ────────────────────────────────────────────────────
         print("\n=== Depth Metrics ===")
-        m1 = compute_depth_metrics(pred1_full, gt_depth1_np)
-        m2 = compute_depth_metrics(pred2_full, gt_depth2_np)
+        # Match training: min_depth=1e-3, max_depth=80.0 (see losses.py si_log_loss defaults)
+        mask1 = (gt_depth1_np > 1e-3) & (gt_depth1_np < 80.0) & np.isfinite(gt_depth1_np)
+        mask2 = (gt_depth2_np > 1e-3) & (gt_depth2_np < 80.0) & np.isfinite(gt_depth2_np)
+        m1 = depth_metrics(pred1_full, gt_depth1_np, mask1)
+        m2 = depth_metrics(pred2_full, gt_depth2_np, mask2)
         print(f"View 1: abs_rel={m1['abs_rel']:.4f}  rmse={m1['rmse']:.4f}  delta1={m1['delta1']:.4f}")
         print(f"View 2: abs_rel={m2['abs_rel']:.4f}  rmse={m2['rmse']:.4f}  delta1={m2['delta1']:.4f}")
+        # depth_metrics also returns mae, delta2, delta3
         print(f"Average: abs_rel={(m1['abs_rel']+m2['abs_rel'])/2:.4f}  "
               f"rmse={(m1['rmse']+m2['rmse'])/2:.4f}  "
-              f"delta1={(m1['delta1']+m2['delta1'])/2:.4f}")
+              f"delta1={(m1['delta1']+m2['delta1'])/2:.4f}  "
+              f"delta2={(m1['delta2']+m2['delta2'])/2:.4f}  "
+              f"delta3={(m1['delta3']+m2['delta3'])/2:.4f}")
 
         # ── Photometric consistency ──────────────────────────────────────────
         if args.pose1 and args.pose2:
             # Prefer GT intrinsics for projection; fall back to predicted
             K_eval_np = K_np if args.intrinsics else K_pred_np
             print("\n=== Photometric Consistency ===")
-            l2_12, vr_12 = compute_photometric_consistency(
-                img1_np, img2_np, pred1_full, K_eval_np, pose1_np, pose2_np
+            ssim_12, l2_12, vr_12 = compute_photometric(
+                img1_gray, img2_gray, pred1_full, K_eval_np, pose1_np, pose2_np, cam_to_world=True
             )
-            l2_21, vr_21 = compute_photometric_consistency(
-                img2_np, img1_np, pred2_full, K_eval_np, pose2_np, pose1_np
+            ssim_21, l2_21, vr_21 = compute_photometric(
+                img2_gray, img1_gray, pred2_full, K_eval_np, pose2_np, pose1_np, cam_to_world=True
             )
-            print(f"L2 (1→2): {l2_12:.4f}  valid_ratio: {vr_12:.3f}")
-            print(f"L2 (2→1): {l2_21:.4f}  valid_ratio: {vr_21:.3f}")
-            print(f"L2 avg:   {(l2_12 + l2_21)/2:.4f}")
+            print(f"SSIM (1→2): {ssim_12:.4f}  L2: {l2_12:.4f}  valid_ratio: {vr_12:.3f}")
+            print(f"SSIM (2→1): {ssim_21:.4f}  L2: {l2_21:.4f}  valid_ratio: {vr_21:.3f}")
+            print(f"SSIM avg:   {(ssim_12+ssim_21)/2:.4f}  L2 avg: {(l2_12+l2_21)/2:.4f}")
 
             # ── Pixel consistency ────────────────────────────────────────────
             print("\n=== Pixel Consistency ===")

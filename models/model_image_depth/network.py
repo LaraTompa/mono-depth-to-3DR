@@ -311,7 +311,8 @@ class DepthAlignNet(nn.Module):
         log_conf_K     = (cam1["log_conf_K"]    + cam2["log_conf_K"])    * 0.5
         log_conf_pose  = (cam1["log_conf_pose"] + cam2["log_conf_pose"]) * 0.5
         # Relative pose from absolute camera-to-world poses
-        T_12_pred = torch.linalg.inv(cam2["T_c2w"]) @ cam1["T_c2w"]
+        T_12_pred = se3_inv(cam2["T_c2w"]) @ cam1["T_c2w"]
+        #T_12_pred = torch.linalg.inv(cam2["T_c2w"]) @ cam1["T_c2w"]
 
         # ── Iterative refinement (at s16 resolution) ─────────────────────
         if self.use_refinement:
