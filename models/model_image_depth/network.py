@@ -28,7 +28,7 @@ import torch.nn.functional as F
 from .encoder    import SharedEncoder
 from .refinement import IterativeRefinement
 from .decoder    import DepthDecoder
-from .geometry   import rot6d_to_matrix, svd_orthogonalize
+from .geometry   import rot6d_to_matrix, svd_orthogonalize, se3_inv
 
 
 # ---------------------------------------------------------------------------
@@ -283,7 +283,8 @@ class DepthAlignNet(nn.Module):
         returned in the output dict for the next iteration.
         """
         B, _, H, W = rgb1.shape
-        T_21 = torch.linalg.inv(T_12)
+        #T_21 = torch.linalg.inv(T_12)
+        T_21 = se3_inv(T_12)
 
         # ── Encode both views once (weight-tied encoder) ─────────────────
         x1 = torch.cat([rgb1, depth_mono1], dim=1)   # (B, 4, H, W)
@@ -310,7 +311,8 @@ class DepthAlignNet(nn.Module):
         log_conf_K     = (cam1["log_conf_K"]    + cam2["log_conf_K"])    * 0.5
         log_conf_pose  = (cam1["log_conf_pose"] + cam2["log_conf_pose"]) * 0.5
         # Relative pose from absolute camera-to-world poses
-        T_12_pred = torch.linalg.inv(cam2["T_c2w"]) @ cam1["T_c2w"]
+        T_12_pred = se3_inv(cam2["T_c2w"]) @ cam1["T_c2w"]
+        #T_12_pred = torch.linalg.inv(cam2["T_c2w"]) @ cam1["T_c2w"]
 
         # ── Iterative refinement (at s16 resolution) ─────────────────────
         if self.use_refinement:

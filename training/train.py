@@ -337,6 +337,7 @@ def train(cfg: dict, arch_cfg: dict, resume: str | None = None) -> None:
             "scheduler":   scheduler.state_dict() if scheduler else None,
             "best_metric": best_metric,
             "cfg":         cfg,
+            "arch":       arch_cfg,
         }
 
         # always save last
