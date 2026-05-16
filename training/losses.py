@@ -456,7 +456,11 @@ def pixel_consistency_loss(
         if n_valid < 1:
             return pred_d.new_tensor(0.0)
 
-        dist_sq = (x_gt - x_pred) ** 2 + (y_gt - y_pred) ** 2  # (B, N)
+        x_gt_n   = x_gt   / (pW - 1)
+        y_gt_n   = y_gt   / (pH - 1)
+        x_pred_n = x_pred / (pW - 1)
+        y_pred_n = y_pred / (pH - 1)
+        dist_sq  = (x_gt_n - x_pred_n) ** 2 + (y_gt_n - y_pred_n) ** 2  # in [0, ~2]
         return (dist_sq * valid.float()).sum() / n_valid.clamp(min=1)
 
     T_21 = se3_inv(T_12)
