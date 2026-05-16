@@ -7,7 +7,7 @@ checkpoint:
 dataset:
   root_dir: datasets/sampled_data
   mde_source: "zoedepth"   # "zoedepth" | "depthpro"
-  max_scenes: 300
+  max_scenes: 100
 loader:
   batch_size: 2
   drop_last: true
@@ -20,12 +20,13 @@ logging:
   tensorboard: true
 loss:
   depth: 1.0
-  iter_supervision: 0.5
+  iter_supervision: 0.0
   smooth: 0.05
   camera: 0.1
   camera_warmup_epochs: 15
-  pixel_consistency: 0.01
-  identity: 0.05
+  pixel_consistency: 0.0
+  identity: 0.0
+  K_reg: 0.0
 optimizer:
   betas:
   - 0.9
@@ -37,7 +38,7 @@ scheduler:
   eta_min: 1.0e-06
   type: cosine
 train:
-  epochs: 50
+  epochs: 10
   grad_clip: 1.0
   log_every: 50
   seed: 0

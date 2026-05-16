@@ -441,9 +441,12 @@ def pixel_consistency_loss(
         valid  = (
             (d_flat > min_depth) & (d_flat < max_depth) &
             torch.isfinite(d_flat) &
+            torch.isfinite(x_pred) & torch.isfinite(y_pred) &
             (z_gt > 0) & (z_pred > 0) &
             (x_gt >= 0) & (x_gt < pW - 1) &
-            (y_gt >= 0) & (y_gt < pH - 1)
+            (y_gt >= 0) & (y_gt < pH - 1) &
+            (x_pred >= 0) & (x_pred < pW - 1) &
+            (y_pred >= 0) & (y_pred < pH - 1)
         )  # (B, N)
 
         n_valid = valid.float().sum()
