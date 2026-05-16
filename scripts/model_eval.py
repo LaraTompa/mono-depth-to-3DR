@@ -250,7 +250,10 @@ def main(args):
     if not os.path.isfile(args.checkpoint):
         raise FileNotFoundError(f"Checkpoint not found: {args.checkpoint}")
 
-    ckpt = torch.load(args.checkpoint, map_location=device)
+    #ckpt = torch.load(args.checkpoint, map_location=device)
+    # Load checkpoint onto CPU to avoid allocating all tensors on GPU immediately.
+    # This prevents OOM when the saved state dict is large.
+    ckpt = torch.load(args.checkpoint, map_location="cpu")  
     cfg = ckpt.get("cfg", {})
     print(f"[eval] Loaded checkpoint from epoch {ckpt.get('epoch', '?')}")
 
@@ -285,9 +288,17 @@ def main(args):
         use_refinement      = bool(ref_cfg.get("enabled", False)),
         decoder_hidden      = int(dec_cfg.get("hidden_dim", 32)),
         camera_head_hidden  = int(cam_cfg.get("hidden_dim", 64)),
-    ).to(device)
+    )
 
-    model.load_state_dict(ckpt["model"])
+    # Extract model weights only; drop optimizer state (2× model size, not needed for eval)
+    model_state = ckpt.pop("model")
+    ckpt.pop("optimizer", None)
+    ckpt.pop("scheduler", None)
+    # cfg, arch, epoch remain in ckpt for inspection
+ 
+    # Move model to device, then load weights
+    model = model.to(device)
+    model.load_state_dict(model_state)
     model.eval()
     print("[eval] Model loaded and set to eval mode.")
 
