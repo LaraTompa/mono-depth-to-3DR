@@ -54,6 +54,8 @@ def run_epoch(
     train: bool,
     epoch: int,
     writer=None,          # torch.utils.tensorboard.SummaryWriter or None
+    use_confidence: bool = True,
+    camera_weight: float | None = None,
 ) -> dict:
     model.train(train)
     train_cfg = cfg["train"]
@@ -146,13 +148,18 @@ def run_epoch(
                         print(f"[NaN guard] iter {pose_it}: non-finite K/T pred "
                               f"at step {step}; keeping previous init values.")
 
-            loss, breakdown = compute_total_loss(outputs, batch, cfg.get("loss", {}), K_iter)
+            loss, breakdown = compute_total_loss(
+                outputs, batch, cfg.get("loss", {}), K_iter,
+                use_confidence=use_confidence,
+                camera_weight=camera_weight,
+            )
 
-            # ── Global NaN detector ───────────────────────────────────────────
-            if train and not torch.isfinite(loss):
+            # ── Loss spike / NaN guard ────────────────────────────────────
+            spike_thresh = float(train_cfg.get("loss_spike_threshold", 50.0))
+            if train and (not torch.isfinite(loss) or loss.item() > spike_thresh):
                 nan_keys = [k for k, v in outputs.items()
                             if isinstance(v, torch.Tensor) and not torch.isfinite(v).all()]
-                print(f"[NaN] step {step}  loss={float(loss):.4f}  "
+                print(f"[skip] step {step}  loss={float(loss):.4f}  "
                       f"non-finite outputs: {nan_keys}")
                 optimizer.zero_grad(set_to_none=True)
                 continue
@@ -319,19 +326,37 @@ def train(cfg: dict, arch_cfg: dict, resume: str | None = None) -> None:
 
     patience = int(train_cfg.get("patience", 0)) # number of epochs with no improvement to wait before stopping (0 disables)
     epochs_no_improve = 0
+
+    # Camera-loss schedule
+    pose_warmup_epochs   = int(train_cfg.get("pose_warmup_epochs",   0))
+    camera_warmup_epochs = int(cfg.get("loss", {}).get("camera_warmup_epochs", 0))
+    final_camera_w       = float(cfg.get("loss", {}).get("camera", 0.5))
+
     for epoch in range(start_epoch, int(train_cfg["epochs"]) + 1):
         t_epoch = time.time()
 
+        # Disable uncertainty weighting for the first pose_warmup_epochs
+        use_conf = (epoch > pose_warmup_epochs)
+
+        # Linearly ramp camera weight from 0 → final over camera_warmup_epochs
+        if camera_warmup_epochs > 0:
+            cam_w = final_camera_w * min(1.0, epoch / camera_warmup_epochs)
+        else:
+            cam_w = final_camera_w
+        if epoch == start_epoch or epoch == pose_warmup_epochs + 1:
+            print(f"[train] epoch {epoch}: use_confidence={use_conf}  "
+                  f"camera_weight={cam_w:.4f}")
+
         train_metrics = run_epoch(
             model, train_loader, optimizer, cfg, device, train=True, epoch=epoch,
-            writer=writer,
+            writer=writer, use_confidence=use_conf, camera_weight=cam_w,
         )
 
         val_metrics = {}
         if epoch % val_every == 0:
             val_metrics = run_epoch(
                 model, val_loader, None, cfg, device, train=False, epoch=epoch,
-                writer=writer,
+                writer=writer, use_confidence=use_conf, camera_weight=cam_w,
             )
 
         # --- scheduler step ---

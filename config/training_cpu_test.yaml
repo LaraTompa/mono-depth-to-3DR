@@ -6,7 +6,7 @@ checkpoint:
   save_top_k: 3
 dataset:
   root_dir: datasets/sampled_data
-  mde_source: "depthpro"   # "zoedepth" | "depthpro"
+  mde_source: "zoedepth"   # "zoedepth" | "depthpro"
   max_scenes: 300
 loader:
   batch_size: 2
@@ -22,6 +22,10 @@ loss:
   depth: 1.0
   iter_supervision: 0.5
   smooth: 0.05
+  camera: 0.1
+  camera_warmup_epochs: 15
+  pixel_consistency: 0.01
+  identity: 0.05
 optimizer:
   betas:
   - 0.9
@@ -40,3 +44,5 @@ train:
   val_every: 1
   patience: 5
   num_pose_iters: 1
+  pose_warmup_epochs: 10
+  loss_spike_threshold: 50.0

@@ -38,8 +38,8 @@ def se3_inv(T: torch.Tensor) -> torch.Tensor:
 EPS = 1e-8
 EPS_NORM = 1e-6
 ACOS_EPS = 1e-4
-LOG_CONF_MIN = -10.0
-LOG_CONF_MAX = 10.0
+LOG_CONF_MIN = -3.0   # tightened: prevents runaway uncertainty / confidence collapse
+LOG_CONF_MAX =  3.0
 
 
 # ---------------------------------------------------------------------------
@@ -241,35 +241,39 @@ def pose_identity_loss(
 # ---------------------------------------------------------------------------
 
 def camera_pose_loss(
-    outputs:  dict,
-    T_12_gt:  torch.Tensor,          # (B, 4, 4) GT relative pose (cam1→cam2)
-    K_gt:     torch.Tensor | None,   # (B, 3, 3) GT intrinsics, or None
-    weights:  dict,
+    outputs:        dict,
+    T_12_gt:        torch.Tensor,          # (B, 4, 4) GT relative pose (cam1→cam2)
+    K_gt:           torch.Tensor | None,   # (B, 3, 3) GT intrinsics, or None
+    weights:        dict,
+    use_confidence: bool = True,
 ) -> tuple[torch.Tensor, dict]:
     """
-    Confidence-weighted camera parameter losses.
+    Composite camera-pose loss with optional heteroscedastic confidence weighting.
 
-    Pose losses (geodesic rotation + normalised translation) are combined
-    and weighted by a per-sample heteroscedastic confidence score following
-    Kendall & Gal (NeurIPS 2017):
+    When use_confidence=True (default), pose and intrinsics losses are weighted
+    by a per-sample uncertainty following Kendall & Gal (NeurIPS 2017):
 
-        L_pose = exp(−s_pose) · (w_rot·L_rot + w_trans·L_trans) + s_pose
+        L_pose = exp(−s_pose) · L_pose_data + s_pose
+        L_K    = exp(−s_K)    · L_K_data    + s_K
 
-    Intrinsics regression (relative L1 vs GT) is similarly weighted:
+    The "+s" regulariser prevents the network driving uncertainty to ∞ and the
+    data term to 0.  exp(−s)·loss + s is strictly positive and has minimum at
+    s* = −log(L_data), i.e. the network learns to match its uncertainty to the
+    actual error magnitude.
 
-        L_K = exp(−s_K) · L_K_data + s_K
+    When use_confidence=False (warmup phase), confidence is fixed at 1 so the
+    network learns pose geometry before also optimising uncertainty estimates.
 
-    The "+s" terms prevent the network from collapsing the loss to zero by
-    inflating uncertainty.  The pose identity loss is added unweighted as a
-    geometric regulariser.
+    The pose identity round-trip loss is always added unweighted.
 
     Parameters
     ----------
-    outputs  : DepthAlignNet output dict (must contain T_12_pred, T_c2w_1/2,
-               K_pred, log_conf_K, log_conf_pose)
-    T_12_gt  : (B, 4, 4) ground-truth relative pose
-    K_gt     : (B, 3, 3) ground-truth intrinsics, or None (skips K loss)
-    weights  : loss weight dict (keys: rot, trans, K_reg, identity, camera)
+    outputs        : DepthAlignNet output dict (must contain T_12_pred, T_c2w_1/2,
+                     K_pred, log_conf_K, log_conf_pose)
+    T_12_gt        : (B, 4, 4) ground-truth relative pose
+    K_gt           : (B, 3, 3) ground-truth intrinsics, or None (skips K loss)
+    weights        : loss weight dict (keys: rot, trans, K_reg, identity, camera)
+    use_confidence : if False, uses fixed conf=1 — no uncertainty weighting
 
     Returns
     -------
@@ -300,19 +304,14 @@ def camera_pose_loss(
     w_rot   = float(weights.get("rot",   1.0))
     w_trans = float(weights.get("trans", 1.0))
     l_pose_data = w_rot * l_rot + w_trans * l_trans      # (B,)
-    # Paper formulation: conf·loss − α·log(conf)  where conf = exp(−s)
-    # Clamped to avoid exp overflow; −0.5·log(conf) = 0.5·s is more numerically
-    # stable but we follow the paper directly.
-    conf_pose = torch.exp(-s_pose).clamp(1e-4, 1e4)
-    l_pose = (conf_pose * l_pose_data - 0.5 * torch.log(conf_pose)).mean()
-    if not torch.isfinite(l_pose):
-        raise RuntimeError(
-            "camera_pose_loss produced non-finite pose term: "
-            f"s_pose_raw_min={float(s_pose_raw.detach().min()):.4f}, "
-            f"s_pose_raw_max={float(s_pose_raw.detach().max()):.4f}, "
-            f"s_pose_clamped_min={float(s_pose.detach().min()):.4f}, "
-            f"s_pose_clamped_max={float(s_pose.detach().max()):.4f}"
-        )
+    if use_confidence:
+        # Kendall & Gal (NeurIPS 2017): exp(-s)·loss + s
+        # Always positive; minimum at s* = -log(L_data) so the network
+        # learns to match uncertainty magnitude to actual error.
+        conf_pose = torch.exp(-s_pose)                   # (B,)  ∈ (e⁻³, e³)
+        l_pose = (conf_pose * l_pose_data + s_pose).mean()
+    else:
+        l_pose = l_pose_data.mean()                      # fixed conf = 1
 
     # ── Intrinsics regression loss ────────────────────────────────────────
     l_K = T_12_pred.new_tensor(0.0)
@@ -323,16 +322,11 @@ def camera_pose_loss(
                                   K_pred[:,0,2], K_pred[:,1,2]], dim=-1)  # (B,4)
         # Relative L1 error per intrinsic parameter
         l_K_data = ((K_pred_vec - K_gt_vec) / K_gt_vec.clamp(min=EPS)).abs().mean(-1)  # (B,)
-        conf_K = torch.exp(-s_K).clamp(1e-4, 1e4)
-        l_K    = (conf_K * l_K_data - 0.5 * torch.log(conf_K)).mean()
-        if not torch.isfinite(l_K):
-            raise RuntimeError(
-                "camera_pose_loss produced non-finite intrinsics term: "
-                f"s_K_raw_min={float(s_K_raw.detach().min()):.4f}, "
-                f"s_K_raw_max={float(s_K_raw.detach().max()):.4f}, "
-                f"s_K_clamped_min={float(s_K.detach().min()):.4f}, "
-                f"s_K_clamped_max={float(s_K.detach().max()):.4f}"
-            )
+        if use_confidence:
+            conf_K = torch.exp(-s_K)                     # (B,)  ∈ (e⁻³, e³)
+            l_K    = (conf_K * l_K_data + s_K).mean()
+        else:
+            l_K    = l_K_data.mean()                     # fixed conf = 1
 
     # ── Pose identity (round-trip) regulariser ────────────────────────────
     # T_21 = T_c2w_1^{−1} @ T_c2w_2  (cam2→cam1 from absolute poses)
@@ -474,10 +468,12 @@ def pixel_consistency_loss(
 # ---------------------------------------------------------------------------
 
 def total_loss(
-    outputs:  dict,             # from DepthAlignNet.forward()
-    batch:    dict,             # from DataLoader
-    weights:  dict,             # from cfg["loss"]
-    K:        torch.Tensor,     # (B, 3, 3) full-resolution intrinsics
+    outputs:        dict,             # from DepthAlignNet.forward()
+    batch:          dict,             # from DataLoader
+    weights:        dict,             # from cfg["loss"]
+    K:              torch.Tensor,     # (B, 3, 3) full-resolution intrinsics
+    use_confidence: bool = True,      # False during warmup — disables heteroscedastic weighting
+    camera_weight:  float | None = None,  # override cfg camera weight (for ramp)
 ) -> tuple[torch.Tensor, dict]:
     """
     Compute the weighted total training loss.
@@ -578,8 +574,10 @@ def total_loss(
             print(f"[WARNING] GT translation norms very small: min={t_gt_norms.min():.6f} max={t_gt_norms.max():.6f} mean={t_gt_norms.mean():.6f}")
             print(f"[WARNING] This suggests zero or near-zero GT motion — check pose convention!")
         K_gt    = batch.get("intrinsics")                        # (B, 3, 3) or None
-        l_cam, cam_parts = camera_pose_loss(outputs, T_12_gt, K_gt, w)
-        total   = total + float(w.get("camera", 0.5)) * l_cam
+        l_cam, cam_parts = camera_pose_loss(outputs, T_12_gt, K_gt, w,
+                                            use_confidence=use_confidence)
+        eff_camera_w = camera_weight if camera_weight is not None else float(w.get("camera", 0.5))
+        total   = total + eff_camera_w * l_cam
         parts.update(cam_parts)
 
     return total, parts
