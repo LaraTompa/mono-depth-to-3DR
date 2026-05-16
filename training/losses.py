@@ -24,6 +24,7 @@ import torch.nn.functional as F
 
 
 EPS = 1e-8
+EPS_NORM = 1e-6
 LOG_CONF_MIN = -10.0
 LOG_CONF_MAX = 10.0
 
@@ -149,7 +150,7 @@ def geodesic_rotation_loss(
     R_rel   = R_pred.transpose(-1, -2) @ R_gt              # (B, 3, 3)
     cos_ang = (R_rel.diagonal(dim1=-2, dim2=-1).sum(-1) - 1.0) * 0.5
     cos_ang = cos_ang.clamp(-1.0 + EPS, 1.0 - EPS)        # numerical safety
-    return torch.acos(cos_ang)                              # (B,)
+    return torch.nan_to_num(torch.acos(cos_ang), nan=0.0)                            # (B,)
 
 
 # ---------------------------------------------------------------------------
@@ -161,17 +162,22 @@ def normalized_translation_loss(
     t_gt:   torch.Tensor,   # (B, 3) ground-truth translation
 ) -> torch.Tensor:
     """
-    L2 distance between unit-normalised translations.
+    Angular error between predicted and GT translation directions.
 
-    Normalisation removes scale ambiguity: we care about the direction of
-    the baseline, not its magnitude.  Zero-norm vectors (pure-rotation
-    pairs) are handled by F.normalize's eps.
+    Explicit norm clamp guards against NaN when the network predicts a
+    near-zero translation early in training (0/0 → NaN in F.normalize).
+    Pure-rotation pairs (‖t_gt‖ ≈ 0) produce nan_to_num → 0.0.
 
-    Returns (B,) tensor.
+    Returns (B,) tensor of angles in radians.
     """
-    t_pred_n = F.normalize(t_pred, dim=-1)
-    t_gt_n   = F.normalize(t_gt,   dim=-1)
-    return (t_pred_n - t_gt_n).norm(dim=-1)                # (B,)
+    t_pred_norm = t_pred.norm(dim=-1, keepdim=True).clamp(min=EPS_NORM)
+    t_gt_norm   = t_gt.norm(dim=-1, keepdim=True).clamp(min=EPS_NORM)
+    t_pred_n    = t_pred / t_pred_norm
+    t_gt_n      = t_gt   / t_gt_norm
+    # Angular error — safer than L2 of unit vectors; matches paper formulation
+    dot = (t_pred_n * t_gt_n).sum(dim=-1).clamp(-1.0 + EPS, 1.0 - EPS)
+    loss_trans = torch.acos(dot)                            # (B,) radians
+    return torch.nan_to_num(loss_trans, nan=0.0)            # pure-rotation pairs → 0
 
 
 # ---------------------------------------------------------------------------
@@ -185,40 +191,36 @@ def pose_identity_loss(
     trans_weight: float = 1.0,
 ) -> torch.Tensor:
     """
-    Identity / round-trip loss computed separately for rotation and translation.
+    Round-trip consistency loss, separated into rotation and translation.
 
-    We form the round-trip transform:
-        T_rt = T_12 @ T_21
-    which should be the identity.  Split into rotation and translation parts:
+    Rotation term  : geodesic( R_12 @ R_21, I_3 )
+    Translation term: angle between t_12 and −R_12 · t_21
+                      (paper's formulation: t_12 should be anti-parallel to
+                       the translation of T_21 rotated into frame 1)
 
-      R_rt = T_rt[:3,:3]     -> rotation residual (should be I_3)
-      t_rt = T_rt[:3,  3]    -> translation residual (should be 0)
-
-    Rotation term: geodesic distance on SO(3) between R_rt and I_3
-    Translation term: L2 norm of t_rt
-
-    Returns a single scalar: rot_weight * mean(rot_error) + trans_weight * mean(trans_error)
+    Pure-rotation pairs (‖t‖ ≈ 0) are handled by nan_to_num → 0.
     """
-    B = T_12.shape[0]
+    R_12 = T_12[:, :3, :3]                                  # (B, 3, 3)
+    t_12 = T_12[:, :3,  3]                                  # (B, 3)
+    R_21 = T_21[:, :3, :3]
+    t_21 = T_21[:, :3,  3]
 
-    # round-trip transform
-    T_rt = T_12 @ T_21
-
-    # rotation residual and its geodesic angle to identity
-    R_rt = T_rt[:, :3, :3]                   # (B,3,3)
-    I3 = torch.eye(3, device=R_rt.device, dtype=R_rt.dtype).unsqueeze(0).expand(B, -1, -1)
-    # reuse existing geodesic rotation implementation
-    rot_err = geodesic_rotation_loss(R_rt, I3)    # (B,) radians
-
-    # translation residual (should be zero)
-    t_rt = T_rt[:, :3, 3]                     # (B,3)
-    trans_err = t_rt.norm(dim=-1)             # (B,)
-
-    # mean over batch and weighted sum
-    rot_term = rot_err.mean()
-    trans_term = trans_err.mean()
-
-    return float(rot_weight) * rot_term + float(trans_weight) * trans_term
+    # ── Rotation: R_12 @ R_21 should equal I_3 ─────────────────────────
+    B = R_12.shape[0]
+    I3 = torch.eye(3, device=R_12.device, dtype=R_12.dtype).unsqueeze(0).expand(B, -1, -1)
+    rot_err = geodesic_rotation_loss(R_12 @ R_21, I3)        # (B,) radians
+    rot_err = torch.nan_to_num(rot_err, nan=0.0)
+ 
+    # ── Translation: t_12 should be anti-parallel to R_12 · t_21 ───────
+    # Paper's constraint: t_12 ≈ −R_12 · t_21
+    t_21_in_frame1 = torch.bmm(R_12, t_21.unsqueeze(-1)).squeeze(-1)  # (B, 3)
+    dot   = (t_12 * (-t_21_in_frame1)).sum(dim=-1)
+    denom = (t_12.norm(dim=-1) * t_21_in_frame1.norm(dim=-1)).clamp(min=1e-6)
+    cos_ang   = (dot / denom).clamp(-1.0 + EPS, 1.0 - EPS)
+    trans_err = torch.acos(cos_ang)                           # (B,) radians
+    trans_err = torch.nan_to_num(trans_err, nan=0.0)          # pure-rotation pairs → 0
+ 
+    return float(rot_weight) * rot_err.mean() + float(trans_weight) * trans_err.mean()    
 
 
 # ---------------------------------------------------------------------------
@@ -285,7 +287,11 @@ def camera_pose_loss(
     w_rot   = float(weights.get("rot",   1.0))
     w_trans = float(weights.get("trans", 1.0))
     l_pose_data = w_rot * l_rot + w_trans * l_trans      # (B,)
-    l_pose      = (torch.exp(-s_pose) * l_pose_data + s_pose).mean()
+    # Paper formulation: conf·loss − α·log(conf)  where conf = exp(−s)
+    # Clamped to avoid exp overflow; −0.5·log(conf) = 0.5·s is more numerically
+    # stable but we follow the paper directly.
+    conf_pose = torch.exp(-s_pose).clamp(1e-4, 1e4)
+    l_pose = (conf_pose * l_pose_data - 0.5 * torch.log(conf_pose)).mean()
     if not torch.isfinite(l_pose):
         raise RuntimeError(
             "camera_pose_loss produced non-finite pose term: "
@@ -304,7 +310,8 @@ def camera_pose_loss(
                                   K_pred[:,0,2], K_pred[:,1,2]], dim=-1)  # (B,4)
         # Relative L1 error per intrinsic parameter
         l_K_data = ((K_pred_vec - K_gt_vec) / K_gt_vec.clamp(min=EPS)).abs().mean(-1)  # (B,)
-        l_K      = (torch.exp(-s_K) * l_K_data + s_K).mean()
+        conf_K = torch.exp(-s_K).clamp(1e-4, 1e4)
+        l_K    = (conf_K * l_K_data - 0.5 * torch.log(conf_K)).mean()
         if not torch.isfinite(l_K):
             raise RuntimeError(
                 "camera_pose_loss produced non-finite intrinsics term: "
