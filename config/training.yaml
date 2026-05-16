@@ -19,23 +19,11 @@ loader:
   drop_last: true
 
 # ---------------------------------------------------------------------------
-# Model
-# ---------------------------------------------------------------------------
-model:
-  feat_dim:        128        # encoder output channels at each scale
-  hidden_dim:      128        # ConvGRU hidden state channels
-  num_iters:       4          # refinement iterations
-  num_heads:       4          # local attention heads
-  window_size:     7          # local attention window (pixels in feature space)
-  pretrained:      true       # load ImageNet ConvNeXt-Tiny weights
-  freeze_backbone: false      # freeze ConvNeXt stages (saves memory/compute)
-
-# ---------------------------------------------------------------------------
 # Optimiser
 # ---------------------------------------------------------------------------
 optimizer:
   type:         adamw
-  lr:           1.0e-4
+  lr:           3.0e-5
   weight_decay: 1.0e-4
   betas:        [0.9, 0.999]
 
@@ -63,7 +51,6 @@ train:
   val_every: 1                   # validate every N epochs
   log_every: 50                  # log every N batches
   seed: 0
-  patience: 5                 # stop if no monitored improvement for 5 epochs (0 disables early stopping)
 
 # ---------------------------------------------------------------------------
 # Checkpointing
@@ -82,3 +69,4 @@ logging:
   project: "mono-depth-3DR"
   run_name: null                 # null → auto-generated timestamp
   log_dir: "runs/"
+  tensorboard: true              # write TensorBoard event files

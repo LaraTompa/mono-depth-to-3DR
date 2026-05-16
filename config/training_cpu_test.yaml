@@ -17,6 +17,7 @@ logging:
   log_dir: runs/
   project: mono-depth-3DR
   run_name: null
+  tensorboard: true
 loss:
   depth: 1.0
   iter_supervision: 0.5

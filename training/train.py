@@ -25,6 +25,11 @@ import torch.nn.functional as F
 import yaml
 from torch.utils.data import DataLoader
 
+try:
+    from torch.utils.tensorboard import SummaryWriter as _SummaryWriter
+except ImportError:   # tensorboard not installed — logging silently disabled
+    _SummaryWriter = None
+
 from data.scene import find_scene_paths
 from models.model_image_depth.network import DepthAlignNet
 from training.losses import total_loss as compute_total_loss, compute_depth_metrics
@@ -48,6 +53,7 @@ def run_epoch(
     device,
     train: bool,
     epoch: int,
+    writer=None,          # torch.utils.tensorboard.SummaryWriter or None
 ) -> dict:
     model.train(train)
     train_cfg = cfg["train"]
@@ -189,6 +195,12 @@ def run_epoch(
                     f"  cam={avg_cam:.4f} (rot={avg_rot:.3f} trans={avg_trans:.3f})"
                     f"  lr={lr:.2e}  {elapsed:.1f}s"
                 )
+                if writer is not None:
+                    gs = (epoch - 1) * len(loader) + step
+                    writer.add_scalar("step/loss",      loss.item(), gs)
+                    writer.add_scalar("step/lr",        lr,          gs)
+                    for k, v in breakdown.items():
+                        writer.add_scalar(f"step/{k}", v, gs)
 
     out = {k: v / max(n_batches, 1) for k, v in totals.items()}
     if not train and metric_count > 0:
@@ -209,8 +221,22 @@ def train(cfg: dict, arch_cfg: dict, resume: str | None = None) -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[train] Device: {device}")
 
-    # --- datasets ---
-    root_dir = cfg["dataset"]["root_dir"]
+    # --- TensorBoard writer ---
+    log_cfg = cfg.get("logging", {})
+    writer = None
+    if _SummaryWriter is not None and log_cfg.get("tensorboard", True):
+        run_name = log_cfg.get("run_name") or time.strftime("%Y%m%d_%H%M%S")
+        log_dir  = os.path.join(
+            _REPO_ROOT,
+            log_cfg.get("log_dir", "runs"),
+            log_cfg.get("project", "mono-depth-3DR"),
+            run_name,
+        )
+        writer = _SummaryWriter(log_dir=log_dir)
+        print(f"[train] TensorBoard log dir: {log_dir}")
+    elif _SummaryWriter is None:
+        print("[train] TensorBoard not available (pip install tensorboard to enable).")
+
     # resolve relative paths from the repo root
     if not os.path.isabs(root_dir):
         root_dir = os.path.join(_REPO_ROOT, root_dir)
@@ -291,13 +317,15 @@ def train(cfg: dict, arch_cfg: dict, resume: str | None = None) -> None:
         t_epoch = time.time()
 
         train_metrics = run_epoch(
-            model, train_loader, optimizer, cfg, device, train=True, epoch=epoch
+            model, train_loader, optimizer, cfg, device, train=True, epoch=epoch,
+            writer=writer,
         )
 
         val_metrics = {}
         if epoch % val_every == 0:
             val_metrics = run_epoch(
-                model, val_loader, None, cfg, device, train=False, epoch=epoch
+                model, val_loader, None, cfg, device, train=False, epoch=epoch,
+                writer=writer,
             )
 
         # --- scheduler step ---
@@ -325,6 +353,14 @@ def train(cfg: dict, arch_cfg: dict, resume: str | None = None) -> None:
             f"  train_loss={train_metrics['loss']:.4f}{val_str}"
             f"  lr={lr:.2e}  {elapsed:.1f}s"
         )
+
+        # --- TensorBoard per-epoch scalars ---
+        if writer is not None:
+            writer.add_scalar("epoch/lr", lr, epoch)
+            for k, v in train_metrics.items():
+                writer.add_scalar(f"epoch/train_{k}", v, epoch)
+            for k, v in val_metrics.items():
+                writer.add_scalar(f"epoch/val_{k}", v, epoch)
 
         # --- checkpoint ---
         monitor_key = monitor.split("/")[-1]   # e.g. "val/abs_rel" → "abs_rel"
@@ -361,6 +397,8 @@ def train(cfg: dict, arch_cfg: dict, resume: str | None = None) -> None:
         keep_top_k(save_dir, monitor, top_k)
 
     print(f"\n[train] Done. Best {monitor}={best_metric:.4f}")
+    if writer is not None:
+        writer.close()
 
     # --- Final test evaluation on best checkpoint ---
     print("\n[test] Loading best checkpoint for final evaluation...")

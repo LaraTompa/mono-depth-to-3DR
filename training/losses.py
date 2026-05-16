@@ -10,8 +10,9 @@ Active
 5. normalized_trans_loss    — L2 between unit-normalised predicted/GT translations
 6. pose_identity_loss       — ||T_12 @ T_21 − I||_F  (numerical round-trip check)
 7. camera_pose_loss         — Confidence-weighted composite camera loss
-8. compute_depth_metrics    — abs_rel / rmse / delta1 (validation only)
-9. total_loss               — Weighted sum with full breakdown dict for logging
+8. pixel_consistency_loss   — Multiview reprojection: ||proj(pred) − proj(gt)||² in pixels
+9. compute_depth_metrics    — abs_rel / rmse / delta1 (validation only)
+10. total_loss              — Weighted sum with full breakdown dict for logging
 
 Commented out (re-enable once network produces reasonable depths)
 -----------------------------------------------------------------
@@ -353,6 +354,117 @@ def camera_pose_loss(
     return total_cam, parts
 
 
+def k_inv(K: torch.Tensor) -> torch.Tensor:
+    """
+    Analytical inverse of an upper-triangular camera intrinsics matrix (B, 3, 3).
+
+    For K = [[fx, 0, cx], [0, fy, cy], [0, 0, 1]] the closed-form inverse is:
+        K⁻¹ = [[1/fx,    0, -cx/fx],
+               [   0, 1/fy, -cy/fy],
+               [   0,    0,      1]]
+
+    Avoids the generic LU decomposition of torch.linalg.inv, keeping gradients
+    clean and computation cheap — same philosophy as se3_inv for SE(3).
+    """
+    fx = K[:, 0, 0]   # (B,)
+    fy = K[:, 1, 1]
+    cx = K[:, 0, 2]
+    cy = K[:, 1, 2]
+    B  = K.shape[0]
+    Ki = torch.zeros_like(K)
+    Ki[:, 0, 0] =  1.0 / fx.clamp(min=EPS)
+    Ki[:, 1, 1] =  1.0 / fy.clamp(min=EPS)
+    Ki[:, 0, 2] = -cx  / fx.clamp(min=EPS)
+    Ki[:, 1, 2] = -cy  / fy.clamp(min=EPS)
+    Ki[:, 2, 2] =  1.0
+    return Ki
+
+
+# ---------------------------------------------------------------------------
+# 8. Pixel consistency loss (multiview reprojection)
+# ---------------------------------------------------------------------------
+
+def pixel_consistency_loss(
+    pred_depth1: torch.Tensor,   # (B, 1, pH, pW) predicted depth, view 1
+    pred_depth2: torch.Tensor,   # (B, 1, pH, pW) predicted depth, view 2
+    gt_depth1:   torch.Tensor,   # (B, 1, pH, pW) GT depth, view 1
+    gt_depth2:   torch.Tensor,   # (B, 1, pH, pW) GT depth, view 2
+    T_12:        torch.Tensor,   # (B, 4, 4) cam1 → cam2 relative pose
+    K:           torch.Tensor,   # (B, 3, 3) intrinsics at pH × pW resolution
+    min_depth: float = 1e-3,
+    max_depth: float = 80.0,
+) -> torch.Tensor:
+    """
+    Differentiable multiview pixel consistency loss.
+
+    Mirrors compute_pixel_consistency() from metrics/pixel_consistency.py but
+    runs entirely in PyTorch so gradients flow back through pred_depth.
+
+    For every source pixel with valid GT depth:
+      1. Unproject with GT depth    → 3-D point → project into target → p_gt
+      2. Unproject with pred depth  → 3-D point → project into target → p_pred
+      3. Penalise  ||p_gt − p_pred||²  (squared pixel distance)
+
+    Using the GT depth to anchor the reference projection means the loss is
+    zero when pred_depth == gt_depth and increases smoothly as predictions
+    diverge — giving a multiview geometric signal without requiring dense
+    photometric matching.
+
+    Symmetrised: 1→2 direction with pred_depth1  +  2→1 with pred_depth2.
+    """
+    B, _, pH, pW = pred_depth1.shape
+    dev   = pred_depth1.device
+    dtype = pred_depth1.dtype
+
+    # Pixel coordinate grid  (B, 3, pH*pW)
+    ys = torch.arange(pH, device=dev, dtype=dtype)
+    xs = torch.arange(pW, device=dev, dtype=dtype)
+    gy, gx = torch.meshgrid(ys, xs, indexing='ij')       # (pH, pW)
+    N = pH * pW
+    ones = torch.ones(N, device=dev, dtype=dtype)
+    xy1  = torch.stack([gx.flatten(), gy.flatten(), ones], dim=0)  # (3, N)
+    xy1  = xy1.unsqueeze(0).expand(B, -1, -1)                       # (B, 3, N)
+
+    K_inv = k_inv(K)                                   # (B, 3, 3) analytical
+
+    def _project(depth: torch.Tensor, T: torch.Tensor):
+        """Return (x_proj, y_proj, z_tgt) each (B, N)."""
+        d    = depth.reshape(B, 1, N)                     # (B, 1, N)
+        xyz  = torch.bmm(K_inv, xy1) * d                  # (B, 3, N)  3-D in cam1
+        R, t = T[:, :3, :3], T[:, :3, 3]                 # (B,3,3), (B,3)
+        xyz_t = torch.bmm(R, xyz) + t.unsqueeze(-1)       # (B, 3, N)  in cam2
+        proj  = torch.bmm(K, xyz_t)                       # (B, 3, N)
+        z     = proj[:, 2, :]                              # (B, N)
+        x_p   = proj[:, 0, :] / (z + EPS)
+        y_p   = proj[:, 1, :] / (z + EPS)
+        return x_p, y_p, z
+
+    def _one_dir(pred_d: torch.Tensor, gt_d: torch.Tensor, T: torch.Tensor):
+        x_gt,   y_gt,   z_gt   = _project(gt_d,   T)
+        x_pred, y_pred, z_pred = _project(pred_d, T)
+
+        d_flat = gt_d.reshape(B, N)
+        valid  = (
+            (d_flat > min_depth) & (d_flat < max_depth) &
+            torch.isfinite(d_flat) &
+            (z_gt > 0) & (z_pred > 0) &
+            (x_gt >= 0) & (x_gt < pW - 1) &
+            (y_gt >= 0) & (y_gt < pH - 1)
+        )  # (B, N)
+
+        n_valid = valid.float().sum()
+        if n_valid < 1:
+            return pred_d.new_tensor(0.0)
+
+        dist_sq = (x_gt - x_pred) ** 2 + (y_gt - y_pred) ** 2  # (B, N)
+        return (dist_sq * valid.float()).sum() / n_valid.clamp(min=1)
+
+    T_21 = se3_inv(T_12)
+    l_12 = _one_dir(pred_depth1, gt_depth1, T_12)
+    l_21 = _one_dir(pred_depth2, gt_depth2, T_21)
+    return (l_12 + l_21) * 0.5
+
+
 # ---------------------------------------------------------------------------
 # 10. Total loss — called from train.py
 # ---------------------------------------------------------------------------
@@ -433,6 +545,24 @@ def total_loss(
         "smooth": float(l_smooth.detach()),
         "iters":  float(l_iters.detach()),
     }
+
+    # --- Pixel consistency (multiview reprojection) ---
+    l_pixel = pred1.new_tensor(0.0)
+    if "poses" in batch:
+        poses_pc = batch["poses"]                           # (B, N, 4, 4)
+        T_12_pc  = se3_inv(poses_pc[:, 1]) @ poses_pc[:, 0]
+        # Scale K to predicted-depth resolution
+        scale_w, scale_h = pW / W, pH / H
+        K_s = K.clone()
+        K_s[:, 0, 0] = K[:, 0, 0] * scale_w
+        K_s[:, 1, 1] = K[:, 1, 1] * scale_h
+        K_s[:, 0, 2] = K[:, 0, 2] * scale_w
+        K_s[:, 1, 2] = K[:, 1, 2] * scale_h
+        l_pixel = pixel_consistency_loss(
+            pred1, pred2, gt1_s, gt2_s, T_12_pc, K_s
+        )
+        total = total + float(w.get("pixel_consistency", 0.05)) * l_pixel
+        parts["pixel_consistency"] = float(l_pixel.detach())
 
     # --- Camera pose / intrinsics losses ---
     if "poses" in batch and "T_12_pred" in outputs:

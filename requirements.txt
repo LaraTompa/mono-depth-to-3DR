@@ -12,3 +12,4 @@ pillow==10.4.0
 scikit-image
 seaborn==0.12.2
 tqdm
+tensorboard
