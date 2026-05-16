@@ -42,7 +42,7 @@ import torch.nn.functional as F
 import yaml
 
 from models.model_image_depth.network import DepthAlignNet
-from models.models_image_depth.geometry import se3_inv
+from models.model_image_depth.geometry import se3_inv
 
 
 # ─── Loaders ────────────────────────────────────────────────────────────────
