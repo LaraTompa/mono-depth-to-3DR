@@ -290,3 +290,15 @@ def svd_orthogonalize(M: torch.Tensor) -> torch.Tensor:
         torch.stack([torch.ones_like(d), torch.ones_like(d), d], dim=-1)
     )                                                        # (B, 3, 3)
     return U @ D @ Vh                                        # (B, 3, 3) ∈ SO(3)
+
+def se3_inv(T: torch.Tensor) -> torch.Tensor:
+    """Numerically stable inverse for SE(3) matrices (B, 4, 4)."""
+    R = T[:, :3, :3]          # (B, 3, 3)
+    t = T[:, :3,  3]          # (B, 3)
+    R_inv = R.transpose(-1, -2)
+    t_inv = -torch.bmm(R_inv, t.unsqueeze(-1)).squeeze(-1)
+    T_inv = torch.zeros_like(T)
+    T_inv[:, :3, :3] = R_inv
+    T_inv[:, :3,  3] = t_inv
+    T_inv[:, 3,   3] = 1.0
+    return T_inv

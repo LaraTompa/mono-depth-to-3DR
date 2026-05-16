@@ -32,7 +32,7 @@ scheduler:
   eta_min: 1.0e-06
   type: cosine
 train:
-  epochs: 10
+  epochs: 1
   grad_clip: 1.0
   log_every: 50
   seed: 0

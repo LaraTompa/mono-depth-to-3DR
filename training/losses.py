@@ -22,9 +22,21 @@ Commented out (re-enable once network produces reasonable depths)
 import torch
 import torch.nn.functional as F
 
+def se3_inv(T: torch.Tensor) -> torch.Tensor:
+    """Numerically stable inverse for SE(3) matrices (B, 4, 4)."""
+    R = T[:, :3, :3]          # (B, 3, 3)
+    t = T[:, :3,  3]          # (B, 3)
+    R_inv = R.transpose(-1, -2)
+    t_inv = -torch.bmm(R_inv, t.unsqueeze(-1)).squeeze(-1)
+    T_inv = torch.zeros_like(T)
+    T_inv[:, :3, :3] = R_inv
+    T_inv[:, :3,  3] = t_inv
+    T_inv[:, 3,   3] = 1.0
+    return T_inv
 
 EPS = 1e-8
 EPS_NORM = 1e-6
+ACOS_EPS = 1e-4
 LOG_CONF_MIN = -10.0
 LOG_CONF_MAX = 10.0
 
@@ -149,7 +161,7 @@ def geodesic_rotation_loss(
     """
     R_rel   = R_pred.transpose(-1, -2) @ R_gt              # (B, 3, 3)
     cos_ang = (R_rel.diagonal(dim1=-2, dim2=-1).sum(-1) - 1.0) * 0.5
-    cos_ang = cos_ang.clamp(-1.0 + EPS, 1.0 - EPS)        # numerical safety
+    cos_ang = cos_ang.clamp(-1.0 + ACOS_EPS, 1.0 - ACOS_EPS)  # gradient stability
     return torch.nan_to_num(torch.acos(cos_ang), nan=0.0)                            # (B,)
 
 
@@ -175,7 +187,7 @@ def normalized_translation_loss(
     t_pred_n    = t_pred / t_pred_norm
     t_gt_n      = t_gt   / t_gt_norm
     # Angular error — safer than L2 of unit vectors; matches paper formulation
-    dot = (t_pred_n * t_gt_n).sum(dim=-1).clamp(-1.0 + EPS, 1.0 - EPS)
+    dot = (t_pred_n * t_gt_n).sum(dim=-1).clamp(-1.0 + ACOS_EPS, 1.0 - ACOS_EPS)
     loss_trans = torch.acos(dot)                            # (B,) radians
     return torch.nan_to_num(loss_trans, nan=0.0)            # pure-rotation pairs → 0
 
@@ -216,7 +228,7 @@ def pose_identity_loss(
     t_21_in_frame1 = torch.bmm(R_12, t_21.unsqueeze(-1)).squeeze(-1)  # (B, 3)
     dot   = (t_12 * (-t_21_in_frame1)).sum(dim=-1)
     denom = (t_12.norm(dim=-1) * t_21_in_frame1.norm(dim=-1)).clamp(min=1e-6)
-    cos_ang   = (dot / denom).clamp(-1.0 + EPS, 1.0 - EPS)
+    cos_ang   = (dot / denom).clamp(-1.0 + ACOS_EPS, 1.0 - ACOS_EPS)
     trans_err = torch.acos(cos_ang)                           # (B,) radians
     trans_err = torch.nan_to_num(trans_err, nan=0.0)          # pure-rotation pairs → 0
  
@@ -323,7 +335,7 @@ def camera_pose_loss(
 
     # ── Pose identity (round-trip) regulariser ────────────────────────────
     # T_21 = T_c2w_1^{−1} @ T_c2w_2  (cam2→cam1 from absolute poses)
-    T_21_pred = torch.linalg.inv(T_c2w_1) @ T_c2w_2
+    T_21_pred = se3_inv(T_c2w_1) @ T_c2w_2
     l_id      = pose_identity_loss(T_12_pred, T_21_pred)
 
     # ── Combine ───────────────────────────────────────────────────────────
@@ -425,7 +437,12 @@ def total_loss(
     # --- Camera pose / intrinsics losses ---
     if "poses" in batch and "T_12_pred" in outputs:
         poses   = batch["poses"]                                 # (B, N, 4, 4)
-        T_12_gt = torch.linalg.inv(poses[:, 1]) @ poses[:, 0]  # cam1→cam2 GT
+        T_12_gt = se3_inv(poses[:, 1]) @ poses[:, 0]  # cam1→cam2 GT
+        # Debug: check GT translation norms (should NOT be near zero)
+        t_gt_norms = T_12_gt[:, :3, 3].norm(dim=-1)
+        if t_gt_norms.mean() < 0.01:
+            print(f"[WARNING] GT translation norms very small: min={t_gt_norms.min():.6f} max={t_gt_norms.max():.6f} mean={t_gt_norms.mean():.6f}")
+            print(f"[WARNING] This suggests zero or near-zero GT motion — check pose convention!")
         K_gt    = batch.get("intrinsics")                        # (B, 3, 3) or None
         l_cam, cam_parts = camera_pose_loss(outputs, T_12_gt, K_gt, w)
         total   = total + float(w.get("camera", 0.5)) * l_cam
