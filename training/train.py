@@ -238,6 +238,7 @@ def train(cfg: dict, arch_cfg: dict, resume: str | None = None) -> None:
         print("[train] TensorBoard not available (pip install tensorboard to enable).")
 
     # resolve relative paths from the repo root
+    root_dir = cfg["dataset"]["root_dir"]
     if not os.path.isabs(root_dir):
         root_dir = os.path.join(_REPO_ROOT, root_dir)
 
@@ -254,6 +255,11 @@ def train(cfg: dict, arch_cfg: dict, resume: str | None = None) -> None:
     train_paths = all_scene_paths[:s1]
     val_paths   = all_scene_paths[s1:s2]
     test_paths  = all_scene_paths[s2:]
+    # With very few scenes the 10 % slices can be empty; fall back to last train scene.
+    if not val_paths:
+        val_paths = train_paths[-1:]
+    if not test_paths:
+        test_paths = train_paths[-1:]
     print(f"[train] Scenes: {len(train_paths)} train / {len(val_paths)} val / {len(test_paths)} test")
 
     train_ds = build_dataset(cfg, root_dir=root_dir, scene_paths=train_paths)
