@@ -7,7 +7,7 @@ checkpoint:
 dataset:
   root_dir: datasets/sampled_data
   mde_source: "depthpro"   # "zoedepth" | "depthpro"
-  max_scenes: 100
+  max_scenes: 300
 loader:
   batch_size: 2
   drop_last: true
@@ -33,10 +33,10 @@ scheduler:
   eta_min: 1.0e-06
   type: cosine
 train:
-  epochs: 10
+  epochs: 50
   grad_clip: 1.0
   log_every: 50
   seed: 0
   val_every: 1
-  patience: 3
+  patience: 5
   num_pose_iters: 1
