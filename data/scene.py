@@ -62,7 +62,7 @@ class ScanNetScene:
     MDE_DEPTH_EXT = ".png"          # ZoeDepth predictions (uint16 PNG, mm → metres)
     MDE_DEPTH_DIR = "zoe-depth_pred"
     DEPTHPRO_EXT = ".npz"           # DepthPro predictions (float32 metres)
-    DEPTHPRO_DIR = "depth_pro_pred"
+    DEPTHPRO_DIR = "depth-pro_pred"
     POSE_EXT = ".txt"
     INTRINSIC_FNAME = "intrinsic_depth.txt"
 
