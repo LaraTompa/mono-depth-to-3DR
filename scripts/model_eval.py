@@ -256,7 +256,7 @@ def main(args):
 
     # ── Build model ──────────────────────────────────────────────────────────
     # Extract config with fallbacks for new vs old checkpoint formats
-    arch_cfg = cfg.get("arch", {})  # new format: arch saved in checkpoint
+    arch_cfg = ckpt.get("arch", {})  # new format: arch saved in checkpoint
     if not arch_cfg:
         # old format: manually specify defaults
         arch_cfg = {
