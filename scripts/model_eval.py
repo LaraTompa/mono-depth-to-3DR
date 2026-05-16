@@ -42,6 +42,7 @@ import torch.nn.functional as F
 import yaml
 
 from models.model_image_depth.network import DepthAlignNet
+from models.models_image_depth.geometry import se3_inv
 
 
 # ─── Loaders ────────────────────────────────────────────────────────────────
@@ -254,14 +255,36 @@ def main(args):
     print(f"[eval] Loaded checkpoint from epoch {ckpt.get('epoch', '?')}")
 
     # ── Build model ──────────────────────────────────────────────────────────
-    model_cfg = cfg.get("model", {})
+    # Extract config with fallbacks for new vs old checkpoint formats
+    arch_cfg = cfg.get("arch", {})  # new format: arch saved in checkpoint
+    if not arch_cfg:
+        # old format: manually specify defaults
+        arch_cfg = {
+            "encoder": {"out_channels": 64},
+            "attention": {"num_heads": 4, "window_size": 7},
+            "refinement": {"enabled": False, "num_iters": 4, "hidden_dim": 64},
+            "decoder": {"hidden_dim": 32},
+            "camera_head": {"hidden_dim": 64},
+        }
+        print("[eval] [WARNING] 'arch' not in checkpoint; using defaults")
+ 
+    enc_cfg = arch_cfg.get("encoder", {})
+    att_cfg = arch_cfg.get("attention", {})
+    ref_cfg = arch_cfg.get("refinement", {})
+    dec_cfg = arch_cfg.get("decoder", {})
+    cam_cfg = arch_cfg.get("camera_head", {})
+ 
     model = DepthAlignNet(
-        feat_dim    = int(model_cfg.get("feat_dim", 128)),
-        hidden_dim  = int(model_cfg.get("hidden_dim", 128)),
-        num_iters   = int(model_cfg.get("num_iters", 4)),
-        num_heads   = int(model_cfg.get("num_heads", 4)),
-        window_size = int(model_cfg.get("window_size", 7)),
-        pretrained  = False,  # weights loaded from checkpoint
+        feat_dim            = int(enc_cfg.get("out_channels", 64)),
+        hidden_dim          = int(ref_cfg.get("hidden_dim", 64)),
+        num_iters           = int(ref_cfg.get("num_iters", 4)),
+        num_heads           = int(att_cfg.get("num_heads", 4)),
+        window_size         = int(att_cfg.get("window_size", 7)),
+        pretrained          = False,
+        freeze_backbone     = False,
+        use_refinement      = bool(ref_cfg.get("enabled", False)),
+        decoder_hidden      = int(dec_cfg.get("hidden_dim", 32)),
+        camera_head_hidden  = int(cam_cfg.get("hidden_dim", 64)),
     ).to(device)
 
     model.load_state_dict(ckpt["model"])
@@ -309,29 +332,74 @@ def main(args):
         pose2_np = load_pose(args.pose2)
         pose1 = torch.from_numpy(pose1_np).unsqueeze(0).to(device)  # (1,4,4)
         pose2 = torch.from_numpy(pose2_np).unsqueeze(0).to(device)
-        T_12 = torch.linalg.inv(pose2) @ pose1                      # cam1 → cam2
+        # SE(3) closed-form inverse — no gradient instability
+        T_12_init = se3_inv(pose2) @ pose1 
     else:
         # Identity transform (assume images already aligned)
-        T_12 = torch.eye(4, device=device).unsqueeze(0)
-        print("[eval] No poses provided; using identity transform.")
+        T_12_init = torch.eye(4, device=device, dtype=torch.float32).unsqueeze(0)
+        print("[eval] No poses provided; using identity as initial T_12 estimate.")
 
     # ── Forward pass ─────────────────────────────────────────────────────────
     print("[eval] Running model forward pass...")
+    H_img, W_img = rgb1.shape[-2:]
+ 
+    # Build initial K estimate (same heuristic as train.py)
+    if args.intrinsics:
+        K_iter = K  # use loaded intrinsics as initial estimate
+    else:
+        f_init = float(max(H_img, W_img)) * 0.9
+        K_iter = torch.tensor(
+            [[f_init, 0.0,    W_img / 2.0],
+             [0.0,    f_init, H_img / 2.0],
+             [0.0,    0.0,    1.0]],
+            dtype=torch.float32, device=device,
+        ).unsqueeze(0)
+ 
+    T_12_iter = T_12_init
+    # Get num_pose_iters from checkpoint config (not CLI arg anymore)
+    train_cfg = cfg.get("train", {})
+    num_pose_iters = int(train_cfg.get("num_pose_iters", 1))
+    print(f"[eval] num_pose_iters={num_pose_iters} (from checkpoint config)")
+ 
     with torch.no_grad():
-        outputs = model(
-            rgb1=rgb1,
-            rgb2=rgb2,
-            depth_mono1=depth_mono1,
-            depth_mono2=depth_mono2,
-            T_12=T_12,
-            K=K,
-        )
+        for pose_it in range(num_pose_iters):
+            outputs = model(
+                rgb1=rgb1,
+                rgb2=rgb2,
+                depth_mono1=depth_mono1,
+                depth_mono2=depth_mono2,
+                T_12=T_12_iter,
+                K=K_iter,
+            )
+            if pose_it < num_pose_iters - 1:
+                K_pred_it = outputs["K_pred"]
+                T_pred_it = outputs["T_12_pred"]
+                if torch.isfinite(K_pred_it).all() and torch.isfinite(T_pred_it).all():
+                    K_iter    = K_pred_it
+                    T_12_iter = T_pred_it
+                else:
+                    print(f"[eval] iter {pose_it}: non-finite K/T pred, keeping previous.")
 
     pred1_out = outputs["depth1"].squeeze(0).squeeze(0).cpu().numpy()  # (H/2, W/2)
     pred2_out = outputs["depth2"].squeeze(0).squeeze(0).cpu().numpy()
     conf1 = outputs["confidence1"].squeeze(0).squeeze(0).cpu().numpy()
     conf2 = outputs["confidence2"].squeeze(0).squeeze(0).cpu().numpy()
 
+    # ── Print predicted camera parameters ────────────────────────────────────
+    K_pred_np    = outputs["K_pred"][0].cpu().numpy()
+    T_12_pred_np = outputs["T_12_pred"][0].cpu().numpy()
+    print(f"\n[eval] Predicted intrinsics: fx={K_pred_np[0,0]:.1f}  fy={K_pred_np[1,1]:.1f}"
+          f"  cx={K_pred_np[0,2]:.1f}  cy={K_pred_np[1,2]:.1f}")
+    print(f"[eval] Predicted T_12 (cam1→cam2):\n{T_12_pred_np}")
+ 
+    # Save predicted poses and intrinsics
+    np.savetxt(os.path.join(args.output_dir, "K_pred.txt"),    K_pred_np,    fmt="%.6f")
+    np.savetxt(os.path.join(args.output_dir, "T_12_pred.txt"), T_12_pred_np, fmt="%.6f")
+    print(f"  Saved: {args.output_dir}/K_pred.txt")
+    print(f"  Saved: {args.output_dir}/T_12_pred.txt")
+
+    # Upsample to full resolution for saving/evaluation
+    pred1_full = cv2.resize(pred1_out, (W, H), interpolation=cv2.INTER_LINEAR)
     # Upsample to full resolution for saving/evaluation
     pred1_full = cv2.resize(pred1_out, (W, H), interpolation=cv2.INTER_LINEAR)
     pred2_full = cv2.resize(pred2_out, (W, H), interpolation=cv2.INTER_LINEAR)
@@ -373,12 +441,14 @@ def main(args):
 
         # ── Photometric consistency ──────────────────────────────────────────
         if args.pose1 and args.pose2:
+            # Prefer GT intrinsics for projection; fall back to predicted
+            K_eval_np = K_np if args.intrinsics else K_pred_np
             print("\n=== Photometric Consistency ===")
             l2_12, vr_12 = compute_photometric_consistency(
-                img1_np, img2_np, pred1_full, K_np, pose1_np, pose2_np
+                img1_np, img2_np, pred1_full, K_eval_np, pose1_np, pose2_np
             )
             l2_21, vr_21 = compute_photometric_consistency(
-                img2_np, img1_np, pred2_full, K_np, pose2_np, pose1_np
+                img2_np, img1_np, pred2_full, K_eval_np, pose2_np, pose1_np
             )
             print(f"L2 (1→2): {l2_12:.4f}  valid_ratio: {vr_12:.3f}")
             print(f"L2 (2→1): {l2_21:.4f}  valid_ratio: {vr_21:.3f}")
@@ -387,10 +457,10 @@ def main(args):
             # ── Pixel consistency ────────────────────────────────────────────
             print("\n=== Pixel Consistency ===")
             mae_12, rmse_12, vr_pc_12 = compute_pixel_consistency(
-                gt_depth1_np, pred1_full, gt_depth2_np, K_np, pose1_np, pose2_np
+                gt_depth1_np, pred1_full, gt_depth2_np, K_eval_np, pose1_np, pose2_np
             )
             mae_21, rmse_21, vr_pc_21 = compute_pixel_consistency(
-                gt_depth2_np, pred2_full, gt_depth1_np, K_np, pose2_np, pose1_np
+                gt_depth2_np, pred2_full, gt_depth1_np, K_eval_np, pose2_np, pose1_np
             )
             print(f"MAE  (1→2): {mae_12:.4f}  RMSE: {rmse_12:.4f}  valid_ratio: {vr_pc_12:.3f}")
             print(f"MAE  (2→1): {mae_21:.4f}  RMSE: {rmse_21:.4f}  valid_ratio: {vr_pc_21:.3f}")
