@@ -32,10 +32,10 @@ scheduler:
   eta_min: 1.0e-06
   type: cosine
 train:
-  epochs: 1
+  epochs: 10
   grad_clip: 1.0
   log_every: 50
   seed: 0
   val_every: 1
-  patience: 5
+  patience: 3
   num_pose_iters: 1
