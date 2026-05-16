@@ -7,7 +7,7 @@ checkpoint:
 dataset:
   root_dir: datasets/sampled_data
   mde_source: "zoedepth"   # "zoedepth" | "depthpro"
-  max_scenes: 300
+  max_scenes: 100
 loader:
   batch_size: 2
   drop_last: true
