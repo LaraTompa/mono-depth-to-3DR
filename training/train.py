@@ -216,7 +216,7 @@ def run_epoch(
                     f"  epoch {epoch:03d}  step {step+1:04d}/{len(loader):04d}"
                     f"  loss={avg_loss:.4f}"
                     f"  depth={avg_depth:.4f} smooth={avg_smooth:.4f} iters={avg_iters:.4f}"
-                    f"  pix={avg_pix:.4f}"
+                    f"  pix={avg_pix:.6f}"
                     f"  cam={avg_cam:.4f} (rot={avg_rot:.3f} trans={avg_trans:.3f} K={avg_camK:.3f} id={avg_cid:.3f})"
                     f"  lr={lr:.2e}  {elapsed:.1f}s"
                 )
@@ -386,7 +386,7 @@ def train(cfg: dict, arch_cfg: dict, resume: str | None = None) -> None:
                 f"depth={val_metrics.get('depth', 0.0):.4f} "
                 f"smooth={val_metrics.get('smooth', 0.0):.4f} "
                 f"iters={val_metrics.get('iters', 0.0):.4f} "
-                f"pix={val_metrics.get('pixel_consistency', 0.0):.4f} "
+                f"pix={val_metrics.get('pixel_consistency', 0.0):.6f} "
                 f"cam={val_metrics.get('cam_pose', 0.0):.4f} "
                 f"cam_rot={val_metrics.get('cam_rot', 0.0):.4f} "
                 f"cam_trans={val_metrics.get('cam_trans', 0.0):.4f}"
