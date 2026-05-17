@@ -22,9 +22,9 @@ loss:
   depth: 1.0
   iter_supervision: 0.0
   smooth: 0.05
-  camera: 0.1
+  camera: 0.8
   camera_warmup_epochs: 15
-  pixel_consistency: 0.0
+  pixel_consistency: 0.01
   identity: 0.0
   K_reg: 0.0
 optimizer:
@@ -38,7 +38,7 @@ scheduler:
   eta_min: 1.0e-06
   type: cosine
 train:
-  epochs: 10
+  epochs: 20
   grad_clip: 1.0
   log_every: 50
   seed: 0
