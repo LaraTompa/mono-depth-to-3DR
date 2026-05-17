@@ -62,8 +62,18 @@ def run_epoch(
     log_every = int(train_cfg.get("log_every", 50))
     grad_clip = train_cfg.get("grad_clip")
 
-    totals    = {"loss": 0.0, "depth": 0.0, "smooth": 0.0, "iters": 0.0,
-                 "cam_pose": 0.0, "cam_rot": 0.0, "cam_trans": 0.0, "cam_K": 0.0}
+    totals    = {
+        "loss": 0.0,
+        "depth": 0.0,
+        "smooth": 0.0,
+        "iters": 0.0,
+        "pixel_consistency": 0.0,
+        "cam_pose": 0.0,
+        "cam_rot": 0.0,
+        "cam_trans": 0.0,
+        "cam_K": 0.0,
+        "cam_identity": 0.0,
+    }
     metric_sums = {"abs_rel": 0.0, "rmse": 0.0, "delta1": 0.0}
     metric_count = 0
     n_batches = 0
@@ -191,15 +201,23 @@ def run_epoch(
             if train and (step + 1) % log_every == 0:
                 elapsed = time.time() - t0
                 n = n_batches
-                avg_loss    = totals["loss"]     / n
-                avg_cam     = totals["cam_pose"] / n
-                avg_rot     = totals["cam_rot"]  / n
-                avg_trans   = totals["cam_trans"]/ n
+                avg_loss  = totals["loss"] / n
+                avg_depth = totals["depth"] / n
+                avg_smooth= totals["smooth"]/ n
+                avg_iters = totals["iters"] / n
+                avg_pix   = totals.get("pixel_consistency", 0.0) / n
+                avg_cam   = totals["cam_pose"] / n
+                avg_rot   = totals["cam_rot"]  / n
+                avg_trans = totals["cam_trans"]/ n
+                avg_camK  = totals["cam_K"]    / n
+                avg_cid   = totals.get("cam_identity", 0.0) / n
                 lr = optimizer.param_groups[0]["lr"]
                 print(
                     f"  epoch {epoch:03d}  step {step+1:04d}/{len(loader):04d}"
                     f"  loss={avg_loss:.4f}"
-                    f"  cam={avg_cam:.4f} (rot={avg_rot:.3f} trans={avg_trans:.3f})"
+                    f"  depth={avg_depth:.4f} smooth={avg_smooth:.4f} iters={avg_iters:.4f}"
+                    f"  pix={avg_pix:.4f}"
+                    f"  cam={avg_cam:.4f} (rot={avg_rot:.3f} trans={avg_trans:.3f} K={avg_camK:.3f} id={avg_cid:.3f})"
                     f"  lr={lr:.2e}  {elapsed:.1f}s"
                 )
                 if writer is not None:
@@ -360,6 +378,21 @@ def train(cfg: dict, arch_cfg: dict, resume: str | None = None) -> None:
             )
 
         # --- scheduler step ---
+        # Build validation breakdown string (mirrors train_break format)
+        val_break = ""
+        if val_metrics:
+            val_break = (
+                f"  val_loss={val_metrics.get('loss', float('nan')):.4f} "
+                f"depth={val_metrics.get('depth', 0.0):.4f} "
+                f"smooth={val_metrics.get('smooth', 0.0):.4f} "
+                f"iters={val_metrics.get('iters', 0.0):.4f} "
+                f"pix={val_metrics.get('pixel_consistency', 0.0):.4f} "
+                f"cam={val_metrics.get('cam_pose', 0.0):.4f} "
+                f"cam_rot={val_metrics.get('cam_rot', 0.0):.4f} "
+                f"cam_trans={val_metrics.get('cam_trans', 0.0):.4f}"
+            )
+
+        # --- scheduler step ---
         if scheduler is not None:
             monitor_val = val_metrics.get("loss", train_metrics["loss"])
             if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
@@ -371,18 +404,28 @@ def train(cfg: dict, arch_cfg: dict, resume: str | None = None) -> None:
         lr  = optimizer.param_groups[0]["lr"]
         elapsed = time.time() - t_epoch
         val_str = ""
-        if val_metrics:
-            val_str = f"  val_loss={val_metrics.get('loss', float('nan')):.4f}"
-            if "abs_rel" in val_metrics:
-                val_str += (
-                    f"  abs_rel={val_metrics['abs_rel']:.4f}"
-                    f"  rmse={val_metrics['rmse']:.4f}"
-                    f"  delta1={val_metrics['delta1']:.4f}"
-                )
+#        if val_metrics:
+#            val_str = f"  val_loss={val_metrics.get('loss', float('nan')):.4f}"
+#            if "abs_rel" in val_metrics:
+#                val_str += (
+#                    f"  abs_rel={val_metrics['abs_rel']:.4f}"
+#                    f"  rmse={val_metrics['rmse']:.4f}"
+#                    f"  delta1={val_metrics['delta1']:.4f}"
+#                )
+        # Build a compact train breakdown string from available keys
+        train_break = (
+            f"train_loss={train_metrics.get('loss', float('nan')):.4f} "
+            f"depth={train_metrics.get('depth', 0.0):.4f} "
+            f"smooth={train_metrics.get('smooth', 0.0):.4f} "
+            f"iters={train_metrics.get('iters', 0.0):.4f} "
+            f"pix={train_metrics.get('pixel_consistency', 0.0):.4f} "
+            f"cam={train_metrics.get('cam_pose', 0.0):.4f} "
+            f"cam_rot={train_metrics.get('cam_rot', 0.0):.4f} "
+            f"cam_trans={train_metrics.get('cam_trans', 0.0):.4f}"
+        )
         print(
-            f"[epoch {epoch:03d}/{train_cfg['epochs']}]"
-            f"  train_loss={train_metrics['loss']:.4f}{val_str}"
-            f"  lr={lr:.2e}  {elapsed:.1f}s"
+            f"[epoch {epoch:03d}/{train_cfg['epochs']}]  {train_break}"
+            f"{val_break}  lr={lr:.2e}  {elapsed:.1f}s"
         )
 
         # --- TensorBoard per-epoch scalars ---
