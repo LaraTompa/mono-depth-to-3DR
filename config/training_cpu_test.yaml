@@ -7,9 +7,9 @@ checkpoint:
 dataset:
   root_dir: datasets/sampled_data
   mde_source: "zoedepth"   # "zoedepth" | "depthpro"
-  max_scenes: 100
+  max_scenes: 500
 loader:
-  batch_size: 2
+  batch_size: 4
   drop_last: true
   num_workers: 2
   pin_memory: false
@@ -20,30 +20,32 @@ logging:
   tensorboard: true
 loss:
   depth: 1.0
-  iter_supervision: 0.0
   smooth: 0.05
-  camera: 0.8
-  camera_warmup_epochs: 15
-  pixel_consistency: 0.01
-  identity: 0.0
-  K_reg: 0.0
+  iter_supervision: 0.0
+  camera: 0.3            # was 0.8 — too dominant, fighting depth learning
+  camera_warmup_epochs: 5   # was 15 — you only have 20 epochs total
+  pixel_consistency: 0.005  # was 0.01 — reduce geometric noise early
+  identity: 0.05         # was 0.0 — re-enable round-trip regulariser
+  K_reg: 0.3             # was 0.0 — intrinsics supervision helps anchor pose
+  rot: 1.5               # was implicit 1.0 — boost rotation signal
+  trans: 0.5             # was implicit 1.0 — down-weight translation (harder)
 optimizer:
   betas:
   - 0.9
   - 0.999
-  lr: 0.0001
+  lr: 0.0002
   type: adamw
-  weight_decay: 0.0001
+  weight_decay: 0.00001
 scheduler:
-  eta_min: 1.0e-06
+  eta_min: 1.0e-05
   type: cosine
 train:
-  epochs: 20
+  epochs: 30
   grad_clip: 1.0
   log_every: 50
   seed: 0
   val_every: 1
-  patience: 5
+  patience: 8
   num_pose_iters: 1
-  pose_warmup_epochs: 10
+  pose_warmup_epochs: 5
   loss_spike_threshold: 50.0
