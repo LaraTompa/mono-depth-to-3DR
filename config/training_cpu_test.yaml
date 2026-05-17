@@ -23,7 +23,7 @@ loss:
   smooth: 0.05
   iter_supervision: 0.0
   camera: 0.3            # was 0.8 — too dominant, fighting depth learning
-  camera_warmup_epochs: 5   # was 15 — you only have 20 epochs total
+  camera_warmup_epochs: 20   # was 15 — you only have 20 epochs total
   pixel_consistency: 0.005  # was 0.01 — reduce geometric noise early
   identity: 0.05         # was 0.0 — re-enable round-trip regulariser
   K_reg: 0.3             # was 0.0 — intrinsics supervision helps anchor pose

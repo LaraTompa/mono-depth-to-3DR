@@ -62,9 +62,11 @@ class DepthDecoder(nn.Module):
         # Output head: depth residual (1 ch) + confidence (1 ch)
         self.out_depth = nn.Conv2d(hidden // 2, 1, 1)
         self.out_conf  = nn.Conv2d(hidden // 2, 1, 1)
+        self.out_scale = nn.Conv2d(hidden // 2, 1, 1)
 
         nn.init.normal_(self.out_depth.weight, std=1e-4); nn.init.zeros_(self.out_depth.bias)
         nn.init.zeros_(self.out_conf.weight);  nn.init.zeros_(self.out_conf.bias)
+        nn.init.zeros_(self.out_scale.weight); nn.init.zeros_(self.out_scale.bias)
 
     def forward(
         self,
@@ -78,6 +80,7 @@ class DepthDecoder(nn.Module):
         dict with:
           "depth"      : (B, 1, H/2, W/2)  final aligned depth
           "confidence" : (B, 1, H/2, W/2)  ∈ (0, 1]
+          "scale"      : (B, 1, H/2, W/2)  scale factor
         """
         s4  = feats["s4"]    # (B, C, H/4,  W/4)
         s8  = feats["s8"]    # (B, C, H/8,  W/8)
@@ -107,8 +110,10 @@ class DepthDecoder(nn.Module):
         H2, W2 = x.shape[-2:]
         depth_mono_up = F.interpolate(depth_mono, size=(H2, W2), mode="bilinear", align_corners=True)
 
+        loq_scale = self.out_scale(x)                                           # (B, 1, H/2, W/2)
+        scale = F.softplus(loq_scale) + 1e-3  # ensure positive scale with min value
         depth_residual = self.out_depth(x)                              # (B, 1, H/2, W/2)
-        depth_out = (depth_mono_up + depth_residual).clamp(min=1e-3)
+        depth_out = (scale*depth_mono_up + depth_residual).clamp(min=1e-3)
 
         confidence = torch.sigmoid(self.out_conf(x))                   # (B, 1, H/2, W/2) ∈ (0,1)
 
