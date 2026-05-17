@@ -29,6 +29,7 @@ loss:
   K_reg: 0.3             # was 0.0 — intrinsics supervision helps anchor pose
   rot: 1.5               # was implicit 1.0 — boost rotation signal
   trans: 0.5             # was implicit 1.0 — down-weight translation (harder)
+  pose_warmup_epochs: 20    # disable pose loss weighting for first N epochs
 optimizer:
   betas:
   - 0.9

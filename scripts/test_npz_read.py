@@ -4,6 +4,7 @@ import argparse
 import os
 import math
 import sys
+import cv2
 
 def infer_square_shape(length):
     s = int(math.sqrt(length))
@@ -50,10 +51,16 @@ if __name__ == "__main__":
                 print(f"Key '{key}' not found. Available keys: {npz.files}", file=sys.stderr)
                 sys.exit(1)
         data = np.asarray(npz[key])
+    elif path.endswith(".npy"):
+        data = np.load(path)
+        #handle common cases of extra dimensions
+        if data.ndim == 3 and data.shape[0] == 1:
+            data = data[0]
+        if data.ndim == 3 and data.shape[-1] in (1, 3, 4):
+            data = data[..., 0]
     else:
-        # .npy or other single-array file
-        data = np.load(path, allow_pickle=True)
-        print(f"Loaded .npy shape: {data.shape}, dtype: {data.dtype}")
+        data = cv2.imread(path, cv2.IMREAD_UNCHANGED) / 1000
+    data = data.astype(np.float32)
 
     print("raw shape:", data.shape, "dtype:", data.dtype)
 
