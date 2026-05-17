@@ -1,6 +1,6 @@
 checkpoint:
   mode: min
-  monitor: val/abs_rel
+  monitor: val/loss
   resume: null
   save_dir: checkpoints/
   save_top_k: 3
