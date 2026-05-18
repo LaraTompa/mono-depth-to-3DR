@@ -346,7 +346,7 @@ def train(cfg: dict, arch_cfg: dict, resume: str | None = None) -> None:
     epochs_no_improve = 0
 
     # Camera-loss schedule
-    pose_warmup_epochs   = int(train_cfg.get("pose_warmup_epochs",   0))
+    pose_warmup_epochs   = int(cfg.get("loss", {}).get("pose_warmup_epochs", 0))
     camera_warmup_epochs = int(cfg.get("loss", {}).get("camera_warmup_epochs", 0))
     final_camera_w       = float(cfg.get("loss", {}).get("camera", 0.5))
 
