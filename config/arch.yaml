@@ -19,4 +19,4 @@ decoder:
   hidden_dim: 48
 
 camera_head:
-  hidden_dim: 96
+  hidden_dim: 128

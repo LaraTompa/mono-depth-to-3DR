@@ -9,9 +9,9 @@ dataset:
   mde_source: "zoedepth"   # "zoedepth" | "depthpro"
   max_scenes: 628
 loader:
-  batch_size: 2
+  batch_size: 8
   drop_last: true
-  num_workers: 1
+  num_workers: 4
   pin_memory: false
 logging:
   log_dir: runs/
@@ -23,13 +23,13 @@ loss:
   smooth: 0.05
   iter_supervision: 0.0
   camera: 0.3            # was 0.8 — too dominant, fighting depth learning
-  camera_warmup_epochs: 20   # was 15 — you only have 20 epochs total
+  camera_warmup_epochs: 25   # was 15 — you only have 20 epochs total
   pixel_consistency: 0.005  # was 0.01 — reduce geometric noise early
   identity: 0.05         # was 0.0 — re-enable round-trip regulariser
   K_reg: 0.3             # was 0.0 — intrinsics supervision helps anchor pose
   rot: 1.5               # was implicit 1.0 — boost rotation signal
   trans: 0.5             # was implicit 1.0 — down-weight translation (harder)
-  pose_warmup_epochs: 20    # disable pose loss weighting for first N epochs
+  pose_warmup_epochs: 25    # disable pose loss weighting for first N epochs
 optimizer:
   betas:
   - 0.9
