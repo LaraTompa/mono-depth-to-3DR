@@ -9,9 +9,9 @@ dataset:
   mde_source: "zoedepth"   # "zoedepth" | "depthpro"
   max_scenes: 628
 loader:
-  batch_size: 8
+  batch_size: 2
   drop_last: true
-  num_workers: 4
+  num_workers: 1
   pin_memory: false
 logging:
   log_dir: runs/
