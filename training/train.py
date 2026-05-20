@@ -481,13 +481,27 @@ def train(cfg: dict, arch_cfg: dict, resume: str | None = None) -> None:
         ckpt = torch.load(best_ckpt, map_location=device)
         model.load_state_dict(ckpt["model"])
     test_metrics = run_epoch(model, test_loader, None, cfg, device, train=False, epoch=0)
+
+    test_break = ""
+    if test_metrics:
+        test_break = (
+            f"  test_loss={test_metrics.get('loss', float('nan')):.4f} "
+            f"depth={test_metrics.get('depth', 0.0):.4f} "
+            f"smooth={test_metrics.get('smooth', 0.0):.4f} "
+            f"iters={test_metrics.get('iters', 0.0):.4f} "
+            f"pix={test_metrics.get('pixel_consistency', 0.0):.6f} "
+            f"cam={test_metrics.get('cam_pose', 0.0):.4f} "
+            f"cam_rot={test_metrics.get('cam_rot', 0.0):.4f} "
+            f"cam_trans={test_metrics.get('cam_trans', 0.0):.4f}"
+        )
+
     print(
-        f"[test] loss={test_metrics['loss']:.4f}"
+        f"[test]{test_break}"
         + (f"  abs_rel={test_metrics['abs_rel']:.4f}"
-           f"  rmse={test_metrics['rmse']:.4f}"
-           f"  delta1={test_metrics['delta1']:.4f}"
-           if "abs_rel" in test_metrics else "")
-    )
+        f"  rmse={test_metrics['rmse']:.4f}"
+        f"  delta1={test_metrics['delta1']:.4f}"
+        if "abs_rel" in test_metrics else "")
+)
 
 
 # ---------------------------------------------------------------------------
