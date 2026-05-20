@@ -247,7 +247,9 @@ class DepthAlignNet(nn.Module):
         # ── s16: prepend camera token then cross-attend ───────────────────
         sp_q   = self.feat_norm(feats_q["s16"].permute(0, 2, 3, 1).reshape(B, H16 * W16, C))
         sp_ctx = self.feat_norm(feats_ctx["s16"].permute(0, 2, 3, 1).reshape(B, H16 * W16, C))
-        seq_q   = torch.cat([cam_token, sp_q],   dim=1)   # (B, 1+H16*W16, C)
+        gap = feats_q["s16"].mean(dim=[2, 3], keepdim=False).unsqueeze(1)  # (B, 1, C)
+        cam_token_enriched = cam_token + gap #enrich camera token with global average pooled feature (global view)
+        seq_q = torch.cat([cam_token_enriched, sp_q], dim=1)   # (B, 1+H16*W16, C)
         seq_ctx = torch.cat([cam_token, sp_ctx], dim=1)
         out, _ = self.attn_cross(self.attn_norm_q(seq_q), self.attn_norm_kv(seq_ctx), self.attn_norm_kv(seq_ctx))
         seq_q  = seq_q + out
