@@ -48,5 +48,4 @@ train:
   val_every: 1
   patience: 8
   num_pose_iters: 1
-  pose_warmup_epochs: 5
   loss_spike_threshold: 50.0

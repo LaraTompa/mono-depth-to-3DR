@@ -23,7 +23,7 @@ loader:
 # ---------------------------------------------------------------------------
 optimizer:
   type:         adamw
-  lr:           3.0e-5
+  lr:           1.0e-4
   weight_decay: 1.0e-4
   betas:        [0.9, 0.999]
 
@@ -32,7 +32,7 @@ optimizer:
 # ---------------------------------------------------------------------------
 scheduler:
   type:          cosine
-  eta_min:       1.0e-6
+  eta_min:       1.0e-5
 
 # ---------------------------------------------------------------------------
 # Loss weights
@@ -40,11 +40,16 @@ scheduler:
 loss:
   depth:            1.0    # scale-invariant log loss (supervised)
   smooth:           0.05   # edge-aware smoothness
-  iter_supervision: 0.5    # deep supervision over refinement iterations
-  camera:           0.1    # weight for combined camera-pose + intrinsics loss
-  camera_warmup_epochs: 15 # ramp camera weight 0 → final over this many epochs
-  pixel_consistency: 0.01  # multiview reprojection consistency
+  iter_supervision: 0.0    # deep supervision over refinement iterations
+  camera:           0.3    # weight for combined camera-pose + intrinsics loss
+  camera_warmup_epochs: 10 # ramp camera weight 0 → final over this many epochs
+  pixel_consistency: 0.005  # multiview reprojection consistency
   identity:         0.05   # pose round-trip regulariser weight
+  K_reg: 0.0             # was 0.0 — intrinsics supervision helps anchor pose
+  rot: 1.5               # was implicit 1.0 — boost rotation signal
+  trans: 0.5             # was implicit 1.0 — down-weight translation (harder)
+  pose_warmup_epochs: 10    # disable pose loss weighting for first N epochs
+
 
 # ---------------------------------------------------------------------------
 # Training
@@ -55,8 +60,9 @@ train:
   val_every: 1                   # validate every N epochs
   log_every: 50                  # log every N batches
   seed: 0
-  pose_warmup_epochs: 10         # disable confidence weighting for first N epochs
   loss_spike_threshold: 50.0     # skip batch if loss exceeds this value
+  patience: 12
+  num_pose_iters: 1              # number of pose-refinement iterations per batch
 
 # ---------------------------------------------------------------------------
 # Checkpointing
@@ -64,7 +70,7 @@ train:
 checkpoint:
   save_dir: "checkpoints/"
   save_top_k: 3                  # keep the best K checkpoints
-  monitor: "val/abs_rel"         # metric to track for best-model selection
+  monitor: "val/loss"         # metric to track for best-model selection
   mode: "min"                    # "min" | "max"
   resume: null                   # path to .pt checkpoint to resume from
 
