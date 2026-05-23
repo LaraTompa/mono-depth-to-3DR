@@ -1,5 +1,13 @@
 # config/arch.yaml
+#
+# model: "v1"    → models/model_image_depth  (ConvNeXt-Tiny FPN baseline)
+# model: "vista" → models/model_vista        (DINOv2 + MASt3R cross-attention)
 
+model: "v1"
+
+# ---------------------------------------------------------------------------
+# V1 — ConvNeXt-Tiny FPN baseline (unchanged)
+# ---------------------------------------------------------------------------
 encoder:
   backbone: "convnext_tiny"     # future: "convnext_small" | "resnet50" | ...
   pretrained: true
@@ -20,3 +28,35 @@ decoder:
 
 camera_head:
   hidden_dim: 128
+
+# ---------------------------------------------------------------------------
+# Vista — DINOv2 ViT-L/14 + MASt3R cross-attention + ConvNeXt-Small depth
+# ---------------------------------------------------------------------------
+vista:
+  # DINOv2 RGB encoder (frozen)
+  dino_model: "dinov2_vitl14"   # dinov2_vits14 | dinov2_vitb14 | dinov2_vitl14
+  freeze_dino: true
+
+  # Cross-attention decoder (MASt3R BaseDecoder compatible)
+  decoder_dim: 768              # must match MASt3R BaseDecoder (768 for Base)
+  num_decoder_blocks: 4         # 4 ≈ 5 min/epoch; scale to 8–10 when stable
+  num_decoder_heads: 12         # 12 heads for dim=768
+
+  # MASt3R checkpoint for cross-attention weight initialisation.
+  # Set to local path after downloading:
+  #   https://download.europe.naverlabs.com/ComputerVision/MASt3R/
+  #       MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth
+  # Leave null to use default PyTorch initialisation.
+  mast3r_ckpt: null
+
+  # Depth stream backbone (trainable)
+  # "convnext_tiny"  → ~28M params (same channel widths as Small, fewer blocks)
+  # "convnext_small" → ~50M params (27 blocks in stage 3 vs 9 for Tiny)
+  depth_backbone: "convnext_tiny"
+  depth_out_channels: 128       # FPN output channels per scale
+
+  # Fusion decoder
+  decoder_hidden: 256
+
+  # Camera head
+  camera_head_hidden: 256

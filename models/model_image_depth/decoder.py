@@ -112,7 +112,9 @@ class DepthDecoder(nn.Module):
 
         loq_scale = self.out_scale(x)                                           # (B, 1, H/2, W/2)
         scale = F.softplus(loq_scale) + 1e-3  # ensure positive scale with min value
-        depth_residual = self.out_depth(x)                              # (B, 1, H/2, W/2)
+        # Residual clamped to ±20% of local mono depth — network corrects the
+        # prior rather than re-predicting depth from scratch.
+        depth_residual = depth_mono_up * 0.2 * torch.tanh(self.out_depth(x))   # (B, 1, H/2, W/2)
         depth_out = (scale*depth_mono_up + depth_residual).clamp(min=1e-3)
 
         confidence = torch.sigmoid(self.out_conf(x))                   # (B, 1, H/2, W/2) ∈ (0,1)

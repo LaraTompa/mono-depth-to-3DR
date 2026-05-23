@@ -31,7 +31,6 @@ except ImportError:   # tensorboard not installed — logging silently disabled
     _SummaryWriter = None
 
 from data.scene import find_scene_paths
-from models.model_image_depth.network import DepthAlignNet
 from training.losses import total_loss as compute_total_loss, compute_depth_metrics
 from training.utils import (
     seed_everything, build_dataset, build_loader,
@@ -299,23 +298,42 @@ def train(cfg: dict, arch_cfg: dict, resume: str | None = None) -> None:
           f"  batch_size={cfg['loader']['batch_size']}")
 
     # --- model ---
-    enc_cfg = arch_cfg.get("encoder",    {})
-    att_cfg = arch_cfg.get("attention",  {})
-    ref_cfg = arch_cfg.get("refinement", {})
-    dec_cfg = arch_cfg.get("decoder",    {})
-    cam_cfg = arch_cfg.get("camera_head", {})
-    model = DepthAlignNet(
-        feat_dim        = int(enc_cfg.get("out_channels",      128)),
-        hidden_dim      = int(ref_cfg.get("hidden_dim",        128)),
-        num_iters       = int(ref_cfg.get("num_iters",           4)),
-        num_heads       = int(att_cfg.get("num_heads",           4)),
-        window_size     = int(att_cfg.get("window_size",         7)),
-        pretrained      = bool(enc_cfg.get("pretrained",      True)),
-        freeze_backbone = bool(enc_cfg.get("freeze_backbone", False)),
-        use_refinement  = bool(ref_cfg.get("enabled",         True)),
-        decoder_hidden  = int(dec_cfg.get("hidden_dim",         64)),
-        camera_head_hidden = int(cam_cfg.get("hidden_dim", 64)),
-    ).to(device)
+    model_variant = arch_cfg.get("model", "v1")
+
+    if model_variant == "vista":
+        from models.model_vista.network import DepthAlignNetV2
+        v_cfg = arch_cfg.get("vista", {})
+        model = DepthAlignNetV2(
+            dino_model         = str(v_cfg.get("dino_model",          "dinov2_vitl14")),
+            freeze_dino        = bool(v_cfg.get("freeze_dino",         True)),
+            depth_backbone     = str(v_cfg.get("depth_backbone",       "convnext_tiny")),
+            decoder_dim        = int(v_cfg.get("decoder_dim",          768)),
+            num_decoder_blocks = int(v_cfg.get("num_decoder_blocks",     4)),
+            num_decoder_heads  = int(v_cfg.get("num_decoder_heads",     12)),
+            depth_out_channels = int(v_cfg.get("depth_out_channels",   128)),
+            decoder_hidden     = int(v_cfg.get("decoder_hidden",        256)),
+            camera_head_hidden = int(v_cfg.get("camera_head_hidden",   256)),
+            mast3r_ckpt        = v_cfg.get("mast3r_ckpt") or None,
+        ).to(device)
+    else:   # "v1" — original ConvNeXt-Tiny FPN model
+        from models.model_image_depth.network import DepthAlignNet
+        enc_cfg = arch_cfg.get("encoder",    {})
+        att_cfg = arch_cfg.get("attention",  {})
+        ref_cfg = arch_cfg.get("refinement", {})
+        dec_cfg = arch_cfg.get("decoder",    {})
+        cam_cfg = arch_cfg.get("camera_head", {})
+        model = DepthAlignNet(
+            feat_dim        = int(enc_cfg.get("out_channels",      128)),
+            hidden_dim      = int(ref_cfg.get("hidden_dim",        128)),
+            num_iters       = int(ref_cfg.get("num_iters",           4)),
+            num_heads       = int(att_cfg.get("num_heads",           4)),
+            window_size     = int(att_cfg.get("window_size",         7)),
+            pretrained      = bool(enc_cfg.get("pretrained",      True)),
+            freeze_backbone = bool(enc_cfg.get("freeze_backbone", False)),
+            use_refinement  = bool(ref_cfg.get("enabled",         True)),
+            decoder_hidden  = int(dec_cfg.get("hidden_dim",         64)),
+            camera_head_hidden = int(cam_cfg.get("hidden_dim", 64)),
+        ).to(device)
 
     # Print number of parameters and trainable parameters
     total_params = sum(p.numel() for p in model.parameters())
