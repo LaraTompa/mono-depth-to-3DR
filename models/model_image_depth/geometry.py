@@ -278,6 +278,10 @@ def svd_orthogonalize(M: torch.Tensor) -> torch.Tensor:
     M : (B, 3, 3)   — raw (not necessarily orthonormal) matrix
     Returns R : (B, 3, 3)  ∈ SO(3)
     """
+    # torch.linalg.svd has no fp16 CUDA kernel — promote to float32 and cast back.
+    orig_dtype = M.dtype
+    M = M.float()
+
     # Guard: replace any sample whose matrix contains NaN/Inf with identity
     # so that a single bad sample does not corrupt the whole batch via SVD.
     bad = ~torch.isfinite(M).all(dim=-1).all(dim=-1)   # (B,)
@@ -291,7 +295,7 @@ def svd_orthogonalize(M: torch.Tensor) -> torch.Tensor:
     D = torch.diag_embed(
         torch.stack([torch.ones_like(d), torch.ones_like(d), d], dim=-1)
     )                                                        # (B, 3, 3)
-    return U @ D @ Vh                                        # (B, 3, 3) ∈ SO(3)
+    return (U @ D @ Vh).to(orig_dtype)                      # (B, 3, 3) ∈ SO(3)
 
 def se3_inv(T: torch.Tensor) -> torch.Tensor:
     """Numerically stable inverse for SE(3) matrices (B, 4, 4)."""
