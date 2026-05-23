@@ -51,10 +51,9 @@ from .encoder         import DinoEncoder
 from .cross_attention import CrossAttentionDecoder
 from .depth_stream    import DepthStream
 from .decoder         import FusionDecoder
-from .geometry        import se3_inv
 
-# Re-use the camera head from V1 — same interface, no duplication.
-from models.model_image_depth.network import CameraHead
+# Re-use heads from V1 — same interface, no duplication.
+from models.model_image_depth.network import CameraHead, RelativePoseHead
 
 
 class DepthAlignNetV2(nn.Module):
@@ -132,6 +131,14 @@ class DepthAlignNetV2(nn.Module):
         # ── Camera head (shared / weight-tied across both views) ─────────
         self.camera_head = CameraHead(feat_dim=decoder_dim, hidden=camera_head_hidden)
 
+        # ── Relative pose head (same design as V1) ───────────────────────
+        # Takes cat([cam_embed1, cam_embed2]) → T_12, log_conf_pose.
+        # Swapping input order gives T_21 from the same shared weights.
+        self.relative_pose_head = RelativePoseHead(2 * decoder_dim, hidden=camera_head_hidden)
+
+        # Store freeze flag to avoid iterating 307M params every forward.
+        self._dino_frozen = freeze_dino
+
     # ------------------------------------------------------------------
     # Forward
     # ------------------------------------------------------------------
@@ -146,19 +153,25 @@ class DepthAlignNetV2(nn.Module):
         K:           torch.Tensor,   # (B, 3, 3)  — current estimate, not used in V2
     ) -> dict:
         B, _, H, W = rgb1.shape
-        assert H % 14 == 0 and W % 14 == 0, (
-            f"DepthAlignNetV2: H and W must be multiples of 14, got {H}×{W}. "
-            "Resize input to e.g. 392×518 before forwarding."
-        )
-        h14 = H // 14
-        w14 = W // 14
+
+        # ── Auto-resize RGB to nearest multiple of 14 for DINOv2 ─────────
+        # The depth stream and all downstream ops use the original resolution.
+        # Only the ViT patch embedding requires exact divisibility by 14.
+        H14 = round(H / 14) * 14
+        W14 = round(W / 14) * 14
+        if H14 != H or W14 != W:
+            rgb1_dino = F.interpolate(rgb1, size=(H14, W14), mode="bilinear", align_corners=False)
+            rgb2_dino = F.interpolate(rgb2, size=(H14, W14), mode="bilinear", align_corners=False)
+        else:
+            rgb1_dino, rgb2_dino = rgb1, rgb2
+        h14 = H14 // 14
+        w14 = W14 // 14
 
         # ── 1. DINOv2 encoding (frozen) ──────────────────────────────────
-        with torch.no_grad() if not any(
-            p.requires_grad for p in self.dino.parameters()
-        ) else torch.enable_grad():
-            patches1, _ = self.dino(rgb1)   # (B, N, 1024)
-            patches2, _ = self.dino(rgb2)
+        ctx = torch.no_grad() if self._dino_frozen else torch.enable_grad()
+        with ctx:
+            patches1, _ = self.dino(rgb1_dino)   # (B, N, 1024)
+            patches2, _ = self.dino(rgb2_dino)
 
         # ── 2. Project to decoder dimension ──────────────────────────────
         t1 = self.enc_to_dec(patches1)   # (B, N, 768)
@@ -182,10 +195,15 @@ class DepthAlignNetV2(nn.Module):
         cam1 = self.camera_head(cam_embed1, H, W)
         cam2 = self.camera_head(cam_embed2, H, W)
 
-        K_pred        = (cam1["K"]             + cam2["K"])             * 0.5
-        log_conf_K    = (cam1["log_conf_K"]    + cam2["log_conf_K"])    * 0.5
-        log_conf_pose = (cam1["log_conf_pose"] + cam2["log_conf_pose"]) * 0.5
-        T_12_pred     = se3_inv(cam2["T_c2w"]) @ cam1["T_c2w"]
+        K_pred     = (cam1["K"] + cam2["K"]) * 0.5
+        log_conf_K = (cam1["log_conf_K"] + cam2["log_conf_K"]) * 0.5
+
+        # Predict relative pose directly from both embeddings (same as V1).
+        rel_12 = self.relative_pose_head(torch.cat([cam_embed1, cam_embed2], dim=-1))
+        rel_21 = self.relative_pose_head(torch.cat([cam_embed2, cam_embed1], dim=-1))
+        T_12_pred     = rel_12["T_12"]
+        T_21_pred     = rel_21["T_12"]
+        log_conf_pose = rel_12["log_conf_pose"]
 
         # ── 7. Depth stream (independent of DINOv2) ──────────────────────
         depth_feats1 = self.depth_stream(rgb1, depth_mono1)   # {s4, s8, s16}
@@ -212,8 +230,7 @@ class DepthAlignNetV2(nn.Module):
             # Camera predictions
             "K_pred":        K_pred,
             "T_12_pred":     T_12_pred,
-            "T_c2w_1":       cam1["T_c2w"],
-            "T_c2w_2":       cam2["T_c2w"],
+            "T_21_pred":     T_21_pred,
             "log_conf_K":    log_conf_K,
             "log_conf_pose": log_conf_pose,
         }
