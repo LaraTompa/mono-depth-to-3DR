@@ -40,6 +40,7 @@ blocks under the key pattern:
     dec_blocks.{i}.cross_attn.projk.weight
     dec_blocks.{i}.cross_attn.projv.weight
     dec_blocks.{i}.cross_attn.proj.weight
+    dec_blocks.{i}.norm_y.weight           (context normalization before cross-attn)
     dec_blocks.{i}.norm3.weight
     dec_blocks.{i}.mlp.fc1.weight
     dec_blocks.{i}.mlp.fc2.weight
@@ -158,6 +159,7 @@ class CrossBlock(nn.Module):
         self.attn       = Attention(dim, num_heads)
         self.norm2      = nn.LayerNorm(dim)
         self.cross_attn = CrossAttention(dim, num_heads)
+        self.norm_y     = nn.LayerNorm(dim)  # normalize context before cross-attn
         self.norm3      = nn.LayerNorm(dim)
         self.mlp        = Mlp(dim, mlp_ratio)
 
@@ -167,10 +169,11 @@ class CrossBlock(nn.Module):
         context : (B, M, dim)  — tokens from the other view (key / value)
 
         Self-attention lets each view gather internal context first; then
-        cross-attention brings in information from the other view.
+        cross-attention brings in information from the other view (with
+        normalized context for stability).
         """
         x = x + self.attn(self.norm1(x))
-        x = x + self.cross_attn(self.norm2(x), context)
+        x = x + self.cross_attn(self.norm2(x), self.norm_y(context))
         x = x + self.mlp(self.norm3(x))
         return x
 

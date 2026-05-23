@@ -160,11 +160,22 @@ def run_epoch(
                             print(f"[NaN guard] iter {pose_it}: non-finite K/T pred "
                                   f"at step {step}; keeping previous init values.")
 
-                loss, breakdown = compute_total_loss(
-                    outputs, batch, cfg.get("loss", {}), K_iter,
-                    use_confidence=use_confidence,
-                    camera_weight=camera_weight,
-                )
+            # Cast fp16 model outputs → fp32 before loss computation.
+            # Tensors produced inside autocast stay fp16 even after the context
+            # exits; EPS/EPS_NORM constants in losses.py (e.g. 1e-6) underflow
+            # to 0.0 in fp16, turning norm clamps into division-by-zero → NaN.
+            if scaler is not None:
+                outputs = {
+                    k: v.float() if isinstance(v, torch.Tensor) and v.is_floating_point() else v
+                    for k, v in outputs.items()
+                }
+
+            # Compute loss in fp32 (outside autocast) to avoid numerical instability
+            loss, breakdown = compute_total_loss(
+                outputs, batch, cfg.get("loss", {}), K_iter,
+                use_confidence=use_confidence,
+                camera_weight=camera_weight,
+            )
 
             # ── Loss spike / NaN guard ────────────────────────────────────
             spike_thresh = float(train_cfg.get("loss_spike_threshold", 50.0))
@@ -173,7 +184,11 @@ def run_epoch(
                             if isinstance(v, torch.Tensor) and not torch.isfinite(v).all()]
                 print(f"[skip] step {step}  loss={float(loss):.4f}  "
                       f"non-finite outputs: {nan_keys}")
-                optimizer.zero_grad(set_to_none=True)
+                # During gradient accumulation, DO NOT zero gradients — just skip backward
+                # so the accumulated gradients from previous steps are preserved.
+                if (step + 1) % grad_accum_steps == 0:
+                    # Only zero at step boundary (end of accumulation window)
+                    optimizer.zero_grad(set_to_none=True)
                 continue
 
             if train:

@@ -36,7 +36,7 @@ def se3_inv(T: torch.Tensor) -> torch.Tensor:
     return T_inv
 
 EPS = 1e-8
-EPS_NORM = 1e-6
+EPS_NORM = 1e-4   # must be >= ~6e-5 (smallest normal fp16) so clamp works in fp16 too
 ACOS_EPS = 1e-4
 LOG_CONF_MIN = -3.0   # tightened: prevents runaway uncertainty / confidence collapse
 LOG_CONF_MAX =  3.0
