@@ -125,8 +125,8 @@ class FusionDecoder(nn.Module):
         x = self.fuse4(torch.cat([x, s4], dim=1))     # (B, hidden, H/4,  W/4)
 
         # ── Stage 4: s4 → H/2 ────────────────────────────────────────────
-        H2 = s4.shape[-2] * 2
-        W2 = s4.shape[-1] * 2
+        H2 = depth_mono.shape[-2] // 2
+        W2 = depth_mono.shape[-1] // 2
         x = F.interpolate(x, size=(H2, W2), mode="bilinear", align_corners=False)
         x = self.final_conv(x)                         # (B, hidden//2, H/2, W/2)
 
