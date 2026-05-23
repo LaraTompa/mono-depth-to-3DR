@@ -268,7 +268,7 @@ def camera_pose_loss(
 
     Parameters
     ----------
-    outputs        : DepthAlignNet output dict (must contain T_12_pred, T_c2w_1/2,
+    outputs        : DepthAlignNet output dict (must contain T_12_pred,
                      K_pred, log_conf_K, log_conf_pose)
     T_12_gt        : (B, 4, 4) ground-truth relative pose
     K_gt           : (B, 3, 3) ground-truth intrinsics, or None (skips K loss)
@@ -281,8 +281,6 @@ def camera_pose_loss(
     parts             : dict of float scalars for logging
     """
     T_12_pred    = outputs["T_12_pred"]     # (B, 4, 4)
-    T_c2w_1      = outputs["T_c2w_1"]       # (B, 4, 4)
-    T_c2w_2      = outputs["T_c2w_2"]       # (B, 4, 4)
     K_pred       = outputs["K_pred"]        # (B, 3, 3)
     s_pose_raw   = outputs["log_conf_pose"] # (B,)
     s_K_raw      = outputs["log_conf_K"]    # (B,)
@@ -329,8 +327,8 @@ def camera_pose_loss(
             l_K    = l_K_data.mean()                     # fixed conf = 1
 
     # ── Pose identity (round-trip) regulariser ────────────────────────────
-    # T_21 = T_c2w_1^{−1} @ T_c2w_2  (cam2→cam1 from absolute poses)
-    T_21_pred = se3_inv(T_c2w_1) @ T_c2w_2
+    # T_21 is predicted directly (swapped embed order), not derived by inversion.
+    T_21_pred = outputs["T_21_pred"]
     l_id      = pose_identity_loss(T_12_pred, T_21_pred)
 
     # ── Combine ───────────────────────────────────────────────────────────

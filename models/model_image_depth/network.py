@@ -37,8 +37,8 @@ from .geometry   import rot6d_to_matrix, svd_orthogonalize, se3_inv
 
 class CameraHead(nn.Module):
     """
-    Decode a single camera-token embedding into intrinsics, a camera-to-world
-    pose, and per-prediction confidence scores.
+    Decode a single camera-token embedding into intrinsics and a per-prediction
+    confidence score.  Weight-tied across both views (same physical camera).
 
     Intrinsics — normalised by image size so the head is resolution-agnostic:
       fx = (softplus(·) + 0.3) * W   →  always positive; default ≈ 0.99 W
@@ -46,23 +46,8 @@ class CameraHead(nn.Module):
       cx = sigmoid(·) * W            →  ∈ (0, W); default = 0.5 W
       cy = sigmoid(·) * H
 
-    Pose — camera-to-world (ScanNet convention):
-      Rotation: raw 3×3 output projected onto SO(3) via SVD Procrustes
-        (Shiu & Ahmad, 1987; Umeyama, 1991).  SVD is chosen over the 6-D
-        Gram-Schmidt approach because it handles degenerate / near-zero
-        network outputs gracefully and is the true nearest-rotation solution
-        in Frobenius norm.  Bias is initialised to the flattened identity
-        matrix so the prior pose is the identity transform.
-      Translation: direct 3-D vector in world units (metres for ScanNet).
-
-    Confidence — log-scale scalars s_K, s_pose for heteroscedastic
-      uncertainty weighting (Kendall & Gal, NeurIPS 2017):
-        L_weighted = exp(−s) · L_data + s
-      The "+s" term prevents the network from collapsing to s → −∞.
-      Both initialised to 0 (σ = 1, neutral weighting at start).
-
-    The head is shared (weight-tied) across both views: the same camera
-    is assumed for all views in a pair.
+    Confidence — log-scale scalar s_K for heteroscedastic uncertainty weighting
+      (Kendall & Gal, NeurIPS 2017).  Initialised to 0 (σ = 1, neutral weighting).
     """
 
     def __init__(self, feat_dim: int, hidden: int = 256):
@@ -73,41 +58,22 @@ class CameraHead(nn.Module):
             nn.Linear(hidden, hidden),
             nn.GELU(),
         )
-        self.to_intrinsics    = nn.Linear(hidden, 4)    # fx_n, fy_n, cx_n, cy_n
-        self.to_pose          = nn.Linear(hidden, 9)    # 6D rotation + 3D translation
-        self.to_log_conf_K    = nn.Linear(hidden, 1)    # log-confidence for intrinsics
-        self.to_log_conf_pose = nn.Linear(hidden, 1)    # log-confidence for pose
+        self.to_intrinsics = nn.Linear(hidden, 4)   # fx_n, fy_n, cx_n, cy_n
+        self.to_log_conf_K = nn.Linear(hidden, 1)   # log-confidence for intrinsics
 
-        # Intrinsics: zero init → softplus(0)+0.3≈0.99 focal, sigmoid(0)=0.5 pp.
+        # Zero init → softplus(0)+0.3≈0.99 focal, sigmoid(0)=0.5 pp.
         nn.init.zeros_(self.to_intrinsics.weight)
         nn.init.zeros_(self.to_intrinsics.bias)
 
-        # Rotation: use 6D representation (Zhou et al. 2019) via rot6d_to_matrix.
-        # Bias = identity in 6D [col0 | col1 of I] = [1,0,0, 0,1,0] + zero translation.
-        # This avoids the SVD backward instability that occurs when singular values
-        # are equal (as with the identity matrix), which produces NaN gradients.
-        nn.init.zeros_(self.to_pose.weight)
-        with torch.no_grad():
-            self.to_pose.bias.copy_(
-                torch.tensor([1., 0., 0., 0., 1., 0.,   # identity in 6D
-                               0., 0., 0.])               # zero translation
-            )
-
         # Confidence: zero init → log_conf=0 → σ=1 (no scaling at start).
-        for layer in (self.to_log_conf_K, self.to_log_conf_pose):
-            nn.init.zeros_(layer.weight)
-            nn.init.zeros_(layer.bias)
+        nn.init.zeros_(self.to_log_conf_K.weight)
+        nn.init.zeros_(self.to_log_conf_K.bias)
 
     def forward(self, cam_embed: torch.Tensor, H: int, W: int) -> dict:
         """
         cam_embed : (B, feat_dim)
         H, W      : original image height / width (pixels)
-        Returns {
-            "K":             (B, 3, 3),
-            "T_c2w":         (B, 4, 4),
-            "log_conf_K":    (B,)   log-confidence for intrinsics,
-            "log_conf_pose": (B,)   log-confidence for pose,
-        }
+        Returns { "K": (B, 3, 3), "log_conf_K": (B,) }
         """
         h    = self.mlp(cam_embed)                           # (B, hidden)
         intr = self.to_intrinsics(h)                         # (B, 4)
@@ -123,24 +89,72 @@ class CameraHead(nn.Module):
         K[:, 0, 2] = cx;  K[:, 1, 2] = cy
         K[:, 2, 2] = 1.0
 
-        pose_raw = self.to_pose(h)                           # (B, 9)
-        R        = rot6d_to_matrix(pose_raw[:, :6])          # (B, 3, 3) ∈ SO(3)  — Gram-Schmidt
-        t        = pose_raw[:, 6:]                           # (B, 3)
+        log_conf_K = self.to_log_conf_K(h).squeeze(-1)       # (B,)
+        return {"K": K, "log_conf_K": log_conf_K}
 
-        T_c2w = (torch.eye(4, device=cam_embed.device, dtype=cam_embed.dtype)
-                     .unsqueeze(0).expand(B, -1, -1).clone())
-        T_c2w[:, :3, :3] = R
-        T_c2w[:, :3,  3] = t
 
-        log_conf_K    = self.to_log_conf_K(h).squeeze(-1)    # (B,)
-        log_conf_pose = self.to_log_conf_pose(h).squeeze(-1) # (B,)
+# ---------------------------------------------------------------------------
+# Relative pose prediction head
+# ---------------------------------------------------------------------------
 
-        return {
-            "K":             K,
-            "T_c2w":         T_c2w,
-            "log_conf_K":    log_conf_K,
-            "log_conf_pose": log_conf_pose,
-        }
+class RelativePoseHead(nn.Module):
+    """
+    Predict the relative SE(3) transform T_12 (cam1 → cam2) *directly* from
+    the concatenated camera embeddings of both views.
+
+    Input  : cat([cam_embed_1, cam_embed_2], dim=-1)  (B, 2*feat_dim)
+    Output : T_12  (B, 4, 4)  — rotation via 6-D Gram-Schmidt (Zhou et al. 2019),
+                                 translation as a direct 3-D vector.
+             log_conf_pose (B,) — heteroscedastic log-confidence (Kendall & Gal 2017).
+
+    By concatenating both embeddings the head sees the relationship between
+    views in a single forward pass, rather than predicting two independent
+    absolute world-frame poses whose difference we then hope is meaningful.
+    The ordering [embed_1, embed_2] encodes the 1→2 direction so the same
+    head with swapped inputs gives T_21.
+
+    Initialised so the prior pose is the identity transform and confidence = 1.
+    """
+
+    def __init__(self, in_dim: int, hidden: int = 256):
+        super().__init__()
+        self.mlp = nn.Sequential(
+            nn.Linear(in_dim, hidden),
+            nn.GELU(),
+            nn.Linear(hidden, hidden),
+            nn.GELU(),
+        )
+        self.to_pose          = nn.Linear(hidden, 9)   # 6D rotation + 3D translation
+        self.to_log_conf_pose = nn.Linear(hidden, 1)
+
+        # Bias → identity rotation in 6-D repr + zero translation.
+        nn.init.zeros_(self.to_pose.weight)
+        with torch.no_grad():
+            self.to_pose.bias.copy_(
+                torch.tensor([1., 0., 0., 0., 1., 0.,   # identity in 6D
+                               0., 0., 0.])               # zero translation
+            )
+        nn.init.zeros_(self.to_log_conf_pose.weight)
+        nn.init.zeros_(self.to_log_conf_pose.bias)
+
+    def forward(self, rel_embed: torch.Tensor) -> dict:
+        """
+        rel_embed : (B, 2*feat_dim) — cat([cam_embed_1, cam_embed_2])
+        Returns { "T_12": (B, 4, 4), "log_conf_pose": (B,) }
+        """
+        h        = self.mlp(rel_embed)                        # (B, hidden)
+        pose_raw = self.to_pose(h)                            # (B, 9)
+        R        = rot6d_to_matrix(pose_raw[:, :6])           # (B, 3, 3) ∈ SO(3)
+        t        = pose_raw[:, 6:]                            # (B, 3)
+
+        B = rel_embed.shape[0]
+        T_12 = (torch.eye(4, device=rel_embed.device, dtype=rel_embed.dtype)
+                    .unsqueeze(0).expand(B, -1, -1).clone())
+        T_12[:, :3, :3] = R
+        T_12[:, :3,  3] = t
+
+        log_conf_pose = self.to_log_conf_pose(h).squeeze(-1)  # (B,)
+        return {"T_12": T_12, "log_conf_pose": log_conf_pose}
 
 
 class DepthAlignNet(nn.Module):
@@ -200,8 +214,13 @@ class DepthAlignNet(nn.Module):
         self.camera_token = nn.Parameter(torch.empty(1, 1, feat_dim))
         nn.init.trunc_normal_(self.camera_token, std=0.02)
 
-        # Weight-tied prediction head (same physical camera for both views).
+        # Weight-tied intrinsics head (same physical camera for both views).
         self.camera_head = CameraHead(feat_dim, hidden=camera_head_hidden)
+
+        # Relative pose head — predicts T_12 directly from both embeddings.
+        # Takes cat([cam_embed_1, cam_embed_2]) so it directly encodes the
+        # view relationship rather than two independent absolute poses.
+        self.relative_pose_head = RelativePoseHead(2 * feat_dim, hidden=camera_head_hidden)
 
     # ------------------------------------------------------------------
     # Intrinsics scaling
@@ -308,13 +327,20 @@ class DepthAlignNet(nn.Module):
         # ── Camera predictions from attended tokens ───────────────────────
         cam1 = self.camera_head(cam_embed_1, H, W)
         cam2 = self.camera_head(cam_embed_2, H, W)
-        # Average intrinsics and confidence scores (same physical camera)
-        K_pred         = (cam1["K"]             + cam2["K"])             * 0.5
-        log_conf_K     = (cam1["log_conf_K"]    + cam2["log_conf_K"])    * 0.5
-        log_conf_pose  = (cam1["log_conf_pose"] + cam2["log_conf_pose"]) * 0.5
-        # Relative pose from absolute camera-to-world poses
-        T_12_pred = se3_inv(cam2["T_c2w"]) @ cam1["T_c2w"]
-        #T_12_pred = torch.linalg.inv(cam2["T_c2w"]) @ cam1["T_c2w"]
+        # Average intrinsics (same physical camera for both views)
+        K_pred     = (cam1["K"] + cam2["K"]) * 0.5
+        log_conf_K = (cam1["log_conf_K"] + cam2["log_conf_K"]) * 0.5
+        # Predict relative pose directly from both embeddings — avoids the
+        # underconstrained absolute-pose regression with no world reference.
+        # Swapping the concatenation order gives T_21 from the same shared
+        # weights, so the head learns a consistent notion of direction.
+        rel_embed_12  = torch.cat([cam_embed_1, cam_embed_2], dim=-1)  # (B, 2C)
+        rel_embed_21  = torch.cat([cam_embed_2, cam_embed_1], dim=-1)  # (B, 2C)
+        rel_pose_12   = self.relative_pose_head(rel_embed_12)
+        rel_pose_21   = self.relative_pose_head(rel_embed_21)
+        T_12_pred     = rel_pose_12["T_12"]                            # (B, 4, 4)
+        T_21_pred     = rel_pose_21["T_12"]                            # (B, 4, 4)
+        log_conf_pose = rel_pose_12["log_conf_pose"]                   # (B,)
 
         # ── Iterative refinement (at s16 resolution) ─────────────────────
         if self.use_refinement:
@@ -362,9 +388,8 @@ class DepthAlignNet(nn.Module):
             "bias2":        bias2,
             # Camera predictions — fed back as K / T_12 on the next iteration
             "K_pred":        K_pred,               # (B, 3, 3)
-            "T_12_pred":     T_12_pred,             # (B, 4, 4)  cam1→cam2
-            "T_c2w_1":       cam1["T_c2w"],         # (B, 4, 4)  cam1→world
-            "T_c2w_2":       cam2["T_c2w"],         # (B, 4, 4)  cam2→world
+            "T_12_pred":     T_12_pred,             # (B, 4, 4)  cam1→cam2  (direct)
+            "T_21_pred":     T_21_pred,             # (B, 4, 4)  cam2→cam1  (direct, swapped embeds)
             "log_conf_K":    log_conf_K,            # (B,)  log-confidence for intrinsics
             "log_conf_pose": log_conf_pose,         # (B,)  log-confidence for pose
         }
