@@ -55,11 +55,13 @@ def run_epoch(
     writer=None,          # torch.utils.tensorboard.SummaryWriter or None
     use_confidence: bool = True,
     camera_weight: float | None = None,
+    scaler=None,          # torch.amp.GradScaler or None (enables AMP when set)
 ) -> dict:
     model.train(train)
     train_cfg = cfg["train"]
-    log_every = int(train_cfg.get("log_every", 50))
-    grad_clip = train_cfg.get("grad_clip")
+    log_every        = int(train_cfg.get("log_every", 50))
+    grad_clip        = train_cfg.get("grad_clip")
+    grad_accum_steps = int(train_cfg.get("gradient_accumulation_steps", 1))
 
     totals    = {
         "loss": 0.0,
@@ -133,35 +135,36 @@ def run_epoch(
                          .unsqueeze(0).expand(B, -1, -1).contiguous())
 
             num_pose_iters = train_cfg.get("num_pose_iters", 2)
-            for pose_it in range(num_pose_iters):
-                outputs = model(
-                    rgb1=rgb1,
-                    rgb2=rgb2,
-                    depth_mono1=depth_mono1,
-                    depth_mono2=depth_mono2,
-                    T_12=T_12_iter,
-                    K=K_iter,
-                )
-                if pose_it < num_pose_iters - 1:
-                    # Feed predictions into next iteration.
-                    # .detach() avoids backpropagating through the unrolled
-                    # initialisation graph; remove to enable full unrolling.
-                    K_pred_it    = outputs["K_pred"].detach()
-                    T_pred_it    = outputs["T_12_pred"].detach()
-                    # Guard: only accept if both tensors are fully finite;
-                    # if NaN crept in, keep the previous-iteration values.
-                    if torch.isfinite(K_pred_it).all() and torch.isfinite(T_pred_it).all():
-                        K_iter    = K_pred_it
-                        T_12_iter = T_pred_it
-                    else:
-                        print(f"[NaN guard] iter {pose_it}: non-finite K/T pred "
-                              f"at step {step}; keeping previous init values.")
+            with torch.amp.autocast("cuda", enabled=(scaler is not None)):
+                for pose_it in range(num_pose_iters):
+                    outputs = model(
+                        rgb1=rgb1,
+                        rgb2=rgb2,
+                        depth_mono1=depth_mono1,
+                        depth_mono2=depth_mono2,
+                        T_12=T_12_iter,
+                        K=K_iter,
+                    )
+                    if pose_it < num_pose_iters - 1:
+                        # Feed predictions into next iteration.
+                        # .detach() avoids backpropagating through the unrolled
+                        # initialisation graph; remove to enable full unrolling.
+                        K_pred_it    = outputs["K_pred"].detach()
+                        T_pred_it    = outputs["T_12_pred"].detach()
+                        # Guard: only accept if both tensors are fully finite;
+                        # if NaN crept in, keep the previous-iteration values.
+                        if torch.isfinite(K_pred_it).all() and torch.isfinite(T_pred_it).all():
+                            K_iter    = K_pred_it
+                            T_12_iter = T_pred_it
+                        else:
+                            print(f"[NaN guard] iter {pose_it}: non-finite K/T pred "
+                                  f"at step {step}; keeping previous init values.")
 
-            loss, breakdown = compute_total_loss(
-                outputs, batch, cfg.get("loss", {}), K_iter,
-                use_confidence=use_confidence,
-                camera_weight=camera_weight,
-            )
+                loss, breakdown = compute_total_loss(
+                    outputs, batch, cfg.get("loss", {}), K_iter,
+                    use_confidence=use_confidence,
+                    camera_weight=camera_weight,
+                )
 
             # ── Loss spike / NaN guard ────────────────────────────────────
             spike_thresh = float(train_cfg.get("loss_spike_threshold", 50.0))
@@ -174,8 +177,18 @@ def run_epoch(
                 continue
 
             if train:
-                loss.backward()
-                optimizer_step(optimizer, model, grad_clip)
+                # Divide by accumulation steps so the effective gradient
+                # magnitude stays the same regardless of grad_accum_steps.
+                accum_loss = loss / grad_accum_steps
+                if scaler is not None:
+                    scaler.scale(accum_loss).backward()
+                else:
+                    accum_loss.backward()
+                # Only update weights at the end of each accumulation window
+                # (or on the very last batch of the epoch).
+                is_last_batch = (step + 1 == len(loader))
+                if (step + 1) % grad_accum_steps == 0 or is_last_batch:
+                    optimizer_step(optimizer, model, grad_clip, scaler=scaler)
 
             totals["loss"]       += loss.item()
             totals["depth"]      += breakdown.get("depth",     0.0)
@@ -342,6 +355,8 @@ def train(cfg: dict, arch_cfg: dict, resume: str | None = None) -> None:
 
     optimizer  = build_optimizer(cfg, model)
     scheduler  = build_scheduler(cfg, optimizer, num_epochs=int(train_cfg["epochs"]))
+    # AMP GradScaler — only meaningful on CUDA; None on CPU (disables AMP transparently).
+    scaler = torch.amp.GradScaler("cuda") if torch.cuda.is_available() else None
 
     # --- resume ---
     start_epoch = 1
@@ -385,14 +400,14 @@ def train(cfg: dict, arch_cfg: dict, resume: str | None = None) -> None:
 
         train_metrics = run_epoch(
             model, train_loader, optimizer, cfg, device, train=True, epoch=epoch,
-            writer=writer, use_confidence=use_conf, camera_weight=cam_w,
+            writer=writer, use_confidence=use_conf, camera_weight=cam_w, scaler=scaler,
         )
 
         val_metrics = {}
         if epoch % val_every == 0:
             val_metrics = run_epoch(
                 model, val_loader, None, cfg, device, train=False, epoch=epoch,
-                writer=writer, use_confidence=use_conf, camera_weight=cam_w,
+                writer=writer, use_confidence=use_conf, camera_weight=cam_w, scaler=scaler,
             )
 
         # --- scheduler step ---

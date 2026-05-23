@@ -13,7 +13,7 @@ dataset:
 # DataLoader
 # ---------------------------------------------------------------------------
 loader:
-  batch_size: 8
+  batch_size: 4
   num_workers: 4
   pin_memory: true
   drop_last: true
@@ -63,6 +63,7 @@ train:
   loss_spike_threshold: 50.0     # skip batch if loss exceeds this value
   patience: 20
   num_pose_iters: 1              # number of pose-refinement iterations per batch
+  gradient_accumulation_steps: 2 # accumulate grads over N batches (effective batch = batch_size * N)
 
 # ---------------------------------------------------------------------------
 # Checkpointing

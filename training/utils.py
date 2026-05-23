@@ -64,14 +64,23 @@ def build_optimizer(cfg: dict, model: torch.nn.Module) -> torch.optim.Optimizer:
     else:
         raise ValueError(f"Unknown optimizer type: '{kind}'")
     
-def optimizer_step(optimizer, model, grad_clip) -> None:
+def optimizer_step(optimizer, model, grad_clip, scaler=None) -> None:
+    # When using AMP, unscale before clipping so norms are in fp32 scale.
+    if scaler is not None:
+        scaler.unscale_(optimizer)
     if grad_clip:
         total_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
         if not torch.isfinite(total_norm):
             print(f"[NaN grad] total_norm={total_norm:.4f} — skipping update")
             optimizer.zero_grad(set_to_none=True)
+            if scaler is not None:
+                scaler.update()   # must call update() even when skipping
             return
-    optimizer.step()
+    if scaler is not None:
+        scaler.step(optimizer)
+        scaler.update()
+    else:
+        optimizer.step()
     optimizer.zero_grad(set_to_none=True)
 
 
