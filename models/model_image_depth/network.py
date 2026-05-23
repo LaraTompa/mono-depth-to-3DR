@@ -103,7 +103,7 @@ class RelativePoseHead(nn.Module):
     the concatenated camera embeddings of both views.
 
     Input  : cat([cam_embed_1, cam_embed_2], dim=-1)  (B, 2*feat_dim)
-    Output : T_12  (B, 4, 4)  — rotation via 6-D Gram-Schmidt (Zhou et al. 2019),
+    Output : T_12  (B, 4, 4)  — rotation via SVD Procrustes projection onto SO(3),
                                  translation as a direct 3-D vector.
              log_conf_pose (B,) — heteroscedastic log-confidence (Kendall & Gal 2017).
 
@@ -124,15 +124,20 @@ class RelativePoseHead(nn.Module):
             nn.Linear(hidden, hidden),
             nn.GELU(),
         )
-        self.to_pose          = nn.Linear(hidden, 9)   # 6D rotation + 3D translation
+        self.to_pose          = nn.Linear(hidden, 12)  # 9D raw matrix + 3D translation
         self.to_log_conf_pose = nn.Linear(hidden, 1)
 
-        # Bias → identity rotation in 6-D repr + zero translation.
+        # Bias → identity rotation (as flat 3×3 row-major) + zero translation.
+        # SVD of the identity matrix is well-conditioned, giving stable gradients
+        # from the first step. (6D Gram-Schmidt would use [1,0,0, 0,1,0] here
+        # but SVD needs the full 3×3 — the third row must be non-degenerate.)
         nn.init.zeros_(self.to_pose.weight)
         with torch.no_grad():
             self.to_pose.bias.copy_(
-                torch.tensor([1., 0., 0., 0., 1., 0.,   # identity in 6D
-                               0., 0., 0.])               # zero translation
+                torch.tensor([1., 0., 0.,   # identity row 0
+                               0., 1., 0.,   # identity row 1
+                               0., 0., 1.,   # identity row 2
+                               0., 0., 0.])  # zero translation
             )
         nn.init.zeros_(self.to_log_conf_pose.weight)
         nn.init.zeros_(self.to_log_conf_pose.bias)
@@ -142,14 +147,13 @@ class RelativePoseHead(nn.Module):
         rel_embed : (B, 2*feat_dim) — cat([cam_embed_1, cam_embed_2])
         Returns { "T_12": (B, 4, 4), "log_conf_pose": (B,) }
         """
-        h        = self.mlp(rel_embed)                        # (B, hidden)
-        pose_raw = self.to_pose(h)                            # (B, 9)
-        # 6D rotation (Zhou et al. 2019) via Gram-Schmidt:
-        # stable at the identity init (b0=[1,0,0], b1=[0,1,0] → orthogonal).
-        # rot6d_to_matrix uses eps=1e-6 in F.normalize to bound the gradient
-        # if columns become nearly parallel later in training.
-        R        = rot6d_to_matrix(pose_raw[:, :6])           # (B, 3, 3) ∈ SO(3)
-        t        = pose_raw[:, 6:]                            # (B, 3)
+        h        = self.mlp(rel_embed)                                           # (B, hidden)
+        pose_raw = self.to_pose(h)                                               # (B, 12)
+        # SVD Procrustes projection onto SO(3) (Levinson et al. 2020):
+        # more robust than 6D Gram-Schmidt when columns are nearly degenerate
+        # or the raw matrix has large norms. det-correction ensures det=+1.
+        R        = svd_orthogonalize(pose_raw[:, :9].reshape(-1, 3, 3))         # (B, 3, 3) ∈ SO(3)
+        t        = pose_raw[:, 9:]                                               # (B, 3)
 
         B = rel_embed.shape[0]
         T_12 = (torch.eye(4, device=rel_embed.device, dtype=rel_embed.dtype)

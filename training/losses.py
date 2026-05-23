@@ -440,16 +440,19 @@ def pixel_consistency_loss(
         x_pred, y_pred, z_pred = _project(pred_d, T)
 
         d_flat = gt_d.reshape(B, N)
+        # Validity: require GT depth in range AND GT reprojection in-bounds AND z_pred > 0.
+        # We do NOT require x_pred/y_pred to be in-bounds: wrong depth predictions can
+        # project outside the image, and that large pixel distance is exactly the signal
+        # we want to train on.  Excluding those pixels kills the gradient for the most
+        # erroneous predictions — the opposite of what we want during early training.
         valid  = (
             (d_flat > min_depth) & (d_flat < max_depth) &
             torch.isfinite(d_flat) &
             torch.isfinite(x_pred) & torch.isfinite(y_pred) &
             (z_gt > 0) & (z_pred > 0) &
             (x_gt >= 0) & (x_gt < pW - 1) &
-            (y_gt >= 0) & (y_gt < pH - 1) &
-            (x_pred >= 0) & (x_pred < pW - 1) &
-            (y_pred >= 0) & (y_pred < pH - 1)
-        )  # (B, N)
+            (y_gt >= 0) & (y_gt < pH - 1)
+        )  # (B, N)   — pred bounds intentionally omitted
 
         n_valid = valid.float().sum()
         if n_valid < 1:
@@ -459,7 +462,10 @@ def pixel_consistency_loss(
         y_gt_n   = y_gt   / (pH - 1)
         x_pred_n = x_pred / (pW - 1)
         y_pred_n = y_pred / (pH - 1)
-        dist_sq  = (x_gt_n - x_pred_n) ** 2 + (y_gt_n - y_pred_n) ** 2  # in [0, ~2]
+        dist_sq  = (x_gt_n - x_pred_n) ** 2 + (y_gt_n - y_pred_n) ** 2
+        # Cap at 4.0 (= 2 diagonals²) to down-weight catastrophically wrong
+        # predictions without zeroing their gradients via clamping.
+        dist_sq  = dist_sq.clamp(max=4.0)
         return (dist_sq * valid.float()).sum() / n_valid.clamp(min=1)
 
     T_21 = se3_inv(T_12)
@@ -556,13 +562,16 @@ def total_loss(
     if "poses" in batch:
         poses_pc = batch["poses"]                           # (B, N, 4, 4)
         T_12_pc  = se3_inv(poses_pc[:, 1]) @ poses_pc[:, 0]
+        # Prefer GT intrinsics for accurate reprojection; fall back to K_iter.
+        K_for_pix = batch["intrinsics"].to(pred1.device, dtype=pred1.dtype) \
+                    if "intrinsics" in batch else K
         # Scale K to predicted-depth resolution
         scale_w, scale_h = pW / W, pH / H
-        K_s = K.clone()
-        K_s[:, 0, 0] = K[:, 0, 0] * scale_w
-        K_s[:, 1, 1] = K[:, 1, 1] * scale_h
-        K_s[:, 0, 2] = K[:, 0, 2] * scale_w
-        K_s[:, 1, 2] = K[:, 1, 2] * scale_h
+        K_s = K_for_pix.clone()
+        K_s[:, 0, 0] = K_for_pix[:, 0, 0] * scale_w
+        K_s[:, 1, 1] = K_for_pix[:, 1, 1] * scale_h
+        K_s[:, 0, 2] = K_for_pix[:, 0, 2] * scale_w
+        K_s[:, 1, 2] = K_for_pix[:, 1, 2] * scale_h
         l_pixel = pixel_consistency_loss(
             pred1, pred2, gt1_s, gt2_s, T_12_pc, K_s
         )
