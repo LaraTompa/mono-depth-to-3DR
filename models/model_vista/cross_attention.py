@@ -32,17 +32,17 @@ exactly so that weights from the public checkpoint
 can be loaded without any key renaming.  That checkpoint stores decoder
 blocks under the key pattern:
 
-    decoder.dec_blocks.{i}.norm1.weight
-    decoder.dec_blocks.{i}.attn.qkv.weight        (self-attn, merged QKV)
-    decoder.dec_blocks.{i}.attn.proj.weight
-    decoder.dec_blocks.{i}.norm2.weight
-    decoder.dec_blocks.{i}.cross_attn.projq.weight
-    decoder.dec_blocks.{i}.cross_attn.projk.weight
-    decoder.dec_blocks.{i}.cross_attn.projv.weight
-    decoder.dec_blocks.{i}.cross_attn.proj.weight
-    decoder.dec_blocks.{i}.norm3.weight
-    decoder.dec_blocks.{i}.mlp.fc1.weight
-    decoder.dec_blocks.{i}.mlp.fc2.weight
+    dec_blocks.{i}.norm1.weight
+    dec_blocks.{i}.attn.qkv.weight        (self-attn, merged QKV)
+    dec_blocks.{i}.attn.proj.weight
+    dec_blocks.{i}.norm2.weight
+    dec_blocks.{i}.cross_attn.projq.weight
+    dec_blocks.{i}.cross_attn.projk.weight
+    dec_blocks.{i}.cross_attn.projv.weight
+    dec_blocks.{i}.cross_attn.proj.weight
+    dec_blocks.{i}.norm3.weight
+    dec_blocks.{i}.mlp.fc1.weight
+    dec_blocks.{i}.mlp.fc2.weight
 
 Dimension note
 --------------
@@ -250,9 +250,12 @@ class CrossAttentionDecoder(nn.Module):
         Initialise cross-attention blocks from a MASt3R or DUSt3R checkpoint.
 
         The checkpoint stores decoder blocks under:
-            decoder.dec_blocks.{i}.<submodule>.<param>
+            dec_blocks.{i}.<submodule>.<param>
 
-        Only the first min(num_blocks, available_blocks) are loaded.
+        Note: MASt3R also contains a second decoder branch under dec_blocks2
+        (used for view-2 in the original asymmetric model).  This loader uses
+        only dec_blocks because our CrossAttentionDecoder is weight-tied across
+        views (the same block instance processes both views).
         Missing or shape-mismatched keys are skipped with a warning; the
         method never raises an exception on partial matches.
 
@@ -268,7 +271,7 @@ class CrossAttentionDecoder(nn.Module):
 
         total_loaded = 0
         for i, block in enumerate(self.dec_blocks):
-            prefix     = f"decoder.dec_blocks.{i}."
+            prefix     = f"dec_blocks.{i}."
             block_sd   = {
                 k[len(prefix):]: v
                 for k, v in state.items()

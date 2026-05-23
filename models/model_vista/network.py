@@ -16,8 +16,7 @@ Output contract (identical to V1 — same loss / metric code)
   confidence1, confidence2: (B, 1, H/2, W/2)
   depth1_iters, depth2_iters: []   (no iterative refinement in this model)
   scale1/bias1/scale2/bias2  : None
-  K_pred, T_12_pred      : (B,3,3), (B,4,4)
-  T_c2w_1, T_c2w_2       : (B, 4, 4)
+  K_pred, T_12_pred, T_21_pred : (B,3,3), (B,4,4), (B,4,4)
   log_conf_K, log_conf_pose: (B,)
 
 Architecture
