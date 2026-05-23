@@ -255,9 +255,11 @@ def rot6d_to_matrix(v: torch.Tensor) -> torch.Tensor:
     """
     b0 = v[:, 0:3]                                          # first column
     b1 = v[:, 3:6]                                          # second column (raw)
-    b0 = F.normalize(b0, dim=-1)                            # unit first column
+    b0 = F.normalize(b0, dim=-1, eps=1e-6)                  # unit first column
     b1 = b1 - (b1 * b0).sum(dim=-1, keepdim=True) * b0     # Gram-Schmidt
-    b1 = F.normalize(b1, dim=-1)
+    b1 = F.normalize(b1, dim=-1, eps=1e-6)                  # eps=1e-6: bounds gradient at 1e6×
+                                                             # vs 1e12× default — avoids NaN if
+                                                             # columns become nearly parallel
     b2 = torch.cross(b0, b1, dim=-1)                        # third column
     return torch.stack([b0, b1, b2], dim=-1)                # (B, 3, 3) — columns
 

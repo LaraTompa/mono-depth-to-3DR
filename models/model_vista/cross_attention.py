@@ -129,6 +129,10 @@ class Mlp(nn.Module):
         hidden = int(dim * mlp_ratio)
         self.fc1 = nn.Linear(dim, hidden, bias=True)
         self.fc2 = nn.Linear(hidden, dim, bias=True)
+        # Small init on output projection → residual near zero at init,
+        # preventing random-weight blocks from producing large activations.
+        nn.init.normal_(self.fc2.weight, std=0.02)
+        nn.init.zeros_(self.fc2.bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.fc2(F.gelu(self.fc1(x)))

@@ -36,7 +36,11 @@ def se3_inv(T: torch.Tensor) -> torch.Tensor:
     return T_inv
 
 EPS = 1e-8
-EPS_NORM = 1e-4   # must be >= ~6e-5 (smallest normal fp16) so clamp works in fp16 too
+EPS_NORM = 0.01   # floor for translation-direction normalisation.
+                  # 1e-4 caused 10 000× gradient amplification when t_pred ≈ 0 at init,
+                  # which flowed back through shared cross-attn and spiked the depth loss.
+                  # 0.01 (1 cm) bounds the amplification at 100× while still correctly
+                  # normalising GT translations as small as ~1 cm baselines.
 ACOS_EPS = 1e-4
 LOG_CONF_MIN = -3.0   # tightened: prevents runaway uncertainty / confidence collapse
 LOG_CONF_MAX =  3.0
@@ -98,7 +102,7 @@ def smooth_loss(
     Penalise depth gradient magnitude, down-weighted at image edges.
     Normalise depth by mean to handle scale ambiguity.
     """
-    mean_d = depth.mean(dim=[2, 3], keepdim=True).clamp(min=EPS)
+    mean_d = depth.mean(dim=[2, 3], keepdim=True).clamp(min=0.1)  # 0.1m floor; EPS would let d_norm → 1e5+
     d_norm = depth / mean_d
 
     dx_d = (d_norm[:, :, :, 1:] - d_norm[:, :, :, :-1]).abs()

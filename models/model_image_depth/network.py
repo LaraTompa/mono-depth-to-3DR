@@ -144,6 +144,10 @@ class RelativePoseHead(nn.Module):
         """
         h        = self.mlp(rel_embed)                        # (B, hidden)
         pose_raw = self.to_pose(h)                            # (B, 9)
+        # 6D rotation (Zhou et al. 2019) via Gram-Schmidt:
+        # stable at the identity init (b0=[1,0,0], b1=[0,1,0] → orthogonal).
+        # rot6d_to_matrix uses eps=1e-6 in F.normalize to bound the gradient
+        # if columns become nearly parallel later in training.
         R        = rot6d_to_matrix(pose_raw[:, :6])           # (B, 3, 3) ∈ SO(3)
         t        = pose_raw[:, 6:]                            # (B, 3)
 

@@ -41,8 +41,8 @@ loss:
   depth:            1.0    # scale-invariant log loss (supervised)
   smooth:           0.05   # edge-aware smoothness
   iter_supervision: 0.0    # deep supervision over refinement iterations
-  camera:           0.1    # weight for combined camera-pose + intrinsics loss
-  camera_warmup_epochs: 20 # ramp camera weight 0 → final over this many epochs
+  camera:           0.3    # was 0.1 — pose needs stronger signal vs depth (1.0)
+  camera_warmup_epochs: 5  # was 20 — 20 epochs wasted 40% of training with near-zero camera weight
   pixel_consistency: 0.005  # multiview reprojection consistency
   identity:         0.05   # pose round-trip regulariser weight
   K_reg: 0.0             # was 0.0 — intrinsics supervision helps anchor pose
