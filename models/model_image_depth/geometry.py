@@ -278,27 +278,29 @@ def svd_orthogonalize(M: torch.Tensor) -> torch.Tensor:
     M : (B, 3, 3)   — raw (not necessarily orthonormal) matrix
     Returns R : (B, 3, 3)  ∈ SO(3)
     """
-    # torch.linalg.svd and torch.linalg.det have no fp16 CUDA kernels.
-    # Under AMP autocast the @ operator would silently cast intermediate results
-    # back to fp16, so we promote once here and guard every linalg call.
     orig_dtype = M.dtype
-    M = M.float()
+    # Disable AMP autocast entirely for this block. Otherwise, the ATen 
+    # dispatcher intercepts the @ operator and silently downcasts float32
+    # tensors back to fp16 before passing them to the next function.
+    with torch.autocast("cuda", enabled=False):
+        M = M.float()
 
-    # Guard: replace any sample whose matrix contains NaN/Inf with identity
-    # so that a single bad sample does not corrupt the whole batch via SVD.
-    bad = ~torch.isfinite(M).all(dim=-1).all(dim=-1)   # (B,)
-    if bad.any():
-        M = M.clone()
-        M[bad] = torch.eye(3, device=M.device, dtype=torch.float32)
-    U, _, Vh = torch.linalg.svd(M)                         # float32; M = U@diag(S)@Vh
-    # det(U @ Vh) ∈ {±1}; flip the last singular direction when −1
-    # so that det(R) = det(U) · det(D) · det(Vh) = +1 always.
-    # Explicit .float() guards against AMP re-casting the @ result to fp16.
-    d = torch.linalg.det(U.float() @ Vh.float())           # (B,)
-    D = torch.diag_embed(
-        torch.stack([torch.ones_like(d), torch.ones_like(d), d], dim=-1)
-    )                                                        # (B, 3, 3)  float32
-    return (U.float() @ D @ Vh.float()).to(orig_dtype)      # (B, 3, 3) ∈ SO(3)
+        # Guard: replace any sample whose matrix contains NaN/Inf with identity
+        # so that a single bad sample does not corrupt the whole batch via SVD.
+        bad = ~torch.isfinite(M).all(dim=-1).all(dim=-1)   # (B,)
+        if bad.any():
+            M = M.clone()
+            M[bad] = torch.eye(3, device=M.device, dtype=torch.float32)
+        U, _, Vh = torch.linalg.svd(M)                         # U, S, Vh; M = U@diag(S)@Vh
+        # det(U @ Vh) ∈ {±1}; flip the last singular direction when −1
+        # so that det(R) = det(U) · det(D) · det(Vh) = +1 always.
+        d = torch.linalg.det(U @ Vh)                           # (B,)
+        D = torch.diag_embed(
+            torch.stack([torch.ones_like(d), torch.ones_like(d), d], dim=-1)
+        )                                                        # (B, 3, 3)
+        R = U @ D @ Vh                                         # float32
+
+    return R.to(orig_dtype)                                  # (B, 3, 3) ∈ SO(3)
 
 def se3_inv(T: torch.Tensor) -> torch.Tensor:
     """Numerically stable inverse for SE(3) matrices (B, 4, 4)."""
