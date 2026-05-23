@@ -302,6 +302,14 @@ def camera_pose_loss(
     # ── Normalised translation loss ───────────────────────────────────────
     l_trans = normalized_translation_loss(t_pred, t_gt)  # (B,)
 
+    # ── Translation scale loss ──────────────────────────────────────────
+    # The normalized loss only supervises direction. We add an L2 penalty on log-scale.
+    scale_pred = t_pred.norm(dim=-1).clamp(min=EPS_NORM)
+    scale_gt   = t_gt.norm(dim=-1).clamp(min=EPS_NORM)
+    l_trans_scale = F.l1_loss(torch.log(scale_pred), torch.log(scale_gt), reduction='none')
+
+    l_trans = l_trans + l_trans_scale * 0.5  # Weight scale error relative to angle
+
     # ── Confidence-weighted pose loss ─────────────────────────────────────
     w_rot   = float(weights.get("rot",   1.0))
     w_trans = float(weights.get("trans", 1.0))

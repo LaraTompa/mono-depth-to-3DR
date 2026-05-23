@@ -124,20 +124,18 @@ class RelativePoseHead(nn.Module):
             nn.Linear(hidden, hidden),
             nn.GELU(),
         )
-        self.to_pose          = nn.Linear(hidden, 12)  # 9D raw matrix + 3D translation
+        self.to_pose          = nn.Linear(hidden, 9)   # 6D rotation + 3D translation
         self.to_log_conf_pose = nn.Linear(hidden, 1)
 
-        # Bias → identity rotation (as flat 3×3 row-major) + zero translation.
-        # SVD of the identity matrix is well-conditioned, giving stable gradients
-        # from the first step. (6D Gram-Schmidt would use [1,0,0, 0,1,0] here
-        # but SVD needs the full 3×3 — the third row must be non-degenerate.)
+        # Bias → identity rotation in 6-D repr + small non-zero translation.
+        # Initializing translation strictly to 0 makes its norm 0, meaning
+        # normalized_translation_loss produces a math domain error or exactly
+        # 1.5708 (pi/2) because dot([0,0,0], GT) = 0. We shift it slightly.
         nn.init.zeros_(self.to_pose.weight)
         with torch.no_grad():
             self.to_pose.bias.copy_(
-                torch.tensor([1., 0., 0.,   # identity row 0
-                               0., 1., 0.,   # identity row 1
-                               0., 0., 1.,   # identity row 2
-                               0., 0., 0.])  # zero translation
+                torch.tensor([1., 0., 0., 0., 1., 0.,   # identity in 6D
+                               0., 0., 1e-4])             # non-zero translation
             )
         nn.init.zeros_(self.to_log_conf_pose.weight)
         nn.init.zeros_(self.to_log_conf_pose.bias)
@@ -148,12 +146,12 @@ class RelativePoseHead(nn.Module):
         Returns { "T_12": (B, 4, 4), "log_conf_pose": (B,) }
         """
         h        = self.mlp(rel_embed)                                           # (B, hidden)
-        pose_raw = self.to_pose(h)                                               # (B, 12)
-        # SVD Procrustes projection onto SO(3) (Levinson et al. 2020):
-        # more robust than 6D Gram-Schmidt when columns are nearly degenerate
-        # or the raw matrix has large norms. det-correction ensures det=+1.
-        R        = svd_orthogonalize(pose_raw[:, :9].reshape(-1, 3, 3))         # (B, 3, 3) ∈ SO(3)
-        t        = pose_raw[:, 9:]                                               # (B, 3)
+        pose_raw = self.to_pose(h)                                               # (B, 9)
+        # 6D rotation (Zhou et al. 2019) via Gram-Schmidt:
+        # Perfectly stable and avoids the NaN/Instability issues of SVD
+        # when initialized to exactly the identity matrix.
+        R        = rot6d_to_matrix(pose_raw[:, :6])                              # (B, 3, 3) ∈ SO(3)
+        t        = pose_raw[:, 6:]                                               # (B, 3)
 
         B = rel_embed.shape[0]
         T_12 = (torch.eye(4, device=rel_embed.device, dtype=rel_embed.dtype)
