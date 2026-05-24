@@ -116,13 +116,15 @@ class RelativePoseHead(nn.Module):
     Initialised so the prior pose is the identity transform and confidence = 1.
     """
 
-    def __init__(self, in_dim: int, hidden: int = 256):
+    def __init__(self, in_dim: int, hidden: int = 256, dropout: float = 0.0):
         super().__init__()
         self.mlp = nn.Sequential(
             nn.Linear(in_dim, hidden),
             nn.GELU(),
+            nn.Dropout(dropout),
             nn.Linear(hidden, hidden),
             nn.GELU(),
+            nn.Dropout(dropout),
         )
         self.to_pose          = nn.Linear(hidden, 9)   # 6D rotation + 3D translation
         self.to_log_conf_pose = nn.Linear(hidden, 1)
