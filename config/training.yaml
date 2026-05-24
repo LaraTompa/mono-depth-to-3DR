@@ -44,11 +44,13 @@ loss:
   camera:           0.5    # was 0.1 — pose needs stronger signal vs depth (1.0)
   camera_warmup_epochs: 15  # was 20 — 20 epochs wasted 40% of training with near-zero camera weight
   pixel_consistency: 0.0  # multiview reprojection consistency
-  identity:         0.05   # pose round-trip regulariser weight
+  identity:         0.05  # pose round-trip regulariser weight
   K_reg: 0.0             # was 0.0 — intrinsics supervision helps anchor pose
   rot: 1.5               # was implicit 1.0 — boost rotation signal
   trans: 0.5             # was implicit 1.0 — down-weight translation (harder)
   pose_warmup_epochs: 15    # disable pose loss weighting for first N epochs
+  # -- Pose iterative deep supervision (PoseRefinementModule GRU steps) ---
+  pose_iters:             1.0   # weight for per-GRU-step pose supervision; set 0 to disable
   # -- Geometric consistency (Lgc, ViSTA-SLAM) ----------------------------
   geometric:              0.1   # weight for Lgc; set 0 to disable
   geometric_warmup_epochs: 30   # start Lgc after this epoch
@@ -65,8 +67,7 @@ train:
   log_every: 50                  # log every N batches
   seed: 0
   loss_spike_threshold: 50.0     # skip batch if loss exceeds this value
-  patience: 50
-  num_pose_iters: 1              # number of pose-refinement iterations per batch
+  patience: 20
   gradient_accumulation_steps: 2 # accumulate grads over N batches (effective batch = batch_size * N)
 
 # ---------------------------------------------------------------------------

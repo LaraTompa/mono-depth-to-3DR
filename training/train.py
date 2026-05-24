@@ -75,6 +75,7 @@ def run_epoch(
         "cam_trans": 0.0,
         "cam_K": 0.0,
         "cam_identity": 0.0,
+        "pose_iters":   0.0,
     }
     metric_sums = {"abs_rel": 0.0, "rmse": 0.0, "delta1": 0.0}
     metric_count = 0
@@ -216,6 +217,7 @@ def run_epoch(
             totals["cam_trans"]  += breakdown.get("cam_trans", 0.0)
             totals["cam_K"]      += breakdown.get("cam_K",     0.0)
             totals["cam_identity"] += breakdown.get("cam_identity", 0.0)
+            totals["pose_iters"]   += breakdown.get("pose_iters",   0.0)
             totals["geometric"]  += breakdown.get("geometric",  0.0)
 
             if not train:
@@ -243,12 +245,13 @@ def run_epoch(
                 avg_camK  = totals["cam_K"]    / n
                 avg_cid   = totals.get("cam_identity", 0.0) / n
                 avg_gc    = totals.get("geometric",    0.0) / n
+                avg_pi    = totals.get("pose_iters",   0.0) / n
                 lr = optimizer.param_groups[0]["lr"]
                 print(
                     f"  epoch {epoch:03d}  step {step+1:04d}/{len(loader):04d}"
                     f"  loss={avg_loss:.4f}"
                     f"  depth={avg_depth:.4f} smooth={avg_smooth:.4f} iters={avg_iters:.4f}"
-                    f"  pix={avg_pix:.6f}  gc={avg_gc:.6f}"
+                    f"  pix={avg_pix:.6f}  gc={avg_gc:.6f}  pi={avg_pi:.4f}"
                     f"  cam={avg_cam:.4f} (rot={avg_rot:.3f} trans={avg_trans:.3f} K={avg_camK:.3f} id={avg_cid:.3f})"
                     f"  lr={lr:.2e}  {elapsed:.1f}s"
                 )
@@ -346,6 +349,7 @@ def train(cfg: dict, arch_cfg: dict, resume: str | None = None) -> None:
             depth_out_channels = int(v_cfg.get("depth_out_channels",   128)),
             decoder_hidden     = int(v_cfg.get("decoder_hidden",        256)),
             camera_head_hidden = int(v_cfg.get("camera_head_hidden",   256)),
+            num_pose_iters     = int(v_cfg.get("num_pose_iters",          4)),
             mast3r_ckpt        = v_cfg.get("mast3r_ckpt") or None,
         ).to(device)
     else:   # "v1" — original ConvNeXt-Tiny FPN model

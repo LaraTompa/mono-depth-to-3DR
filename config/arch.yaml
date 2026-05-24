@@ -60,3 +60,6 @@ vista:
 
   # Camera head
   camera_head_hidden: 256
+
+  # Iterative SE(3) pose refinement (PoseRefinementModule)
+  num_pose_iters: 4             # GRU refinement steps; more iters = more params + compute

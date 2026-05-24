@@ -51,8 +51,9 @@ from .cross_attention import CrossAttentionDecoder
 from .depth_stream    import DepthStream
 from .decoder         import FusionDecoder
 
-# Re-use heads from V1 — same interface, no duplication.
-from models.model_image_depth.network import CameraHead, RelativePoseHead
+# Re-use CameraHead from V1; pose is now handled by PoseRefinementModule.
+from models.model_image_depth.network import CameraHead
+from .pose_refinement import PoseRefinementModule
 
 
 class DepthAlignNetV2(nn.Module):
@@ -83,6 +84,7 @@ class DepthAlignNetV2(nn.Module):
         depth_out_channels : int        = 128,
         decoder_hidden     : int        = 256,
         camera_head_hidden : int        = 256,
+        num_pose_iters     : int        = 4,
         mast3r_ckpt        : str | None = None,
     ):
         super().__init__()
@@ -130,10 +132,13 @@ class DepthAlignNetV2(nn.Module):
         # ── Camera head (shared / weight-tied across both views) ─────────
         self.camera_head = CameraHead(feat_dim=decoder_dim, hidden=camera_head_hidden)
 
-        # ── Relative pose head (same design as V1) ───────────────────────
-        # Takes cat([cam_embed1, cam_embed2]) → T_12, log_conf_pose.
-        # Swapping input order gives T_21 from the same shared weights.
-        self.relative_pose_head = RelativePoseHead(2 * decoder_dim, hidden=camera_head_hidden)
+        # ── Iterative SE(3) pose refinement ─────────────────────────────
+        # Bridges the depth and pose streams via feature warping.
+        # Runs after FusionDecoder so confidence maps are available.
+        self.pose_refiner = PoseRefinementModule(
+            token_dim=decoder_dim,
+            num_iters=num_pose_iters,
+        )
 
         # Store freeze flag to avoid iterating 307M params every forward.
         self._dino_frozen = freeze_dino
@@ -197,13 +202,6 @@ class DepthAlignNetV2(nn.Module):
         K_pred     = (cam1["K"] + cam2["K"]) * 0.5
         log_conf_K = (cam1["log_conf_K"] + cam2["log_conf_K"]) * 0.5
 
-        # Predict relative pose directly from both embeddings (same as V1).
-        rel_12 = self.relative_pose_head(torch.cat([cam_embed1, cam_embed2], dim=-1))
-        rel_21 = self.relative_pose_head(torch.cat([cam_embed2, cam_embed1], dim=-1))
-        T_12_pred     = rel_12["T_12"]
-        T_21_pred     = rel_21["T_12"]
-        log_conf_pose = rel_12["log_conf_pose"]
-
         # ── 7. Depth stream (independent of DINOv2) ──────────────────────
         depth_feats1 = self.depth_stream(rgb1, depth_mono1)   # {s4, s8, s16}
         depth_feats2 = self.depth_stream(rgb2, depth_mono2)
@@ -213,15 +211,31 @@ class DepthAlignNetV2(nn.Module):
         dec1 = self.decoder(spatial1, depth_feats1, depth_mono1, grid_hw)
         dec2 = self.decoder(spatial2, depth_feats2, depth_mono2, grid_hw)
 
+        # ── 9. Iterative SE(3) pose refinement ───────────────────────────
+        # Runs after FusionDecoder so conf1 is available to gate the
+        # geometric residual.  depth_mono1 (monocular prior) is used as the
+        # warp depth — not pred depth, which is unreliable early in training.
+        T_12_iters, T_21_iters, log_conf_pose = self.pose_refiner(
+            cam_embed1, cam_embed2,
+            spatial1, spatial2,
+            depth_mono1, K_pred,
+            dec1["confidence"],
+            H, W, h14, w14,
+        )
+        T_12_pred = T_12_iters[-1]
+        T_21_pred = T_21_iters[-1]
+
         return {
             # Depth outputs (same contract as V1)
             "depth1":       dec1["depth"],
             "depth2":       dec2["depth"],
             "confidence1":  dec1["confidence"],
             "confidence2":  dec2["confidence"],
-            # No iterative refinement in V2
+            # No iterative depth refinement in V2
             "depth1_iters": [],
             "depth2_iters": [],
+            # Pose iterations for deep supervision
+            "T_12_iters":   T_12_iters,
             "scale1":       None,
             "bias1":        None,
             "scale2":       None,

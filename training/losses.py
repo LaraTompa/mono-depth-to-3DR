@@ -149,6 +149,45 @@ def iter_supervision_loss(
 
 
 # ---------------------------------------------------------------------------
+# 5b. Deep supervision over iterative pose estimates
+# ---------------------------------------------------------------------------
+
+def pose_iter_supervision_loss(
+    T_12_iters: list,           # list of (B, 4, 4)  — one per GRU iteration
+    T_12_gt:    torch.Tensor,   # (B, 4, 4) ground-truth cam1→cam2
+    weights:    list | None = None,
+) -> torch.Tensor:
+    """
+    Weighted geodesic + translation loss over each pose refinement iteration.
+
+    Later iterations receive higher weight (exponential schedule, same as
+    iter_supervision_loss for depth).  This provides a dense gradient signal
+    at every GRU step rather than only supervising the final output.
+
+    T_12_iters[-1] is the "final" pose and carries the most weight.
+    """
+    n = len(T_12_iters)
+    if n == 0:
+        return T_12_gt.new_tensor(0.0)
+    if weights is None:
+        w_list  = [2 ** i for i in range(n)]
+        total_w = sum(w_list)
+        weights = [wi / total_w for wi in w_list]
+
+    R_gt = T_12_gt[:, :3, :3]
+    t_gt = T_12_gt[:, :3,  3]
+
+    loss = T_12_gt.new_tensor(0.0)
+    for T_i, wi in zip(T_12_iters, weights):
+        R_i = T_i[:, :3, :3]
+        t_i = T_i[:, :3,  3]
+        l_r = geodesic_rotation_loss(R_i, R_gt).mean()
+        l_t = normalized_translation_loss(t_i, t_gt).mean()
+        loss = loss + wi * (l_r + l_t)
+    return loss
+
+
+# ---------------------------------------------------------------------------
 # 6. Geodesic rotation loss
 # ---------------------------------------------------------------------------
 
@@ -752,20 +791,34 @@ def total_loss(
         parts["geometric"] = float(l_gc.detach())
 
     # --- Camera pose / intrinsics losses ---
+    T_12_gt_pose = None
     if "poses" in batch and "T_12_pred" in outputs:
-        poses   = batch["poses"]                                 # (B, N, 4, 4)
-        T_12_gt = se3_inv(poses[:, 1]) @ poses[:, 0]  # cam1→cam2 GT
+        poses        = batch["poses"]                                 # (B, N, 4, 4)
+        T_12_gt_pose = se3_inv(poses[:, 1]) @ poses[:, 0]  # cam1→cam2 GT
         # Debug: check GT translation norms (should NOT be near zero)
-        t_gt_norms = T_12_gt[:, :3, 3].norm(dim=-1)
+        t_gt_norms = T_12_gt_pose[:, :3, 3].norm(dim=-1)
         if t_gt_norms.mean() < 0.01:
             print(f"[WARNING] GT translation norms very small: min={t_gt_norms.min():.6f} max={t_gt_norms.max():.6f} mean={t_gt_norms.mean():.6f}")
             print(f"[WARNING] This suggests zero or near-zero GT motion — check pose convention!")
         K_gt    = batch.get("intrinsics")                        # (B, 3, 3) or None
-        l_cam, cam_parts = camera_pose_loss(outputs, T_12_gt, K_gt, w,
+        l_cam, cam_parts = camera_pose_loss(outputs, T_12_gt_pose, K_gt, w,
                                             use_confidence=use_confidence)
         eff_camera_w = camera_weight if camera_weight is not None else float(w.get("camera", 0.5))
         total   = total + eff_camera_w * l_cam
         parts.update(cam_parts)
+
+    # --- Pose iterative deep supervision ---
+    # Supervises every GRU iteration, not just the final pose.
+    # Only active when the network returns T_12_iters (PoseRefinementModule).
+    # Uses the same GT that was computed for camera_pose_loss above.
+    l_pose_iters = pred1.new_tensor(0.0)
+    if "T_12_iters" in outputs and T_12_gt_pose is not None:
+        iters = outputs["T_12_iters"]
+        if len(iters) > 0:
+            l_pose_iters = pose_iter_supervision_loss(iters, T_12_gt_pose)
+            pose_iters_w = float(w.get("pose_iters", 1.0))
+            total = total + pose_iters_w * l_pose_iters
+    parts["pose_iters"] = float(l_pose_iters.detach())
 
     return total, parts
 
