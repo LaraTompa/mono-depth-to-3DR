@@ -44,7 +44,7 @@ loss:
   camera:           0.5    # was 0.1 — pose needs stronger signal vs depth (1.0)
   camera_warmup_epochs: 5   # pose was learning faster after epoch 15 (confidence weighting); front-load it
   pixel_consistency: 0.0  # multiview reprojection consistency
-  identity:         0.25   # pose round-trip regulariser weight — raised from 0.05 (5x more signal for anti-parallel constraint)
+  identity:         0.05   # pose round-trip regulariser weight — raised from 0.05 (5x more signal for anti-parallel constraint)
   K_reg: 0.0             # was 0.0 — intrinsics supervision helps anchor pose
   rot: 1.5               # was implicit 1.0 — boost rotation signal
   trans: 0.5             # was implicit 1.0 — down-weight translation (harder)

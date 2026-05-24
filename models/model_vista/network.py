@@ -52,7 +52,8 @@ from .depth_stream    import DepthStream
 from .decoder         import FusionDecoder
 
 # Re-use heads from V1 — same interface, no duplication.
-from models.model_image_depth.network import CameraHead, RelativePoseHead
+from models.model_image_depth.network   import CameraHead, RelativePoseHead
+from models.model_image_depth.geometry  import se3_inv
 
 
 class DepthAlignNetV2(nn.Module):
@@ -198,11 +199,16 @@ class DepthAlignNetV2(nn.Module):
         K_pred     = (cam1["K"] + cam2["K"]) * 0.5
         log_conf_K = (cam1["log_conf_K"] + cam2["log_conf_K"]) * 0.5
 
-        # Predict relative pose directly from both embeddings (same as V1).
-        rel_12 = self.relative_pose_head(torch.cat([cam_embed1, cam_embed2], dim=-1))
-        rel_21 = self.relative_pose_head(torch.cat([cam_embed2, cam_embed1], dim=-1))
+        # Predict T_12; derive T_21 analytically as the exact SE(3) inverse.
+        # Predicting T_21 independently lets the MLP violate the anti-parallel
+        # constraint as confidence weighting reshapes the loss landscape. Using
+        # se3_inv makes pose_identity_loss = 0 by construction and removes the
+        # need for the round-trip gradient signal entirely.
+        rel_12        = self.relative_pose_head(torch.cat([cam_embed1, cam_embed2], dim=-1))
+        # rel_21        = self.relative_pose_head(torch.cat([cam_embed2, cam_embed1], dim=-1))
         T_12_pred     = rel_12["T_12"]
-        T_21_pred     = rel_21["T_12"]
+        T_21_pred     = se3_inv(T_12_pred)   # exact: R^T, -R^T·t
+        # T_21_pred     = rel_21["T_12"]      # independent prediction (no anti-parallel constraint)
         log_conf_pose = rel_12["log_conf_pose"]
 
         # ── 7. Depth stream (independent of DINOv2) ──────────────────────
