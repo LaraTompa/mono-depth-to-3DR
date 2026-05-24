@@ -24,7 +24,7 @@ loader:
 optimizer:
   type:         adamw
   lr:           1.0e-4
-  weight_decay: 1.0e-4
+  weight_decay: 5.0e-4 #was 1.0e-4 — slightly stronger regularisation to combat overfitting (especially on camera pose)
   betas:        [0.9, 0.999]
 
 # ---------------------------------------------------------------------------

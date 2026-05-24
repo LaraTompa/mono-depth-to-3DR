@@ -56,8 +56,8 @@ vista:
   depth_out_channels: 64       # FPN output channels per scale
 
   # Fusion decoder
-  decoder_hidden: 256
+  decoder_hidden: 64 #was 256 — reduce capacity to avoid overfitting on small dataset
 
   # Camera head
   camera_head_hidden: 64       # was 256 — reduce capacity to avoid overfitting on small dataset
-  camera_head_dropout: 0.1    # dropout between the two MLP layers of RelativePoseHead
+  camera_head_dropout: 0.3    # dropout between the two MLP layers of RelativePoseHead, started with 0.1
