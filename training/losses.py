@@ -203,10 +203,18 @@ def geodesic_rotation_loss(
     The trace formula gives the rotation angle of the relative rotation
     R_pred^T R_gt; the geodesic is the shortest arc on the unit sphere.
     """
-    R_rel   = R_pred.transpose(-1, -2) @ R_gt              # (B, 3, 3)
+    # Ensure computations happen in a safe float dtype (FP32) to support
+    # mixed-precision training where R_pred may be float16 while R_gt is
+    # float32 (autocast). Cast both to float32 on the same device.
+    dev = R_pred.device
+    R_pred_f = R_pred.to(torch.float32)
+    R_gt_f   = R_gt.to(torch.float32)
+
+    R_rel   = R_pred_f.transpose(-1, -2) @ R_gt_f              # (B, 3, 3)
     cos_ang = (R_rel.diagonal(dim1=-2, dim2=-1).sum(-1) - 1.0) * 0.5
     cos_ang = cos_ang.clamp(-1.0 + ACOS_EPS, 1.0 - ACOS_EPS)  # gradient stability
-    return torch.nan_to_num(torch.acos(cos_ang), nan=0.0)                            # (B,)
+    ang = torch.nan_to_num(torch.acos(cos_ang), nan=0.0)      # (B,)
+    return ang.to(R_pred.device)
 
 
 # ---------------------------------------------------------------------------
