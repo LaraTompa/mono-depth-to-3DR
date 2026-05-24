@@ -4,6 +4,7 @@ import argparse
 import os
 import math
 import sys
+import cv2
 
 def infer_square_shape(length):
     s = int(math.sqrt(length))
@@ -24,7 +25,7 @@ def plot_depth_heatmap(depth_map, cmap='hot', outpath=None, show=True):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Inspect .npz / .npy depth maps and plot heatmap.')
-    parser.add_argument('input_file', type=str, help='Path to the input .npz or .npy file')
+    parser.add_argument('--input_file', type=str, help='Path to the input .npz or .npy file')
     parser.add_argument('--key', '-k', default=None, help='Key inside .npz (default: first)')
     parser.add_argument('--index', '-i', type=int, default=0, help='Index for first dimension (N,H,W) to plot')
     parser.add_argument('--height', type=int, default=None, help='Height to reshape flattened maps')
@@ -50,10 +51,16 @@ if __name__ == "__main__":
                 print(f"Key '{key}' not found. Available keys: {npz.files}", file=sys.stderr)
                 sys.exit(1)
         data = np.asarray(npz[key])
+    elif path.endswith(".npy"):
+        data = np.load(path)
+        #handle common cases of extra dimensions
+        if data.ndim == 3 and data.shape[0] == 1:
+            data = data[0]
+        if data.ndim == 3 and data.shape[-1] in (1, 3, 4):
+            data = data[..., 0]
     else:
-        # .npy or other single-array file
-        data = np.load(path, allow_pickle=True)
-        print(f"Loaded .npy shape: {data.shape}, dtype: {data.dtype}")
+        data = cv2.imread(path, cv2.IMREAD_UNCHANGED) / 1000
+    data = data.astype(np.float32)
 
     print("raw shape:", data.shape, "dtype:", data.dtype)
 
@@ -69,8 +76,10 @@ if __name__ == "__main__":
                 # maybe color image stack -> convert first channel
                 depth_map = depth_map[..., 0]
     elif data.ndim == 2:
-        # either (H,W) single map or (N, L) flattened rows
-        if data.shape[0] == 1 and data.shape[1] > 1:
+        # if dimensions already match provided H,W, accept as (H,W)
+        if args.height and args.width and data.shape == (args.height, args.width):
+            depth_map = data
+        elif data.shape[0] == 1 and data.shape[1] > 1:
             vec = data[0]
             if args.height and args.width:
                 depth_map = vec.reshape((args.height, args.width))
