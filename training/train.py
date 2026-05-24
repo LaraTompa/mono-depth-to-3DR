@@ -215,6 +215,7 @@ def run_epoch(
             totals["cam_rot"]    += breakdown.get("cam_rot",   0.0)
             totals["cam_trans"]  += breakdown.get("cam_trans", 0.0)
             totals["cam_K"]      += breakdown.get("cam_K",     0.0)
+            totals["cam_identity"] += breakdown.get("cam_identity", 0.0)
             totals["geometric"]  += breakdown.get("geometric",  0.0)
 
             if not train:
