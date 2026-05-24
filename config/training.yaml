@@ -49,6 +49,10 @@ loss:
   rot: 1.5               # was implicit 1.0 — boost rotation signal
   trans: 0.5             # was implicit 1.0 — down-weight translation (harder)
   pose_warmup_epochs: 15    # disable pose loss weighting for first N epochs
+  # -- Geometric consistency (Lgc, ViSTA-SLAM) ----------------------------
+  geometric:              0.1   # weight for Lgc; set 0 to disable
+  geometric_warmup_epochs: 30   # start Lgc after this epoch
+  geometric_switch_epochs: 50   # epoch to switch from GT → predicted pose for Lgc
 
 
 # ---------------------------------------------------------------------------

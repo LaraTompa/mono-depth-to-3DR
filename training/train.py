@@ -69,6 +69,7 @@ def run_epoch(
         "smooth": 0.0,
         "iters": 0.0,
         "pixel_consistency": 0.0,
+        "geometric": 0.0,
         "cam_pose": 0.0,
         "cam_rot": 0.0,
         "cam_trans": 0.0,
@@ -175,6 +176,7 @@ def run_epoch(
                 outputs, batch, cfg.get("loss", {}), K_iter,
                 use_confidence=use_confidence,
                 camera_weight=camera_weight,
+                epoch=epoch,
             )
 
             # ── Loss spike / NaN guard ────────────────────────────────────
@@ -213,6 +215,7 @@ def run_epoch(
             totals["cam_rot"]    += breakdown.get("cam_rot",   0.0)
             totals["cam_trans"]  += breakdown.get("cam_trans", 0.0)
             totals["cam_K"]      += breakdown.get("cam_K",     0.0)
+            totals["geometric"]  += breakdown.get("geometric",  0.0)
 
             if not train:
                 pred1 = outputs["depth1"]                         # (B,1,pH,pW)
@@ -238,12 +241,13 @@ def run_epoch(
                 avg_trans = totals["cam_trans"]/ n
                 avg_camK  = totals["cam_K"]    / n
                 avg_cid   = totals.get("cam_identity", 0.0) / n
+                avg_gc    = totals.get("geometric",    0.0) / n
                 lr = optimizer.param_groups[0]["lr"]
                 print(
                     f"  epoch {epoch:03d}  step {step+1:04d}/{len(loader):04d}"
                     f"  loss={avg_loss:.4f}"
                     f"  depth={avg_depth:.4f} smooth={avg_smooth:.4f} iters={avg_iters:.4f}"
-                    f"  pix={avg_pix:.6f}"
+                    f"  pix={avg_pix:.6f}  gc={avg_gc:.6f}"
                     f"  cam={avg_cam:.4f} (rot={avg_rot:.3f} trans={avg_trans:.3f} K={avg_camK:.3f} id={avg_cid:.3f})"
                     f"  lr={lr:.2e}  {elapsed:.1f}s"
                 )

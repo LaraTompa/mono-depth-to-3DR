@@ -483,6 +483,136 @@ def pixel_consistency_loss(
 
 
 # ---------------------------------------------------------------------------
+# 11. Geometric consistency loss  (ViSTA-SLAM  Lgc)
+# ---------------------------------------------------------------------------
+
+def geometric_consistency_loss(
+    pred_depth1: torch.Tensor,   # (B, 1, H, W)  predicted depth, frame i
+    pred_depth2: torch.Tensor,   # (B, 1, H, W)  predicted depth, frame j
+    T_12:        torch.Tensor,   # (B, 4, 4)  cam_i → cam_j  (GT or predicted)
+    K:           torch.Tensor,   # (B, 3, 3)  intrinsics (at H×W resolution)
+    min_depth:   float = 0.1,
+    max_depth:   float = 80.0,
+) -> torch.Tensor:
+    """
+    ViSTA-SLAM geometric consistency loss (Lgc).
+
+        Lgc = (1/n) Σ_{x ∈ I_i}  ‖ T_ij P_i(x)  −  P_j(C_ij(x)) ‖
+
+    Both terms are 3-D points expressed in frame j's coordinate system:
+
+      T_ij P_i(x)    — unproject pixel x with pred_depth_i, warp into frame j
+      P_j(C_ij(x))   — follow the warp to find the correspondence C_ij(x) in
+                        frame j, bilinearly sample pred_depth_j there, unproject
+
+    The loss is zero when pred_depth1, pred_depth2, and T_12 are mutually
+    consistent in 3-D metric space.  Gradients flow through both depth maps.
+
+    Unlike pixel_consistency_loss (2-D reprojection error), this penalises
+    3-D Euclidean distance — scale-aware and directly in metres.
+
+    T_12 can be GT (pure depth supervision) or predicted (joint supervision).
+    When switching from GT → predicted mid-training the caller controls which
+    is passed; no logic change is needed here.
+
+    Parameters
+    ----------
+    pred_depth1 / pred_depth2 : (B, 1, H, W)  predicted depth maps
+    T_12  : (B, 4, 4)  relative pose cam_1 → cam_2
+    K     : (B, 3, 3)  intrinsics at the depth-map resolution
+    min_depth / max_depth : validity thresholds (metres)
+
+    Returns
+    -------
+    Scalar loss (mean over both directions and valid pixels).
+    """
+    B, _, H, W = pred_depth1.shape
+    dev   = pred_depth1.device
+    dtype = pred_depth1.dtype
+
+    # ── Pixel coordinate grid ────────────────────────────────────────────
+    ys = torch.arange(H, device=dev, dtype=dtype)
+    xs = torch.arange(W, device=dev, dtype=dtype)
+    gy, gx = torch.meshgrid(ys, xs, indexing='ij')   # (H, W)
+    N   = H * W
+    xy1 = torch.stack([gx.flatten(), gy.flatten(),
+                       torch.ones(N, device=dev, dtype=dtype)], dim=0)   # (3, N)
+    xy1 = xy1.unsqueeze(0).expand(B, -1, -1)                             # (B, 3, N)
+
+    K_inv = k_inv(K)   # (B, 3, 3)  analytical, gradient-friendly
+
+    def _one_dir(
+        depth_i: torch.Tensor,   # (B, 1, H, W)  source depth
+        depth_j: torch.Tensor,   # (B, 1, H, W)  target depth
+        T: torch.Tensor,         # (B, 4, 4)
+    ) -> torch.Tensor:
+        R = T[:, :3, :3]          # (B, 3, 3)
+        t = T[:, :3,  3]          # (B, 3)
+
+        # 1. Unproject frame i → 3-D in frame i coords
+        d_i  = depth_i.reshape(B, 1, N).clamp(min=min_depth, max=max_depth)
+        P_i  = torch.bmm(K_inv, xy1) * d_i          # (B, 3, N)
+
+        # 2. Warp into frame j coords:  Q = R @ P_i + t
+        Q    = torch.bmm(R, P_i) + t.unsqueeze(-1)  # (B, 3, N)
+        Q_z  = Q[:, 2, :]                            # (B, N)
+
+        # 3. Project Q into frame j (homogeneous pixel coords)
+        proj  = torch.bmm(K, Q)                      # (B, 3, N)
+        u_j   = proj[:, 0, :] / (Q_z + EPS)          # (B, N)
+        v_j   = proj[:, 1, :] / (Q_z + EPS)
+
+        # 4. Convert to grid_sample coords in [-1, 1]
+        #    grid_sample expects (B, 1, N, 2) with (x, y) = (u_norm, v_norm)
+        u_n  = (2.0 * u_j / (W - 1) - 1.0)           # (B, N)
+        v_n  = (2.0 * v_j / (H - 1) - 1.0)
+        grid = torch.stack([u_n, v_n], dim=-1).reshape(B, 1, N, 2)   # (B,1,N,2)
+
+        # 5. Bilinearly sample pred depth_j at correspondence
+        #    align_corners=True matches the u_n / v_n formula above
+        d_j_sampled = F.grid_sample(
+            depth_j, grid,
+            mode='bilinear', padding_mode='zeros', align_corners=True,
+        ).reshape(B, N)                               # (B, N)
+
+        # 6. Unproject frame j at the sampled pixel (u_j, v_j)
+        #    Px_j = [u_j, v_j, 1]ᵀ (already in pixel homogeneous coords)
+        #    P̂_j  = d_j_sampled · K⁻¹ · [u_j, v_j, 1]ᵀ
+        uv1_j = torch.stack([u_j, v_j,
+                              torch.ones_like(u_j)], dim=1)   # (B, 3, N)
+        P_j   = torch.bmm(K_inv, uv1_j) * d_j_sampled.unsqueeze(1)  # (B, 3, N)
+
+        # 7. 3-D distance: ‖ Q − P̂_j ‖  per pixel
+        dist = (Q - P_j).norm(dim=1)                 # (B, N)
+
+        # 8. Validity mask ────────────────────────────────────────────────
+        valid = (
+            (Q_z > 0) &
+            # Correspondence must fall within image bounds (in pixels)
+            (u_j >= 0) & (u_j < W) &
+            (v_j >= 0) & (v_j < H) &
+            # Sampled depth must be sensible (0 = padding_mode zeros → skip)
+            (d_j_sampled > min_depth) & (d_j_sampled < max_depth) &
+            # Source depth in range  (already clamped above, but also filter NaN)
+            torch.isfinite(dist)
+        )   # (B, N)
+
+        n_valid = valid.float().sum()
+        if n_valid < 1:
+            return depth_i.new_tensor(0.0)
+
+        # 9. Huber-like soft cap: clip at 5 m to down-weight outliers without
+        #    zeroing gradients (same philosophy as the dist_sq.clamp in pixel loss)
+        dist_capped = dist.clamp(max=5.0)
+        return (dist_capped * valid.float()).sum() / n_valid
+
+    T_21 = se3_inv(T_12)
+    l_12 = _one_dir(pred_depth1, pred_depth2, T_12)
+    l_21 = _one_dir(pred_depth2, pred_depth1, T_21)
+    return (l_12 + l_21) * 0.5
+
+
+# ---------------------------------------------------------------------------
 # 10. Total loss — called from train.py
 # ---------------------------------------------------------------------------
 
@@ -493,6 +623,7 @@ def total_loss(
     K:              torch.Tensor,     # (B, 3, 3) full-resolution intrinsics
     use_confidence: bool = True,      # False during warmup — disables heteroscedastic weighting
     camera_weight:  float | None = None,  # override cfg camera weight (for ramp)
+    epoch:          int = 0,          # current epoch — controls Lgc activation
 ) -> tuple[torch.Tensor, dict]:
     """
     Compute the weighted total training loss.
@@ -585,6 +716,40 @@ def total_loss(
         )
         total = total + float(w.get("pixel_consistency", 0.05)) * l_pixel
         parts["pixel_consistency"] = float(l_pixel.detach())
+
+    # --- Geometric consistency loss  Lgc  (ViSTA-SLAM) ---
+    # Activated only after geometric_warmup_epochs (default 30) so that
+    # depths and pose are already reasonable before we couple them in 3-D.
+    # Phase 1 (epoch < switch_epoch): use GT pose  → pure depth supervision.
+    # Phase 2 (epoch >= switch_epoch): use predicted pose → joint supervision.
+    l_gc = pred1.new_tensor(0.0)
+    geo_warmup  = int(w.get("geometric_warmup_epochs", 30))
+    geo_switch  = int(w.get("geometric_switch_epochs",  50))  # switch GT→pred pose
+    geo_w       = float(w.get("geometric", 0.1))
+    if geo_w > 0 and epoch >= geo_warmup and "poses" in batch:
+        poses_gc = batch["poses"]                              # (B, N, 4, 4)
+        T_12_gc_gt = se3_inv(poses_gc[:, 1]) @ poses_gc[:, 0]
+        # Choose pose source based on training phase
+        if epoch >= geo_switch and "T_12_pred" in outputs:
+            T_gc = outputs["T_12_pred"].detach()   # detach: decouple gc grad from pose head
+            # Only switch if the predicted pose is finite (NaN guard)
+            if not torch.isfinite(T_gc).all():
+                T_gc = T_12_gc_gt
+        else:
+            T_gc = T_12_gc_gt
+        # Scale K to predicted-depth resolution (pred1 is at H/2 × W/2)
+        scale_w_gc = pW / W
+        scale_h_gc = pH / H
+        K_gc = K.clone()
+        if "intrinsics" in batch:
+            K_gc = batch["intrinsics"].to(pred1.device, dtype=pred1.dtype).clone()
+        K_gc[:, 0, 0] = K_gc[:, 0, 0] * scale_w_gc
+        K_gc[:, 1, 1] = K_gc[:, 1, 1] * scale_h_gc
+        K_gc[:, 0, 2] = K_gc[:, 0, 2] * scale_w_gc
+        K_gc[:, 1, 2] = K_gc[:, 1, 2] * scale_h_gc
+        l_gc = geometric_consistency_loss(pred1, pred2, T_gc, K_gc)
+        total = total + geo_w * l_gc
+        parts["geometric"] = float(l_gc.detach())
 
     # --- Camera pose / intrinsics losses ---
     if "poses" in batch and "T_12_pred" in outputs:
