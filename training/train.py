@@ -346,6 +346,7 @@ def train(cfg: dict, arch_cfg: dict, resume: str | None = None) -> None:
             depth_out_channels = int(v_cfg.get("depth_out_channels",   128)),
             decoder_hidden     = int(v_cfg.get("decoder_hidden",        256)),
             camera_head_hidden = int(v_cfg.get("camera_head_hidden",   256)),
+            pose_dropout       = float(v_cfg.get("camera_head_dropout", 0.0)),
             mast3r_ckpt        = v_cfg.get("mast3r_ckpt") or None,
         ).to(device)
     else:   # "v1" — original ConvNeXt-Tiny FPN model

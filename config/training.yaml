@@ -42,13 +42,13 @@ loss:
   smooth:           0.005   # edge-aware smoothness
   iter_supervision: 0.0    # deep supervision over refinement iterations
   camera:           0.5    # was 0.1 — pose needs stronger signal vs depth (1.0)
-  camera_warmup_epochs: 15  # was 20 — 20 epochs wasted 40% of training with near-zero camera weight
+  camera_warmup_epochs: 5   # pose was learning faster after epoch 15 (confidence weighting); front-load it
   pixel_consistency: 0.0  # multiview reprojection consistency
   identity:         0.05   # pose round-trip regulariser weight
   K_reg: 0.0             # was 0.0 — intrinsics supervision helps anchor pose
   rot: 1.5               # was implicit 1.0 — boost rotation signal
   trans: 0.5             # was implicit 1.0 — down-weight translation (harder)
-  pose_warmup_epochs: 15    # disable pose loss weighting for first N epochs
+  pose_warmup_epochs: 5     # disable confidence weighting for first N epochs; match camera_warmup_epochs
   # -- Geometric consistency (Lgc, ViSTA-SLAM) ----------------------------
   geometric:              0.1   # weight for Lgc; set 0 to disable
   geometric_warmup_epochs: 30   # start Lgc after this epoch

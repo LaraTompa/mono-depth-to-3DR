@@ -83,6 +83,7 @@ class DepthAlignNetV2(nn.Module):
         depth_out_channels : int        = 128,
         decoder_hidden     : int        = 256,
         camera_head_hidden : int        = 256,
+        pose_dropout       : float      = 0.0,
         mast3r_ckpt        : str | None = None,
     ):
         super().__init__()
@@ -133,7 +134,7 @@ class DepthAlignNetV2(nn.Module):
         # ── Relative pose head (same design as V1) ───────────────────────
         # Takes cat([cam_embed1, cam_embed2]) → T_12, log_conf_pose.
         # Swapping input order gives T_21 from the same shared weights.
-        self.relative_pose_head = RelativePoseHead(2 * decoder_dim, hidden=camera_head_hidden)
+        self.relative_pose_head = RelativePoseHead(2 * decoder_dim, hidden=camera_head_hidden, dropout=pose_dropout)
 
         # Store freeze flag to avoid iterating 307M params every forward.
         self._dino_frozen = freeze_dino
