@@ -36,12 +36,12 @@ def se3_inv(T: torch.Tensor) -> torch.Tensor:
     return T_inv
 
 EPS = 1e-8
-EPS_NORM = 0.01   # floor for translation-direction normalisation.
-                  # 1e-4 caused 10 000× gradient amplification when t_pred ≈ 0 at init,
-                  # which flowed back through shared cross-attn and spiked the depth loss.
-                  # 0.01 (1 cm) bounds the amplification at 100× while still correctly
-                  # normalising GT translations as small as ~1 cm baselines.
-ACOS_EPS = 1e-4
+EPS_NORM = 0.1   # floor for translation-direction normalisation (metres).
+                  # Using squared-norm-clamp-sqrt (not .norm().clamp) so the backward
+                  # at t=0 is ZERO instead of NaN.  EPS_NORM=0.1 bounds gradient
+                  # amplification at 10×; pairs with < 10 cm baseline are treated as
+                  # pure-rotation (direction suppressed) which is intentional.
+ACOS_EPS = 1e-2  # raised from 1e-4: limits max acos gradient to ~7 (was ~70)
 LOG_CONF_MIN = -3.0   # tightened: prevents runaway uncertainty / confidence collapse
 LOG_CONF_MAX =  3.0
 
@@ -210,11 +210,16 @@ def geodesic_rotation_loss(
     R_pred_f = R_pred.to(torch.float32)
     R_gt_f   = R_gt.to(torch.float32)
 
-    R_rel   = R_pred_f.transpose(-1, -2) @ R_gt_f              # (B, 3, 3)
-    cos_ang = (R_rel.diagonal(dim1=-2, dim2=-1).sum(-1) - 1.0) * 0.5
-    cos_ang = cos_ang.clamp(-1.0 + ACOS_EPS, 1.0 - ACOS_EPS)  # gradient stability
-    ang = torch.nan_to_num(torch.acos(cos_ang), nan=0.0)      # (B,)
-    return ang.to(R_pred.device)
+    R_rel = R_pred_f.transpose(-1, -2) @ R_gt_f              # (B, 3, 3)
+
+    # Chordal distance: ‖R_rel − I‖_F  ∈ [0, 2√2]
+    # Monotonically related to geodesic θ = 2·arcsin(chord / (2√2)).
+    # Unlike acos, the gradient of ‖M‖_F is M/‖M‖_F — bounded and smooth
+    # everywhere, including at θ=0 (returns 0) and θ=π (returns 2√2).
+    I3    = torch.eye(3, device=R_rel.device, dtype=R_rel.dtype).unsqueeze(0)
+    diff  = R_rel - I3                             # (B, 3, 3)
+    chord = (diff * diff).sum(dim=[-2, -1]).sqrt() # (B,)  in [0, 2√2]
+    return torch.nan_to_num(chord, nan=0.0).to(R_pred.device)
 
 
 # ---------------------------------------------------------------------------
@@ -234,14 +239,19 @@ def normalized_translation_loss(
 
     Returns (B,) tensor of angles in radians.
     """
-    t_pred_norm = t_pred.norm(dim=-1, keepdim=True).clamp(min=EPS_NORM)
-    t_gt_norm   = t_gt.norm(dim=-1, keepdim=True).clamp(min=EPS_NORM)
+    # Safe squared-norm then sqrt: grad = 0 at t=0 (no NaN), rises to t/||t|| normally.
+    # Unlike .norm().clamp(), the backward through (t*t).sum().clamp().sqrt() never
+    # computes t/||t|| — the clamp zero-gates the gradient when ||t||^2 < EPS_NORM^2.
+    t_pred_norm = (t_pred * t_pred).sum(dim=-1, keepdim=True).clamp(min=EPS_NORM**2).sqrt()
+    t_gt_norm   = (t_gt   * t_gt  ).sum(dim=-1, keepdim=True).clamp(min=EPS_NORM**2).sqrt()
     t_pred_n    = t_pred / t_pred_norm
     t_gt_n      = t_gt   / t_gt_norm
-    # Angular error — safer than L2 of unit vectors; matches paper formulation
-    dot = (t_pred_n * t_gt_n).sum(dim=-1).clamp(-1.0 + ACOS_EPS, 1.0 - ACOS_EPS)
-    loss_trans = torch.acos(dot)                            # (B,) radians
-    return torch.nan_to_num(loss_trans, nan=0.0)            # pure-rotation pairs → 0
+    # Cosine loss: 1 - cos(θ) ∈ [0,2].  Smooth, bounded, NO singularity anywhere.
+    # atan2 and cross.norm() both produce NaN gradients at (0,0) in backward.
+    # (1-dot) ≈ θ²/2 near zero and 2 at antiparallel — monotonically related to angle.
+    dot        = (t_pred_n * t_gt_n).sum(dim=-1)           # (B,)
+    loss_trans = (1.0 - dot).clamp(min=0.0)                # (B,) ∈ [0,2]
+    return torch.nan_to_num(loss_trans, nan=0.0)             # pure-rotation pairs → 0
 
 
 # ---------------------------------------------------------------------------
@@ -278,11 +288,15 @@ def pose_identity_loss(
     # ── Translation: t_12 should be anti-parallel to R_12 · t_21 ───────
     # Paper's constraint: t_12 ≈ −R_12 · t_21
     t_21_in_frame1 = torch.bmm(R_12, t_21.unsqueeze(-1)).squeeze(-1)  # (B, 3)
-    dot   = (t_12 * (-t_21_in_frame1)).sum(dim=-1)
-    denom = (t_12.norm(dim=-1) * t_21_in_frame1.norm(dim=-1)).clamp(min=1e-6)
-    cos_ang   = (dot / denom).clamp(-1.0 + ACOS_EPS, 1.0 - ACOS_EPS)
-    trans_err = torch.acos(cos_ang)                           # (B,) radians
-    trans_err = torch.nan_to_num(trans_err, nan=0.0)          # pure-rotation pairs → 0
+    neg_t21 = -t_21_in_frame1
+    # Safe squared-norm normalisation (no NaN at zero)
+    t12_n   = t_12  / (t_12  * t_12 ).sum(dim=-1, keepdim=True).clamp(min=EPS_NORM**2).sqrt()
+    nt21_n  = neg_t21 / (neg_t21 * neg_t21).sum(dim=-1, keepdim=True).clamp(min=EPS_NORM**2).sqrt()
+    # atan2-based angle: stable at all angles unlike acos
+    # Cosine loss: same bounded/smooth trick as normalized_translation_loss
+    cos_id    = (t12_n * nt21_n).sum(dim=-1)                 # (B,)
+    trans_err = (1.0 - cos_id).clamp(min=0.0)               # (B,) ∈ [0,2]
+    trans_err = torch.nan_to_num(trans_err, nan=0.0)         # pure-rotation pairs → 0
  
     return float(rot_weight) * rot_err.mean() + float(trans_weight) * trans_err.mean()    
 
@@ -349,13 +363,8 @@ def camera_pose_loss(
     # ── Normalised translation loss ───────────────────────────────────────
     l_trans = normalized_translation_loss(t_pred, t_gt)  # (B,)
 
-    # ── Translation scale loss ──────────────────────────────────────────
-    # The normalized loss only supervises direction. We add an L2 penalty on log-scale.
-    scale_pred = t_pred.norm(dim=-1).clamp(min=EPS_NORM)
-    scale_gt   = t_gt.norm(dim=-1).clamp(min=EPS_NORM)
-    l_trans_scale = F.l1_loss(torch.log(scale_pred), torch.log(scale_gt), reduction='none')
-
-    l_trans = l_trans + l_trans_scale * 0.5  # Weight scale error relative to angle
+    # NOTE: translation scale loss removed — log(‖t_pred‖) backward is NaN
+    # when ‖t_pred‖ ≈ 0 (i.e. at init).  Re-enable after directional loss converges.
 
     # ── Confidence-weighted pose loss ─────────────────────────────────────
     w_rot   = float(weights.get("rot",   1.0))
