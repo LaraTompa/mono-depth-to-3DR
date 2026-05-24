@@ -58,9 +58,7 @@ vista:
   # Fusion decoder
   decoder_hidden: 256
 
-  # Camera head
-  camera_head_hidden: 64
-  camera_head_dropout: 0.1
-
   # Iterative SE(3) pose refinement (PoseRefinementModule)
   num_pose_iters: 4             # GRU refinement steps; more iters = more params + compute
+  camera_head_hidden: 64       # was 256 — reduce capacity to avoid overfitting on small dataset
+  camera_head_dropout: 0.1    # dropout between the two MLP layers of RelativePoseHead
