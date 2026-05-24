@@ -39,7 +39,7 @@ vista:
 
   # Cross-attention decoder (MASt3R BaseDecoder compatible)
   decoder_dim: 768              # must match MASt3R BaseDecoder (768 for Base)
-  num_decoder_blocks: 4         # 4 ≈ 5 min/epoch; scale to 8–10 when stable
+  num_decoder_blocks: 2         # 4 ≈ 5 min/epoch; scale to 8–10 when stable, reduce to avoid overfitting
   num_decoder_heads: 12         # 12 heads for dim=768
 
   # MASt3R checkpoint for cross-attention weight initialisation.
@@ -53,13 +53,18 @@ vista:
   # "convnext_tiny"  → ~28M params (same channel widths as Small, fewer blocks)
   # "convnext_small" → ~50M params (27 blocks in stage 3 vs 9 for Tiny)
   depth_backbone: "convnext_tiny"
-  depth_out_channels: 128       # FPN output channels per scale
+  depth_out_channels: 64       # FPN output channels per scale
 
   # Fusion decoder
   decoder_hidden: 256
 
   # Camera head
+<<<<<<< HEAD
   camera_head_hidden: 256
 
   # Iterative SE(3) pose refinement (PoseRefinementModule)
   num_pose_iters: 4             # GRU refinement steps; more iters = more params + compute
+=======
+  camera_head_hidden: 64       # was 256 — reduce capacity to avoid overfitting on small dataset
+  camera_head_dropout: 0.1    # dropout between the two MLP layers of RelativePoseHead
+>>>>>>> new-model

@@ -84,7 +84,11 @@ class DepthAlignNetV2(nn.Module):
         depth_out_channels : int        = 128,
         decoder_hidden     : int        = 256,
         camera_head_hidden : int        = 256,
+<<<<<<< HEAD
         num_pose_iters     : int        = 4,
+=======
+        pose_dropout       : float      = 0.0,
+>>>>>>> new-model
         mast3r_ckpt        : str | None = None,
     ):
         super().__init__()
@@ -132,6 +136,7 @@ class DepthAlignNetV2(nn.Module):
         # ── Camera head (shared / weight-tied across both views) ─────────
         self.camera_head = CameraHead(feat_dim=decoder_dim, hidden=camera_head_hidden)
 
+<<<<<<< HEAD
         # ── Iterative SE(3) pose refinement ─────────────────────────────
         # Bridges the depth and pose streams via feature warping.
         # Runs after FusionDecoder so confidence maps are available.
@@ -139,6 +144,12 @@ class DepthAlignNetV2(nn.Module):
             token_dim=decoder_dim,
             num_iters=num_pose_iters,
         )
+=======
+        # ── Relative pose head (same design as V1) ───────────────────────
+        # Takes cat([cam_embed1, cam_embed2]) → T_12, log_conf_pose.
+        # Swapping input order gives T_21 from the same shared weights.
+        self.relative_pose_head = RelativePoseHead(2 * decoder_dim, hidden=camera_head_hidden, dropout=pose_dropout)
+>>>>>>> new-model
 
         # Store freeze flag to avoid iterating 307M params every forward.
         self._dino_frozen = freeze_dino
