@@ -45,7 +45,7 @@ vista:
   # Freeze cross-attention decoder weights after MASt3R init.
   # Set true to use MASt3R as a fixed feature extractor; only enc_to_dec,
   # camera_token, depth_stream, fusion decoder, and camera heads are trained.
-  freeze_cross_attn: false
+  freeze_cross_attn: true
 
   # MASt3R checkpoint for cross-attention weight initialisation.
   # Set to local path after downloading:
