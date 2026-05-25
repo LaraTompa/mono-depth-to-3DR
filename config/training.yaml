@@ -23,8 +23,8 @@ loader:
 # ---------------------------------------------------------------------------
 optimizer:
   type:         adamw
-  lr:           1.0e-4
-  weight_decay: 5.0e-4 #was 1.0e-4 — slightly stronger regularisation to combat overfitting (especially on camera pose)
+  lr:           3.0e-4   # raised from 1e-4 — backbone is frozen so high LR is safe; pose head trains from scratch and needs stronger updates to escape local min
+  weight_decay: 1.0e-3   # raised from 5e-4 — extra regularisation for pose head generalisation
   betas:        [0.9, 0.999]
 
 # ---------------------------------------------------------------------------
@@ -32,7 +32,7 @@ optimizer:
 # ---------------------------------------------------------------------------
 scheduler:
   type:          cosine
-  eta_min:       1.0e-5
+  eta_min:       3.0e-5   # scaled proportionally with lr (same 10× decay ratio)
 
 # ---------------------------------------------------------------------------
 # Loss weights
@@ -47,7 +47,7 @@ loss:
   identity:         0.05   # pose round-trip regulariser weight — raised from 0.05 (5x more signal for anti-parallel constraint)
   K_reg: 0.0             # was 0.0 — intrinsics supervision helps anchor pose
   rot: 0.8               # was implicit 1.0 — boost rotation signal
-  trans: 0.5             # was implicit 1.0 — down-weight translation (harder)
+  trans: 0.8             # raised from 0.5 — translation stalling; more supervision signal
   pose_warmup_epochs: 5     # disable confidence weighting for first N epochs; match camera_warmup_epochs
   # -- Geometric consistency (Lgc, ViSTA-SLAM) ----------------------------
   geometric:              0.1   # weight for Lgc; set 0 to disable
