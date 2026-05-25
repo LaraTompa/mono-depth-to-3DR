@@ -38,7 +38,7 @@ vista:
   freeze_dino: true
   # Cross-attention decoder (MASt3R BaseDecoder compatible)
   decoder_dim: 768              # must match MASt3R BaseDecoder (768 for Base)
-  num_decoder_blocks: 4         # 4 ≈ 5 min/epoch; scale to 8–10 when stable, reduce to avoid overfitting
+  num_decoder_blocks: 3         # 4 ≈ 5 min/epoch; scale to 8–10 when stable, reduce to avoid overfitting
   num_decoder_heads: 12         # 12 heads for dim=768
 
   # MASt3R checkpoint for cross-attention weight initialisation.
@@ -54,7 +54,7 @@ vista:
   # "conv_lite"      → ~165K params — depthwise-sep encoder; fast to converge
   #                    since mono priors are already near-metric quality.
   #                    Tune with conv_lite_base_ch / conv_lite_num_blocks below.
-  depth_backbone: "conv_lite"
+  depth_backbone: "convnext_tiny"
   depth_out_channels: 64       # FPN output channels per scale
 
   # conv_lite hyper-parameters (only used when depth_backbone: "conv_lite")
