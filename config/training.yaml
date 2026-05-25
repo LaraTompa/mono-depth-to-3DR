@@ -23,7 +23,7 @@ loader:
 # ---------------------------------------------------------------------------
 optimizer:
   type:         adamw
-  lr:           1.0e-4
+  lr:           5.0e-5
   weight_decay: 5.0e-4 #was 1.0e-4 — slightly stronger regularisation to combat overfitting (especially on camera pose)
   betas:        [0.9, 0.999]
 
@@ -50,7 +50,7 @@ loss:
   trans: 0.5             # was implicit 1.0 — down-weight translation (harder)
   pose_warmup_epochs: 5    # disable pose loss weighting for first N epochs
   # -- Pose iterative deep supervision (PoseRefinementModule GRU steps) ---
-  pose_iters:             0.5   # weight for deep supervision on intermediate pose outputs; set 0 to disable
+  pose_iters:             0.1   # weight for deep supervision on intermediate pose outputs; set 0 to disable
   # -- Geometric consistency (Lgc, ViSTA-SLAM) ----------------------------
   geometric:              0.1   # weight for Lgc; set 0 to disable
   geometric_warmup_epochs: 10   # start Lgc after this epoch
