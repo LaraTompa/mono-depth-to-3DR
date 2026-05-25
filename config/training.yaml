@@ -38,7 +38,7 @@ scheduler:
 # Loss weights
 # ---------------------------------------------------------------------------
 loss:
-  depth:            0.5    # scale-invariant log loss (supervised)
+  depth:            0.3    # scale-invariant log loss (supervised)
   smooth:           0.005   # edge-aware smoothness
   iter_supervision: 0.0    # deep supervision over refinement iterations
   camera:           0.5    # was 0.1 — pose needs stronger signal vs depth (1.0)
@@ -50,11 +50,11 @@ loss:
   trans: 0.5             # was implicit 1.0 — down-weight translation (harder)
   pose_warmup_epochs: 5    # disable pose loss weighting for first N epochs
   # -- Pose iterative deep supervision (PoseRefinementModule GRU steps) ---
-  pose_iters:             0.1   # was 1.0 — dominated total loss (~53%), starved depth of gradient budget
+  pose_iters:             0.5   # weight for deep supervision on intermediate pose outputs; set 0 to disable
   # -- Geometric consistency (Lgc, ViSTA-SLAM) ----------------------------
-  geometric:              0.1   # weight for Lgc; set 0 to disable
-  geometric_warmup_epochs: 30   # start Lgc after this epoch
-  geometric_switch_epochs: 50   # epoch to switch from GT → predicted pose for Lgc
+  geometric:              0.2   # weight for Lgc; set 0 to disable
+  geometric_warmup_epochs: 10   # start Lgc after this epoch
+  geometric_switch_epochs: 20   # epoch to switch from GT → predicted pose for Lgc
 
 
 # ---------------------------------------------------------------------------
