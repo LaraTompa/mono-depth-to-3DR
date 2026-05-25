@@ -46,7 +46,7 @@ loss:
   pixel_consistency: 0.0  # multiview reprojection consistency
   identity:         0.05   # pose round-trip regulariser weight — raised from 0.05 (5x more signal for anti-parallel constraint)
   K_reg: 0.0             # was 0.0 — intrinsics supervision helps anchor pose
-  rot: 1.5               # was implicit 1.0 — boost rotation signal
+  rot: 0.8               # was implicit 1.0 — boost rotation signal
   trans: 0.5             # was implicit 1.0 — down-weight translation (harder)
   pose_warmup_epochs: 5     # disable confidence weighting for first N epochs; match camera_warmup_epochs
   # -- Geometric consistency (Lgc, ViSTA-SLAM) ----------------------------
@@ -83,7 +83,7 @@ train:
   seed: 0
   loss_spike_threshold: 50.0     # skip batch if loss exceeds this value
   patience: 50
-  num_pose_iters: 1              # number of pose-refinement iterations per batch
+  num_pose_iters: 3              # number of pose-refinement iterations per batch
   gradient_accumulation_steps: 2 # accumulate grads over N batches (effective batch = batch_size * N)
 
 # ---------------------------------------------------------------------------

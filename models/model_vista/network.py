@@ -86,6 +86,7 @@ class DepthAlignNetV2(nn.Module):
         camera_head_hidden : int        = 256,
         pose_dropout       : float      = 0.0,
         mast3r_ckpt        : str | None = None,
+        freeze_cross_attn  : bool       = False,
     ):
         super().__init__()
 
@@ -117,6 +118,14 @@ class DepthAlignNetV2(nn.Module):
         if mast3r_ckpt is not None:
             self.cross_attn.load_mast3r_weights(mast3r_ckpt)
 
+        # ── Optionally freeze cross-attention weights ─────────────────────
+        # When True, MASt3R-initialised weights are kept fixed; only enc_to_dec,
+        # camera_token, depth_stream, decoder, and camera heads are trained.
+        # Gradients still flow THROUGH the frozen ops to upstream trainable
+        # params (enc_to_dec, camera_token), so the pipeline is unchanged.
+        if freeze_cross_attn:
+            self.cross_attn.requires_grad_(False)
+
         # ── Trainable depth stream (late fusion — independent of DINOv2) ─
         self.depth_stream = DepthStream(
             backbone=depth_backbone, pretrained=True, out_channels=depth_out_channels
@@ -137,8 +146,9 @@ class DepthAlignNetV2(nn.Module):
         # Swapping input order gives T_21 from the same shared weights.
         self.relative_pose_head = RelativePoseHead(2 * decoder_dim, hidden=camera_head_hidden, dropout=pose_dropout)
 
-        # Store freeze flag to avoid iterating 307M params every forward.
-        self._dino_frozen = freeze_dino
+        # Store freeze flags.
+        self._dino_frozen        = freeze_dino
+        self._cross_attn_frozen  = freeze_cross_attn
 
     # ------------------------------------------------------------------
     # Forward
