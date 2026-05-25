@@ -52,7 +52,7 @@ loss:
   # -- Pose iterative deep supervision (PoseRefinementModule GRU steps) ---
   pose_iters:             0.5   # weight for deep supervision on intermediate pose outputs; set 0 to disable
   # -- Geometric consistency (Lgc, ViSTA-SLAM) ----------------------------
-  geometric:              0.2   # weight for Lgc; set 0 to disable
+  geometric:              0.0   # weight for Lgc; set 0 to disable
   geometric_warmup_epochs: 10   # start Lgc after this epoch
   geometric_switch_epochs: 20   # epoch to switch from GT → predicted pose for Lgc
 
