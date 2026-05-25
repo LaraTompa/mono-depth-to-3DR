@@ -91,6 +91,7 @@ def optimizer_step(optimizer, model, grad_clip, scaler=None) -> None:
         scaler.step(optimizer)
         scaler.update()
     else:
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
     optimizer.zero_grad(set_to_none=True)
 

@@ -223,7 +223,7 @@ class PoseRefinementModule(nn.Module):
         depth:  torch.Tensor,   # (B, 1, h, w)
         K:      torch.Tensor,   # (B, 3, 3)  intrinsics at h×w resolution
         T_cur:  torch.Tensor,   # (B, 4, 4)  current cam1→cam2 estimate
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Build F.grid_sample grid + 2D flow for warping view-2 features
         into view-1 space using the current pose estimate.
@@ -261,9 +261,12 @@ class PoseRefinementModule(nn.Module):
         P2 = torch.bmm(R, P1) + t.unsqueeze(-1)              # (B, 3, N)
 
         proj = torch.bmm(K, P2)                               # (B, 3, N)
-        z    = proj[:, 2, :].clamp(min=1e-8)
-        uj   = proj[:, 0, :] / z                              # (B, N)
-        vj   = proj[:, 1, :] / z
+        z    = proj[:, 2, :]
+        z_safe = z.clamp(min=1e-8)
+        uj   = proj[:, 0, :] / z_safe                         # (B, N)
+        vj   = proj[:, 1, :] / z_safe
+        uj   = uj.clamp(-1e4, 1e4)
+        vj   = vj.clamp(-1e4, 1e4)
 
         u_src = gx.flatten().unsqueeze(0).expand(B, -1)
         v_src = gy.flatten().unsqueeze(0).expand(B, -1)
@@ -273,8 +276,15 @@ class PoseRefinementModule(nn.Module):
         un   = 2.0 * uj / max(w - 1, 1) - 1.0
         vn   = 2.0 * vj / max(h - 1, 1) - 1.0
         grid = torch.stack([un, vn], dim=-1).reshape(B, h, w, 2)
+        grid = grid.clamp(-2.0, 2.0)
+        # Mask invalid projections so warped-border samples do not enter residuals.
+        valid = (
+            (un > -1.0) & (un < 1.0) &
+            (vn > -1.0) & (vn < 1.0) &
+            (z > 0.0)
+        ).float().reshape(B, 1, h, w)
 
-        return grid, flow
+        return grid, flow, valid
 
     # ------------------------------------------------------------------
 
@@ -316,6 +326,9 @@ class PoseRefinementModule(nn.Module):
         feat2 = self.feat_proj(
             spatial2.detach().reshape(B, h14, w14, -1).permute(0, 3, 1, 2)
         )
+        # Normalize projected features so residual scale stays bounded.
+        feat1 = F.normalize(feat1, dim=1)
+        feat2 = F.normalize(feat2, dim=1)
 
         # ── Downsample depth + confidence to patch grid ────────────────────
         d1 = F.interpolate(depth_mono1, (h14, w14),
@@ -343,27 +356,52 @@ class PoseRefinementModule(nn.Module):
             # warp to be identity and leaving the GRU with nothing to refine.
             T_sg = T_cur
 
-            grid, flow = self._build_warp_grid(d1, K_patch, T_sg)
+            grid, flow, valid = self._build_warp_grid(d1, K_patch, T_sg)
 
             # Warp view-2 features into view-1 coordinate frame
             feat2_w = F.grid_sample(
                 feat2, grid,
-                mode='bilinear', padding_mode='zeros', align_corners=True,
+                mode='bilinear', padding_mode='border', align_corners=True,
             )   # (B, feat_dim, h14, w14)
 
-            # Confidence-weighted geometric residual
-            residual = (feat2_w - feat1) * c1
+            # Confidence- and validity-weighted geometric residual
+            residual = (feat2_w - feat1) * c1 * valid
 
             # ConvGRU step
+            # Normalize pixel flow to feature-map units before mixing with features.
+            flow_norm = flow.clone()
+            flow_norm[:, 0] /= max(w14, 1)
+            flow_norm[:, 1] /= max(h14, 1)
             inp     = self.inp_proj(
-                torch.cat([residual, feat1, c1, flow], dim=1)
+                torch.cat([residual, feat1, c1, flow_norm], dim=1)
             )
             h_state = self.gru(inp, h_state)
+            h_state = torch.nan_to_num(
+                h_state,
+                nan=0.0,
+                posinf=1e4,
+                neginf=-1e4,
+            )
+            h_state = h_state.clamp(-10.0, 10.0)
 
             # Predict Δξ ∈ se(3) from spatially-pooled hidden state
-            delta_xi = self.readout(h_state.mean(dim=[-2, -1]))   # (B, 6)
+            delta_xi = 0.01 * self.readout(h_state.mean(dim=[-2, -1]))   # (B, 6)
+            # Prevent catastrophic SE(3) updates
+            rot_step = 0.05
+            trans_step = 0.05
+
+            delta_rot = delta_xi[:, :3].clamp(-rot_step, rot_step)
+            delta_trans = delta_xi[:, 3:].clamp(-trans_step, trans_step)
+
+            delta_xi = torch.cat([delta_rot, delta_trans], dim=-1)
 
             # Left-multiply SE(3) update: T_{k+1} = exp(Δξ̂) ⊕ T_k
+            delta_xi = torch.nan_to_num(
+                delta_xi,
+                nan=0.0,
+                posinf=0.0,
+                neginf=0.0,
+            )
             T_cur = se3_exp_map(delta_xi) @ T_sg
 
             T_12_iters.append(T_cur)
