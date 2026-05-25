@@ -24,6 +24,7 @@ from PIL import Image
 from torch.utils.data import Dataset
 
 from scene import find_scene_paths, ScanNetScene
+from augmentation import augment_pair
 
 
 class PreSampledPairDataset(Dataset):
@@ -42,11 +43,22 @@ class PreSampledPairDataset(Dataset):
                         is not searched again.
     """
 
-    def __init__(self, root_dir: str, mde_source: str = "zoedepth", scene_paths=None):
+    def __init__(
+        self,
+        root_dir:   str,
+        mde_source: str  = "zoedepth",
+        scene_paths=None,
+        aug_cfg:    dict | None = None,
+    ):
+        """
+        aug_cfg : dict mapping augmentation parameters (see data/augmentation.py).
+                  Pass None (default) to disable all augmentation (val/test).
+        """
         if scene_paths is None:
             scene_paths = find_scene_paths(root_dir)
 
         self.mde_source = mde_source
+        self.aug_cfg    = aug_cfg
         self.pairs = []
         for scene_path in scene_paths:
             scene = ScanNetScene(scene_path, mde_source=mde_source)
@@ -93,12 +105,23 @@ class PreSampledPairDataset(Dataset):
             ))
             poses.append(torch.from_numpy(info["poses"][fid]).float())
 
+        imgs_t  = torch.stack(images)                           # (2, 3, H, W)
+        deps_t  = torch.stack(depths)                           # (2, 1, H, W)  GT
+        mde_t   = torch.stack(mde_depths)                       # (2, 1, H, W)  MDE prior
+        poses_t = torch.stack(poses)                            # (2, 4, 4)
+        intr_t  = torch.from_numpy(info["intrinsics"])          # (3, 3)
+
+        if self.aug_cfg is not None:
+            imgs_t, deps_t, mde_t, poses_t, intr_t = augment_pair(
+                imgs_t, deps_t, mde_t, poses_t, intr_t, self.aug_cfg
+            )
+
         return {
-            "images":     torch.stack(images),                         # (2, 3, H, W)
-            "depths":     torch.stack(depths),                         # (2, 1, H, W)  GT
-            "mde_depths": torch.stack(mde_depths),                     # (2, 1, H, W)  MDE prior
-            "poses":      torch.stack(poses),                          # (2, 4, 4)
-            "intrinsics": torch.from_numpy(info["intrinsics"]),        # (3, 3)
+            "images":     imgs_t,
+            "depths":     deps_t,
+            "mde_depths": mde_t,
+            "poses":      poses_t,
+            "intrinsics": intr_t,
             "scene":      info["scene"],
             "frame_ids":  [fid_a, fid_b],
         }

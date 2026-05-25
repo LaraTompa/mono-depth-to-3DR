@@ -68,10 +68,14 @@ vista:
   conv_lite_num_blocks:  2
 
   # Fusion decoder
-  decoder_hidden: 256
+  decoder_hidden: 64 #was 256 — reduce capacity to avoid overfitting on small dataset
 
   # Iterative SE(3) pose refinement (PoseRefinementModule)
   pose_refinement_enabled: true  # set false to disable PoseRefinementModule entirely
   num_pose_iters: 4             # GRU refinement steps; more iters = more params + compute
   camera_head_hidden: 64       # was 256 — reduce capacity to avoid overfitting on small dataset
+<<<<<<< HEAD
   camera_head_dropout: 0.1    # dropout between the two MLP layers of RelativePoseHead
+=======
+  camera_head_dropout: 0.3    # dropout between the two MLP layers of RelativePoseHead, started with 0.1
+>>>>>>> origin/augmentation

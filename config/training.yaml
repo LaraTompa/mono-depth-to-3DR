@@ -24,7 +24,7 @@ loader:
 optimizer:
   type:         adamw
   lr:           1.0e-4
-  weight_decay: 1.0e-4
+  weight_decay: 5.0e-4 #was 1.0e-4 — slightly stronger regularisation to combat overfitting (especially on camera pose)
   betas:        [0.9, 0.999]
 
 # ---------------------------------------------------------------------------
@@ -44,7 +44,11 @@ loss:
   camera:           0.5    # was 0.1 — pose needs stronger signal vs depth (1.0)
   camera_warmup_epochs: 5   # pose was learning faster after epoch 15 (confidence weighting); front-load it
   pixel_consistency: 0.0  # multiview reprojection consistency
+<<<<<<< HEAD
   identity:         0.25  # pose round-trip regulariser weight
+=======
+  identity:         0.05   # pose round-trip regulariser weight — raised from 0.05 (5x more signal for anti-parallel constraint)
+>>>>>>> origin/augmentation
   K_reg: 0.0             # was 0.0 — intrinsics supervision helps anchor pose
   rot: 1.5               # was implicit 1.0 — boost rotation signal
   trans: 0.5             # was implicit 1.0 — down-weight translation (harder)
@@ -56,6 +60,23 @@ loss:
   geometric_warmup_epochs: 10   # start Lgc after this epoch
   geometric_switch_epochs: 20   # epoch to switch from GT → predicted pose for Lgc
 
+
+# ---------------------------------------------------------------------------
+# Data augmentation  (training split only; val/test are never augmented)
+# Set any value to 0.0 to disable that transform.
+# ---------------------------------------------------------------------------
+augmentation:
+  # Geometric — applied to images, depths, mde_depths, poses, and intrinsics.
+  # Both views of a pair are flipped together so the relative pose stays valid.
+  p_hflip:    0.5    # probability of horizontal flip per pair
+
+  # Photometric — applied to RGB images only, independently per view.
+  # Factor is sampled uniformly from [1-x, 1+x] (brightness/contrast/saturation)
+  # or [-x, x] (hue).
+  brightness: 0.2
+  contrast:   0.2
+  saturation: 0.2
+  hue:        0.05   # fraction of 0.5 (TF.adjust_hue convention)
 
 # ---------------------------------------------------------------------------
 # Training
