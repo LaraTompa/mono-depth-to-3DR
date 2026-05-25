@@ -64,8 +64,8 @@ vista:
   #   base_ch=32, num_blocks=2  →  ~165 K parameters
   #   base_ch=64, num_blocks=2  →  ~660 K parameters
   #   base_ch=64, num_blocks=4  →  ~730 K parameters
-  conv_lite_base_ch:    32
-  conv_lite_num_blocks:  2
+  conv_lite_base_ch:    64
+  conv_lite_num_blocks:  4
 
   # Fusion decoder
   decoder_hidden: 64 #was 256 — reduce capacity to avoid overfitting on small dataset
