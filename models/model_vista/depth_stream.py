@@ -2,20 +2,19 @@
 depth_stream.py — Trainable geometry-aware depth encoder stream.
 
 Takes 4-channel input (RGB + mono depth) and produces a 3-scale feature
-pyramid {s4, s8, s16} using ConvNeXt-Small as backbone.
+pyramid {s4, s8, s16}.
 
-This stream is the geometry branch in the late-fusion two-stream design:
-  - DINOv2 handles semantics and cross-view correspondence.
-  - This stream encodes depth-structure, indoor geometry cues, and the
-    mono-depth prior.  It never sees the other view — fusion happens only
-    in the decoder.
+Two backbone families are available — choose via arch.yaml:
+  "convnext_tiny"  / "convnext_small"  — full ConvNeXt (~28M / ~50M params)
+  "conv_lite"                          — custom lightweight encoder (~165K params)
 
-ConvNeXt-Small stage channel widths are identical to ConvNeXt-Tiny
-([96, 192, 384, 768]) but stage-3 has 27 blocks instead of 9, giving
-more capacity for geometry adaptation.
+The lightweight option makes sense when monocular depth priors (ZoeDepth,
+MiDaS …) are already close to metric quality; the network only needs to
+learn local refinements rather than extract depth from scratch.
 
-Weight initialisation: ImageNet pretrained weights for the RGB channels;
-depth channel (4th) zero-initialised to preserve the pretrained prior.
+Weight initialisation:
+  ConvNeXt: ImageNet pretrained for RGB; depth channel zero-initialised.
+  conv_lite: all randomly initialised (no pretrained weights needed).
 """
 
 import torch
@@ -130,3 +129,165 @@ class DepthStream(nn.Module):
             "s8":  self.proj8(s8),
             "s16": self.proj16(s16),
         }
+
+
+# ---------------------------------------------------------------------------
+# Lightweight alternative: conv_lite
+# ---------------------------------------------------------------------------
+
+class _DWSepBlock(nn.Module):
+    """Depthwise-separable residual block with BN+GELU.
+
+    The residual shortcut keeps the network close to identity early in
+    training — ideal when the input depth prior is already accurate and
+    we only want to learn local refinements.
+
+    Params per block:
+      ch=32  →  ~1.3K   ch=64  →  ~5.1K   ch=128 →  ~18.7K
+    """
+
+    def __init__(self, ch: int):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Conv2d(ch, ch, 3, padding=1, groups=ch, bias=False),  # depthwise
+            nn.Conv2d(ch, ch, 1, bias=False),                          # pointwise
+            nn.BatchNorm2d(ch),
+            nn.GELU(),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x + self.net(x)
+
+
+class LiteDepthStream(nn.Module):
+    """
+    Ultra-lightweight depth encoder for well-initialised monocular priors.
+
+    Architecture
+    ------------
+    Stem      : Conv(4 → C, 3×3 s2) → BN → GELU → Conv(C → C, 3×3 s2) → BN → GELU
+                Two stride-2 convs give stride-4 with better gradient flow and
+                receptive field than a single stride-4 patch embedding.
+
+    Stage 1   : num_blocks × _DWSepBlock(C)         → s4  features (B, C,   H/4,  W/4)
+    Down1     : Conv(C → 2C, 3×3 s2) → BN → GELU   → stride 8
+    Stage 2   : num_blocks × _DWSepBlock(2C)         → s8  features (B, 2C,  H/8,  W/8)
+    Down2     : Conv(2C → 4C, 3×3 s2) → BN → GELU  → stride 16
+    Stage 3   : num_blocks × _DWSepBlock(4C)         → s16 features (B, 4C, H/16, W/16)
+
+    Projections: 1×1 Conv at each scale → out_channels  (matches FusionDecoder input)
+
+    Parameter count (out_channels=64):
+      base_ch=32, num_blocks=2  →  ~165 K   (≈170× less than ConvNeXt-Tiny)
+      base_ch=64, num_blocks=2  →  ~660 K
+      base_ch=64, num_blocks=4  →  ~730 K
+
+    Parameters
+    ----------
+    base_ch      : int   channels at s4; s8=2×base_ch, s16=4×base_ch
+    num_blocks   : int   depthwise-sep residual blocks per stage
+    out_channels : int   output channels per scale (projected, matches FusionDecoder)
+    """
+
+    def __init__(
+        self,
+        base_ch:      int = 32,
+        num_blocks:   int = 2,
+        out_channels: int = 128,
+    ):
+        super().__init__()
+        C = base_ch
+
+        # Stride-4 stem via two stride-2 convolutions
+        self.stem = nn.Sequential(
+            nn.Conv2d(4, C, 3, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(C),
+            nn.GELU(),
+            nn.Conv2d(C, C, 3, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(C),
+            nn.GELU(),
+        )
+
+        self.stage1 = nn.Sequential(*[_DWSepBlock(C)     for _ in range(num_blocks)])
+
+        self.down1  = nn.Sequential(
+            nn.Conv2d(C,     2 * C, 3, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(2 * C),
+            nn.GELU(),
+        )
+        self.stage2 = nn.Sequential(*[_DWSepBlock(2 * C) for _ in range(num_blocks)])
+
+        self.down2  = nn.Sequential(
+            nn.Conv2d(2 * C, 4 * C, 3, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(4 * C),
+            nn.GELU(),
+        )
+        self.stage3 = nn.Sequential(*[_DWSepBlock(4 * C) for _ in range(num_blocks)])
+
+        # Project each scale to the unified out_channels for FusionDecoder
+        self.proj4  = nn.Conv2d(C,     out_channels, 1)
+        self.proj8  = nn.Conv2d(2 * C, out_channels, 1)
+        self.proj16 = nn.Conv2d(4 * C, out_channels, 1)
+
+        self.out_channels = out_channels
+
+    def forward(self, rgb: torch.Tensor, depth: torch.Tensor) -> dict[str, torch.Tensor]:
+        """
+        Parameters
+        ----------
+        rgb   : (B, 3, H, W)  RGB image in [0, 1]
+        depth : (B, 1, H, W)  monocular depth prior (metres)
+
+        Returns
+        -------
+        {"s4": (B, C, H/4, W/4), "s8": (B, C, H/8, W/8), "s16": (B, C, H/16, W/16)}
+        """
+        x = torch.cat([rgb, depth], dim=1)   # (B, 4, H, W)
+
+        f = self.stem(x)                      # (B, C,   H/4,  W/4)
+        f = self.stage1(f)
+        s4 = f
+
+        f = self.down1(f)                     # (B, 2C,  H/8,  W/8)
+        f = self.stage2(f)
+        s8 = f
+
+        f = self.down2(f)                     # (B, 4C, H/16, W/16)
+        f = self.stage3(f)
+        s16 = f
+
+        return {
+            "s4":  self.proj4(s4),
+            "s8":  self.proj8(s8),
+            "s16": self.proj16(s16),
+        }
+
+
+# ---------------------------------------------------------------------------
+# Factory — single entry-point used by network.py
+# ---------------------------------------------------------------------------
+
+def build_depth_stream(
+    backbone:     str  = "convnext_tiny",
+    pretrained:   bool = True,
+    out_channels: int  = 128,
+    lite_base_ch: int  = 32,
+    lite_num_blocks: int = 2,
+) -> nn.Module:
+    """
+    Return a depth-stream encoder with the requested backbone.
+
+    backbone choices
+    ----------------
+    "convnext_tiny"   ~28M params  (same channel widths as Small, fewer blocks)
+    "convnext_small"  ~50M params
+    "conv_lite"       ~165K params  configured via lite_base_ch / lite_num_blocks
+    """
+    if backbone == "conv_lite":
+        return LiteDepthStream(
+            base_ch=lite_base_ch,
+            num_blocks=lite_num_blocks,
+            out_channels=out_channels,
+        )
+    # ConvNeXt family — delegate to original DepthStream
+    return DepthStream(backbone=backbone, pretrained=pretrained, out_channels=out_channels)

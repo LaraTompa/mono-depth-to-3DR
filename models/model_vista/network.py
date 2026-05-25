@@ -48,7 +48,7 @@ import torch.nn.functional as F
 
 from .encoder         import DinoEncoder
 from .cross_attention import CrossAttentionDecoder
-from .depth_stream    import DepthStream
+from .depth_stream    import build_depth_stream
 from .decoder         import FusionDecoder
 
 # Re-use CameraHead from V1; pose is now handled by PoseRefinementModule.
@@ -86,6 +86,8 @@ class DepthAlignNetV2(nn.Module):
         camera_head_hidden : int        = 256,
         num_pose_iters     : int        = 4,
         pose_dropout       : float      = 0.0,
+        lite_base_ch       : int        = 32,
+        lite_num_blocks    : int        = 2,
         mast3r_ckpt        : str | None = None,
     ):
         super().__init__()
@@ -119,8 +121,12 @@ class DepthAlignNetV2(nn.Module):
             self.cross_attn.load_mast3r_weights(mast3r_ckpt)
 
         # ── Trainable depth stream (late fusion — independent of DINOv2) ─
-        self.depth_stream = DepthStream(
-            backbone=depth_backbone, pretrained=True, out_channels=depth_out_channels
+        self.depth_stream = build_depth_stream(
+            backbone=depth_backbone,
+            pretrained=True,
+            out_channels=depth_out_channels,
+            lite_base_ch=lite_base_ch,
+            lite_num_blocks=lite_num_blocks,
         )
 
         # ── Late-fusion decoder ──────────────────────────────────────────

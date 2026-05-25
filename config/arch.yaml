@@ -52,8 +52,20 @@ vista:
   # Depth stream backbone (trainable)
   # "convnext_tiny"  → ~28M params (same channel widths as Small, fewer blocks)
   # "convnext_small" → ~50M params (27 blocks in stage 3 vs 9 for Tiny)
-  depth_backbone: "convnext_tiny"
+  # "conv_lite"      → ~165K params — depthwise-sep encoder; fast to converge
+  #                    since mono priors are already near-metric quality.
+  #                    Tune with conv_lite_base_ch / conv_lite_num_blocks below.
+  depth_backbone: "conv_lite"
   depth_out_channels: 64       # FPN output channels per scale
+
+  # conv_lite hyper-parameters (only used when depth_backbone: "conv_lite")
+  # Stage channel widths: [base_ch, 2×base_ch, 4×base_ch]
+  # Approximate param counts at depth_out_channels=64:
+  #   base_ch=32, num_blocks=2  →  ~165 K parameters
+  #   base_ch=64, num_blocks=2  →  ~660 K parameters
+  #   base_ch=64, num_blocks=4  →  ~730 K parameters
+  conv_lite_base_ch:    32
+  conv_lite_num_blocks:  2
 
   # Fusion decoder
   decoder_hidden: 256
