@@ -318,8 +318,8 @@ def train(cfg: dict, arch_cfg: dict, resume: str | None = None) -> None:
     if not test_paths:
         test_paths = train_paths[-1:]
     print(f"[train] Scenes: {len(train_paths)} train / {len(val_paths)} val / {len(test_paths)} test")
-
-    train_ds = build_dataset(cfg, root_dir=root_dir, scene_paths=train_paths, augment=True)
+    augment = bool(cfg.get("augment", True))
+    train_ds = build_dataset(cfg, root_dir=root_dir, scene_paths=train_paths, augment=augment)
     val_ds   = build_dataset(cfg, root_dir=root_dir, scene_paths=val_paths)
     test_ds  = build_dataset(cfg, root_dir=root_dir, scene_paths=test_paths)
 
