@@ -63,7 +63,14 @@ augment: True
 augmentation:
   # Geometric — applied to images, depths, mde_depths, poses, and intrinsics.
   # Both views of a pair are flipped together so the relative pose stays valid.
-  p_hflip:    0.5    # probability of horizontal flip per pair
+  #
+  # WARNING: horizontal flip requires the cross-attention encoder to be
+  # equivariant to reflections.  With freeze_cross_attn: true the frozen
+  # DINOv2 + MASt3R features do NOT encode orientation changes, so flipped
+  # images produce nearly identical embeddings while the GT relative pose
+  # changes sign in R and tx.  This creates contradictory rotation training
+  # signal → rotation stall.  Re-enable only when freeze_cross_attn: false.
+  p_hflip:    0.0    # disabled while cross-attention is frozen
 
   # Photometric — applied to RGB images only, independently per view.
   # Factor is sampled uniformly from [1-x, 1+x] (brightness/contrast/saturation)
