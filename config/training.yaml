@@ -56,6 +56,23 @@ loss:
 
 
 # ---------------------------------------------------------------------------
+# Data augmentation  (training split only; val/test are never augmented)
+# Set any value to 0.0 to disable that transform.
+# ---------------------------------------------------------------------------
+augmentation:
+  # Geometric — applied to images, depths, mde_depths, poses, and intrinsics.
+  # Both views of a pair are flipped together so the relative pose stays valid.
+  p_hflip:    0.5    # probability of horizontal flip per pair
+
+  # Photometric — applied to RGB images only, independently per view.
+  # Factor is sampled uniformly from [1-x, 1+x] (brightness/contrast/saturation)
+  # or [-x, x] (hue).
+  brightness: 0.2
+  contrast:   0.2
+  saturation: 0.2
+  hue:        0.05   # fraction of 0.5 (TF.adjust_hue convention)
+
+# ---------------------------------------------------------------------------
 # Training
 # ---------------------------------------------------------------------------
 train:
