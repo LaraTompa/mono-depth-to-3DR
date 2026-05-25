@@ -52,8 +52,9 @@ from .depth_stream    import build_depth_stream
 from .decoder         import FusionDecoder
 
 # Re-use CameraHead from V1; pose is now handled by PoseRefinementModule.
-from models.model_image_depth.network import CameraHead
+from models.model_image_depth.network import CameraHead, RelativePoseHead
 from .pose_refinement import PoseRefinementModule
+from models.model_image_depth.geometry import se3_inv
 
 
 class DepthAlignNetV2(nn.Module):
@@ -149,6 +150,8 @@ class DepthAlignNetV2(nn.Module):
                 token_dim=decoder_dim,
                 num_iters=num_pose_iters,
             )
+        else:
+            self.relative_pose_head = RelativePoseHead(2*decoder_dim, hidden_dim=camera_head_hidden, dropout=pose_dropout)
 
         # Store freeze flag to avoid iterating 307M params every forward.
         self._dino_frozen = freeze_dino
@@ -234,12 +237,10 @@ class DepthAlignNetV2(nn.Module):
             T_12_pred = T_12_iters[-1]
             T_21_pred = T_21_iters[-1]
         else:
-            eye = torch.eye(4, device=rgb1.device, dtype=rgb1.dtype).unsqueeze(0).expand(B, -1, -1)
-            T_12_iters = [eye for _ in range(self.num_pose_iters)]
-            T_21_iters = [eye for _ in range(self.num_pose_iters)]
-            log_conf_pose = torch.zeros(B, device=rgb1.device, dtype=rgb1.dtype)
-            T_12_pred = eye
-            T_21_pred = eye
+            rel_12 = self.relative_pose_head(torch.cat([cam_embed1, cam_embed2], dim=1))
+            T_12_pred = rel_12["T_12"]
+            T_21_pred = se3_inv(T_12_pred)
+            log_conf_pose = rel_12["log_conf_pose"]
 
         return {
             # Depth outputs (same contract as V1)
