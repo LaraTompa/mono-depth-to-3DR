@@ -36,11 +36,11 @@ def se3_inv(T: torch.Tensor) -> torch.Tensor:
     return T_inv
 
 EPS = 1e-8
-EPS_NORM = 0.1   # floor for translation-direction normalisation (metres).
+EPS_NORM = 0.01  # floor for translation-direction normalisation (metres).
                   # Using squared-norm-clamp-sqrt (not .norm().clamp) so the backward
-                  # at t=0 is ZERO instead of NaN.  EPS_NORM=0.1 bounds gradient
-                  # amplification at 10×; pairs with < 10 cm baseline are treated as
-                  # pure-rotation (direction suppressed) which is intentional.
+                  # at t=0 is ZERO instead of NaN.  Lowered from 0.1 to 0.01 so the
+                  # direction gradient is not killed for short-baseline pairs (< 10 cm);
+                  # 0.1 was too aggressive and caused trans loss to saturate at 1.0.
 ACOS_EPS = 1e-2  # raised from 1e-4: limits max acos gradient to ~7 (was ~70)
 LOG_CONF_MIN = -3.0   # tightened: prevents runaway uncertainty / confidence collapse
 LOG_CONF_MAX =  3.0
@@ -218,8 +218,10 @@ def geodesic_rotation_loss(
     # everywhere, including at θ=0 (returns 0) and θ=π (returns 2√2).
     I3    = torch.eye(3, device=R_rel.device, dtype=R_rel.dtype).unsqueeze(0)
     diff  = R_rel - I3                             # (B, 3, 3)
-    chord = (diff * diff).sum(dim=[-2, -1]).sqrt() # (B,)  in [0, 2√2]
-    return torch.nan_to_num(chord, nan=0.0).to(R_pred.device)
+    # clamp(min=0) + 1e-8 before sqrt prevents inf gradient when chord→0
+    # (sqrt'(0) = inf poisons backward even when forward value is 0)
+    chord = (diff * diff).sum(dim=[-2, -1]).clamp(min=0.0).add(1e-8).sqrt()  # (B,)  in [0, 2√2]
+    return chord.to(R_pred.device)
 
 
 # ---------------------------------------------------------------------------
@@ -639,7 +641,9 @@ def geometric_consistency_loss(
         P_j   = torch.bmm(K_inv, uv1_j) * d_j_sampled.unsqueeze(1)  # (B, 3, N)
 
         # 7. 3-D distance: ‖ Q − P̂_j ‖  per pixel
-        dist = (Q - P_j).norm(dim=1)                 # (B, N)
+        # add 1e-8 before sqrt so gradient stays finite when two points coincide
+        diff3d = Q - P_j
+        dist = (diff3d * diff3d).sum(dim=1).clamp(min=0.0).add(1e-8).sqrt()  # (B, N)
 
         # 8. Validity mask ────────────────────────────────────────────────
         valid = (

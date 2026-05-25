@@ -50,7 +50,7 @@ loss:
   trans: 0.5             # was implicit 1.0 — down-weight translation (harder)
   pose_warmup_epochs: 5    # disable pose loss weighting for first N epochs
   # -- Pose iterative deep supervision (PoseRefinementModule GRU steps) ---
-  pose_iters:             1.0   # weight for per-GRU-step pose supervision; set 0 to disable
+  pose_iters:             0.1   # was 1.0 — dominated total loss (~53%), starved depth of gradient budget
   # -- Geometric consistency (Lgc, ViSTA-SLAM) ----------------------------
   geometric:              0.1   # weight for Lgc; set 0 to disable
   geometric_warmup_epochs: 30   # start Lgc after this epoch

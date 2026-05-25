@@ -62,7 +62,9 @@ def se3_exp_map(xi: torch.Tensor) -> torch.Tensor:
     v     = xi[:, 3:]
 
     theta_sq = (omega * omega).sum(dim=-1, keepdim=True).clamp(min=0.0)
-    theta    = theta_sq.sqrt()
+    # add eps before sqrt — same reasoning as in geodesic_rotation_loss:
+    # sqrt'(0) = inf which can leak through torch.where on some PyTorch builds
+    theta    = theta_sq.add(1e-8).sqrt()
 
     # Skew-symmetric matrix  ω̂  (B, 3, 3)
     wx, wy, wz = omega[:, 0], omega[:, 1], omega[:, 2]
@@ -192,8 +194,9 @@ class PoseRefinementModule(nn.Module):
         nn.init.zeros_(self.coarse_head[-1].weight)
         with torch.no_grad():
             self.coarse_head[-1].bias.copy_(
-                torch.tensor([1., 0., 0., 0., 1., 0., 0., 0., 0.])
-            )
+                torch.tensor([1., 0., 0., 0., 1., 0., 0., 0., 1e-2])
+            )  # identity rotation; small but non-zero z-translation so the
+               # direction gradient is defined from the very first step
 
         # Per-sample log-confidence for the predicted pose
         self.log_conf_head = nn.Linear(token_dim * 2, 1)
@@ -302,11 +305,15 @@ class PoseRefinementModule(nn.Module):
         log_conf_pose = self.log_conf_head(embed_12).squeeze(-1)       # (B,)
 
         # ── Reshape tokens → 2-D feature maps at patch grid ───────────────
+        # Detach spatial tokens so pose_iters gradients do NOT flow back into
+        # the cross-attention decoder.  The decoder is already supervised by
+        # depth loss and the final camera-pose loss; letting pose_iters also
+        # modify it causes gradient interference that prevents both from converging.
         feat1 = self.feat_proj(
-            spatial1.reshape(B, h14, w14, -1).permute(0, 3, 1, 2)
+            spatial1.detach().reshape(B, h14, w14, -1).permute(0, 3, 1, 2)
         )   # (B, feat_dim, h14, w14)
         feat2 = self.feat_proj(
-            spatial2.reshape(B, h14, w14, -1).permute(0, 3, 1, 2)
+            spatial2.detach().reshape(B, h14, w14, -1).permute(0, 3, 1, 2)
         )
 
         # ── Downsample depth + confidence to patch grid ────────────────────

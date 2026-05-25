@@ -72,6 +72,15 @@ def optimizer_step(optimizer, model, grad_clip, scaler=None) -> None:
         total_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
         if not torch.isfinite(total_norm):
             print(f"[NaN grad] total_norm={total_norm:.4f} — skipping update")
+            # Also zero out any NaN/Inf values that snuck into model weights
+            # (once weights are NaN the forward pass stays broken indefinitely).
+            nan_params = 0
+            for p in model.parameters():
+                if not torch.isfinite(p.data).all():
+                    p.data = torch.nan_to_num(p.data, nan=0.0, posinf=1.0, neginf=-1.0)
+                    nan_params += 1
+            if nan_params:
+                print(f"[NaN grad] reset {nan_params} parameter tensors with non-finite values")
             optimizer.zero_grad(set_to_none=True)
             if scaler is not None:
                 scaler.update()   # must call update() even when skipping
