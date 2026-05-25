@@ -354,6 +354,7 @@ def train(cfg: dict, arch_cfg: dict, resume: str | None = None) -> None:
             lite_base_ch       = int(v_cfg.get("conv_lite_base_ch",     32)),
             lite_num_blocks    = int(v_cfg.get("conv_lite_num_blocks",    2)),
             mast3r_ckpt        = v_cfg.get("mast3r_ckpt") or None,
+            pose_refinement_enabled = bool(v_cfg.get("pose_refinement_enabled", True)),
         ).to(device)
     else:   # "v1" — original ConvNeXt-Tiny FPN model
         from models.model_image_depth.network import DepthAlignNet

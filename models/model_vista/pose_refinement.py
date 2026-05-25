@@ -17,8 +17,9 @@ Refinement loop  (num_iters times)
     5. Δξ  = global_avg_pool(h) → MLP → 6-dim                [se(3) update]
     6. T_cur = exp(Δξ̂) @ T_cur                               [SE(3) left-mult]
 
-T_cur is detached before each warp step, enabling per-step deep supervision
-without long gradient chains through the SE(3) update sequence.
+T_cur is NOT detached between steps so that gradients from camera_pose_loss
+(on the final T_N) and pose_iters_loss flow back through the full SE(3)
+chain to the coarse head.
 
 Approximate parameter count  (token_dim=768, feat_dim=128, hidden_dim=128)
     feat_proj   768×128×1×1            =   98 304
@@ -335,10 +336,12 @@ class PoseRefinementModule(nn.Module):
         T_21_iters: list = []
 
         for _ in range(self.num_iters):
-            # Detach T_cur: each step trains independently via deep supervision.
-            # Gradients do NOT flow back through the SE(3) update chain —
-            # only through the current GRU step's weights.
-            T_sg = T_cur.detach()
+            # No detach on T_cur: gradients flow back through the full pose
+            # chain to the coarse head.  With T_cur.detach() the coarse head
+            # received gradient only from pose_iters[0] at weight ≈ 0.033,
+            # which was too weak to move it away from identity — causing every
+            # warp to be identity and leaving the GRU with nothing to refine.
+            T_sg = T_cur
 
             grid, flow = self._build_warp_grid(d1, K_patch, T_sg)
 

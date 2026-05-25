@@ -89,6 +89,7 @@ class DepthAlignNetV2(nn.Module):
         lite_base_ch       : int        = 32,
         lite_num_blocks    : int        = 2,
         mast3r_ckpt        : str | None = None,
+        pose_refinement_enabled: bool = True,
     ):
         super().__init__()
 
@@ -142,10 +143,12 @@ class DepthAlignNetV2(nn.Module):
         # ── Iterative SE(3) pose refinement ─────────────────────────────
         # Bridges the depth and pose streams via feature warping.
         # Runs after FusionDecoder so confidence maps are available.
-        self.pose_refiner = PoseRefinementModule(
-            token_dim=decoder_dim,
-            num_iters=num_pose_iters,
-        )
+        self.pose_refinement_enabled = pose_refinement_enabled
+        if self.pose_refinement_enabled:
+            self.pose_refiner = PoseRefinementModule(
+                token_dim=decoder_dim,
+                num_iters=num_pose_iters,
+            )
 
         # Store freeze flag to avoid iterating 307M params every forward.
         self._dino_frozen = freeze_dino
@@ -219,18 +222,24 @@ class DepthAlignNetV2(nn.Module):
         dec2 = self.decoder(spatial2, depth_feats2, depth_mono2, grid_hw)
 
         # ── 9. Iterative SE(3) pose refinement ───────────────────────────
-        # Runs after FusionDecoder so conf1 is available to gate the
-        # geometric residual.  depth_mono1 (monocular prior) is used as the
-        # warp depth — not pred depth, which is unreliable early in training.
-        T_12_iters, T_21_iters, log_conf_pose = self.pose_refiner(
-            cam_embed1, cam_embed2,
-            spatial1, spatial2,
-            depth_mono1, K_pred,
-            dec1["confidence"],
-            H, W, h14, w14,
-        )
-        T_12_pred = T_12_iters[-1]
-        T_21_pred = T_21_iters[-1]
+        # Optionally skip PoseRefinementModule entirely (for ablation/debug).
+        if self.pose_refinement_enabled:
+            T_12_iters, T_21_iters, log_conf_pose = self.pose_refiner(
+                cam_embed1, cam_embed2,
+                spatial1, spatial2,
+                depth_mono1, K_pred,
+                dec1["confidence"],
+                H, W, h14, w14,
+            )
+            T_12_pred = T_12_iters[-1]
+            T_21_pred = T_21_iters[-1]
+        else:
+            eye = torch.eye(4, device=rgb1.device, dtype=rgb1.dtype).unsqueeze(0).expand(B, -1, -1)
+            T_12_iters = [eye for _ in range(self.num_pose_iters)]
+            T_21_iters = [eye for _ in range(self.num_pose_iters)]
+            log_conf_pose = torch.zeros(B, device=rgb1.device, dtype=rgb1.dtype)
+            T_12_pred = eye
+            T_21_pred = eye
 
         return {
             # Depth outputs (same contract as V1)
