@@ -79,24 +79,15 @@ def se3_exp_map(xi: torch.Tensor) -> torch.Tensor:
 
     I3 = torch.eye(3, device=xi.device, dtype=xi.dtype).unsqueeze(0).expand(B, -1, -1)
 
-    # Coefficients — Taylor series selected per-sample for small θ.
-    # Both branches always computed; clamps prevent NaN in inactive branch.
-    eps   = 1e-4
-    small = theta < eps
+    # Coefficients with clamped denominators for numerical stability.
     sin_t = torch.sin(theta)
     cos_t = torch.cos(theta)
 
-    a = torch.where(small,
-                    1.0 - theta_sq / 6.0  + theta_sq ** 2 / 120.0,
-                    sin_t / theta.clamp(min=eps))
-
-    b = torch.where(small,
-                    0.5 - theta_sq / 24.0 + theta_sq ** 2 / 720.0,
-                    (1.0 - cos_t) / theta_sq.clamp(min=eps ** 2))
-
-    c = torch.where(small,
-                    1.0 / 6.0 - theta_sq / 120.0 + theta_sq ** 2 / 5040.0,
-                    (theta - sin_t) / (theta_sq * theta).clamp(min=eps ** 3))
+    # Avoid torch.where here: both branches are evaluated and can flood NaNs.
+    theta_safe = theta.clamp(min=1e-6)
+    a = sin_t / theta_safe
+    b = (1.0 - cos_t) / theta_sq.clamp(min=1e-12)
+    c = (theta - sin_t) / (theta_sq * theta_safe).clamp(min=1e-18)
 
     a, b, c = a.unsqueeze(-1), b.unsqueeze(-1), c.unsqueeze(-1)
 
@@ -164,6 +155,7 @@ class PoseRefinementModule(nn.Module):
         super().__init__()
         self.num_iters  = num_iters
         self.hidden_dim = hidden_dim
+        self.detach_between_iters = False
 
         # Feature projection: token_dim → feat_dim  (weight-shared both views)
         self.feat_proj = nn.Conv2d(token_dim, feat_dim, 1, bias=False)
@@ -348,12 +340,13 @@ class PoseRefinementModule(nn.Module):
         T_12_iters: list = []
         T_21_iters: list = []
 
-        for _ in range(self.num_iters):
+        for iter_idx in range(self.num_iters):
             # No detach on T_cur: gradients flow back through the full pose
             # chain to the coarse head.  With T_cur.detach() the coarse head
             # received gradient only from pose_iters[0] at weight ≈ 0.033,
             # which was too weak to move it away from identity — causing every
             # warp to be identity and leaving the GRU with nothing to refine.
+            # Warmup can detach after each completed update below.
             T_sg = T_cur
 
             grid, flow, valid = self._build_warp_grid(d1, K_patch, T_sg)
@@ -406,6 +399,8 @@ class PoseRefinementModule(nn.Module):
 
             T_12_iters.append(T_cur)
             T_21_iters.append(se3_inv(T_cur))
+            if self.detach_between_iters and iter_idx < self.num_iters - 1:
+                T_cur = T_cur.detach()
 
         return T_12_iters, T_21_iters, log_conf_pose
 

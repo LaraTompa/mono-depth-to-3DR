@@ -40,6 +40,12 @@ from training.utils import (
 )
 
 
+def set_pose_refiner_detach(model, enabled: bool) -> None:
+    for module in model.modules():
+        if hasattr(module, "detach_between_iters"):
+            module.detach_between_iters = enabled
+
+
 # ---------------------------------------------------------------------------
 # One epoch
 # ---------------------------------------------------------------------------
@@ -76,6 +82,7 @@ def run_epoch(
         "cam_K": 0.0,
         "cam_identity": 0.0,
         "pose_iters":   0.0,
+        "depth1_iters_len": 0.0,
     }
     metric_sums = {"abs_rel": 0.0, "rmse": 0.0, "delta1": 0.0}
     metric_count = 0
@@ -219,6 +226,7 @@ def run_epoch(
             totals["cam_identity"] += breakdown.get("cam_identity", 0.0)
             totals["pose_iters"]   += breakdown.get("pose_iters",   0.0)
             totals["geometric"]  += breakdown.get("geometric",  0.0)
+            totals["depth1_iters_len"] += float(len(outputs.get("depth1_iters", [])))
 
             if not train:
                 pred1 = outputs["depth1"]                         # (B,1,pH,pW)
@@ -246,11 +254,13 @@ def run_epoch(
                 avg_cid   = totals.get("cam_identity", 0.0) / n
                 avg_gc    = totals.get("geometric",    0.0) / n
                 avg_pi    = totals.get("pose_iters",   0.0) / n
+                avg_d1len = totals.get("depth1_iters_len", 0.0) / n
                 lr = optimizer.param_groups[0]["lr"]
                 print(
                     f"  epoch {epoch:03d}  step {step+1:04d}/{len(loader):04d}"
                     f"  loss={avg_loss:.4f}"
                     f"  depth={avg_depth:.4f} smooth={avg_smooth:.4f} iters={avg_iters:.4f}"
+                    f"  depth1_iters_len={avg_d1len:.1f}"
                     f"  pix={avg_pix:.6f}  gc={avg_gc:.6f}  pi={avg_pi:.4f}"
                     f"  cam={avg_cam:.4f} (rot={avg_rot:.3f} trans={avg_trans:.3f} K={avg_camK:.3f} id={avg_cid:.3f})"
                     f"  lr={lr:.2e}  {elapsed:.1f}s"
@@ -410,9 +420,14 @@ def train(cfg: dict, arch_cfg: dict, resume: str | None = None) -> None:
     pose_warmup_epochs   = int(cfg.get("loss", {}).get("pose_warmup_epochs", 0))
     camera_warmup_epochs = int(cfg.get("loss", {}).get("camera_warmup_epochs", 0))
     final_camera_w       = float(cfg.get("loss", {}).get("camera", 0.5))
+    last_cam_rot         = float("inf")
 
     for epoch in range(start_epoch, int(train_cfg["epochs"]) + 1):
         t_epoch = time.time()
+        detach_pose_chain = (epoch <= 5) and (last_cam_rot >= 0.5)
+        set_pose_refiner_detach(model, detach_pose_chain)
+        if epoch == start_epoch or epoch == 6 or last_cam_rot < 0.5:
+            print(f"[train] epoch {epoch}: pose_refiner_detach_between_iters={detach_pose_chain}")
 
         # Disable uncertainty weighting for the first pose_warmup_epochs
         use_conf = (epoch > pose_warmup_epochs)
@@ -437,6 +452,7 @@ def train(cfg: dict, arch_cfg: dict, resume: str | None = None) -> None:
                 model, val_loader, None, cfg, device, train=False, epoch=epoch,
                 writer=writer, use_confidence=use_conf, camera_weight=cam_w, scaler=scaler,
             )
+        last_cam_rot = val_metrics.get("cam_rot", train_metrics.get("cam_rot", last_cam_rot))
 
         # --- scheduler step ---
         # Build validation breakdown string (mirrors train_break format)
@@ -447,6 +463,7 @@ def train(cfg: dict, arch_cfg: dict, resume: str | None = None) -> None:
                 f"depth={val_metrics.get('depth', 0.0):.4f} "
                 f"smooth={val_metrics.get('smooth', 0.0):.4f} "
                 f"iters={val_metrics.get('iters', 0.0):.4f} "
+                f"depth1_iters_len={val_metrics.get('depth1_iters_len', 0.0):.1f} "
                 f"pix={val_metrics.get('pixel_consistency', 0.0):.6f} "
                 f"cam={val_metrics.get('cam_pose', 0.0):.4f} "
                 f"cam_rot={val_metrics.get('cam_rot', 0.0):.4f} "
@@ -479,6 +496,7 @@ def train(cfg: dict, arch_cfg: dict, resume: str | None = None) -> None:
             f"depth={train_metrics.get('depth', 0.0):.4f} "
             f"smooth={train_metrics.get('smooth', 0.0):.4f} "
             f"iters={train_metrics.get('iters', 0.0):.4f} "
+            f"depth1_iters_len={train_metrics.get('depth1_iters_len', 0.0):.1f} "
             f"pix={train_metrics.get('pixel_consistency', 0.0):.4f} "
             f"cam={train_metrics.get('cam_pose', 0.0):.4f} "
             f"cam_rot={train_metrics.get('cam_rot', 0.0):.4f} "
