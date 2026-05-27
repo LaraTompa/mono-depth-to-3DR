@@ -3,11 +3,11 @@
 dataset:
   root_dir: "/storage/group/dataset_mirrors/scannet/scans"
   sampler_type: "graph"   # choose "temporal" or "graph"
-  num_samples: 600       # number of samples per epoch (__len__)
+  num_samples: 7000       # number of samples per epoch (__len__)
   num_frames: 6          # exact number of frames per sample (seq_len)
   min_stride: 40          # minimum temporal stride between frames
   max_stride: 90         # maximum temporal stride between frames
-  max_scenes: 600      # limit scenes loaded; set to an integer to restrict to a subset of scenes (for testing)
+  max_scenes: 1400      # limit scenes loaded; set to an integer to restrict to a subset of scenes (for testing)
 
 graph_sampling:
   graph_cache: null      # optional path to a pickle cache for the built frame graph
@@ -18,13 +18,13 @@ graph_sampling:
   max_frame_gap: 25      # only compare frames within this many indices of each other (O(n*gap) instead of O(n²))
 
 output:
-  sample_output_dir: "datasets/sample_output"          # temporal: visualisation grids
-  sampled_data_dir:  "datasets/sampled_data"           # temporal: individual saved frames
+  sample_output_dir: "datasets/sample_output_new"          # temporal: visualisation grids
+  sampled_data_dir:  "datasets/sampled_data_new"           # temporal: individual saved frames
   batch_size: 4
   num_workers: 2
 
 graph_output:
-  sample_output_dir: "datasets/graph_sample_output"    # graph: visualisation grids
-  sampled_data_dir:  "datasets/graph_sampled_data"     # graph: individual saved frames
+  sample_output_dir: "datasets/graph_sample_output_new"    # graph: visualisation grids
+  sampled_data_dir:  "datasets/graph_sampled_data_new"     # graph: individual saved frames
   batch_size: 4
   num_workers: 2

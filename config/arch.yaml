@@ -38,7 +38,7 @@ vista:
   freeze_dino: true
   # Cross-attention decoder (MASt3R BaseDecoder compatible)
   decoder_dim: 768              # must match MASt3R BaseDecoder (768 for Base)
-  num_decoder_blocks: 3         # 4 ≈ 5 min/epoch; scale to 8–10 when stable, reduce to avoid overfitting
+  num_decoder_blocks: 4         # 4 ≈ 5 min/epoch; scale to 8
   num_decoder_heads: 12         # 12 heads for dim=768
 
   # MASt3R checkpoint for cross-attention weight initialisation.
