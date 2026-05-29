@@ -122,14 +122,17 @@ class ScanNetTemporalDataset(Dataset):
         if self.transform:
             img = self.transform(img)
         else:
-            # copy=True ensures a writable buffer → resizable storage for DataLoader collator
-            img = torch.from_numpy(np.array(img, copy=True)).permute(2, 0, 1).float() / 255.0
+            # torch.tensor() copies data into PyTorch-owned storage (resizable).
+            # torch.from_numpy() is NOT safe here: all numpy-backed storages are
+            # marked non-resizable by PyTorch, causing DataLoader collation to crash
+            # with "Trying to resize storage that is not resizable" (num_workers > 0).
+            img = torch.tensor(np.array(img), dtype=torch.float32).permute(2, 0, 1) / 255.0
         return img
 
     def _load_depth(self, path):
-        # copy=True ensures a writable buffer → resizable storage for DataLoader collator
-        depth = np.array(Image.open(path), copy=True).astype(np.float32) / 1000.0
-        return torch.from_numpy(depth).unsqueeze(0)
+        # torch.tensor() copies into PyTorch-owned resizable storage (see _load_image).
+        depth = np.array(Image.open(path)).astype(np.float32) / 1000.0
+        return torch.tensor(depth).unsqueeze(0)
 
     def __getitem__(self, idx):
         scene_info = self.scene_data[idx]
@@ -150,7 +153,7 @@ class ScanNetTemporalDataset(Dataset):
 
             images.append(self._load_image(img_path))
             depths.append(self._load_depth(depth_path))
-            poses.append(torch.from_numpy(pose_np))
+            poses.append(torch.tensor(pose_np))  # torch.tensor() → resizable storage
 
         return {
             "images": torch.stack(images),   # (N, 3, H, W)
