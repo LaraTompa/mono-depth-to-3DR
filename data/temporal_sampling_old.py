@@ -15,11 +15,11 @@ def load_pose(path):
 
 
 def collate_temporal_batch(batch):
-    """Avoid PyTorch's default shared-memory tensor collation path."""
+    """Keep per-sample tensors separate so scenes may keep native resolution."""
     return {
-        "images": torch.stack([sample["images"] for sample in batch], dim=0),
-        "depths": torch.stack([sample["depths"] for sample in batch], dim=0),
-        "poses": torch.stack([sample["poses"] for sample in batch], dim=0),
+        "images": [sample["images"] for sample in batch],
+        "depths": [sample["depths"] for sample in batch],
+        "poses": [sample["poses"] for sample in batch],
         "scene": [sample["scene"] for sample in batch],
         "frame_ids": [sample["frame_ids"] for sample in batch],
     }
@@ -257,9 +257,9 @@ if __name__ == "__main__":
         if i < start_batch:
             continue  # skip already-saved batches (fast: no disk I/O)
 
-        images   = batch["images"]    # (B, N, 3, H, W)
-        depths   = batch["depths"]    # (B, N, 1, H, W)
-        poses    = batch["poses"]     # (B, N, 4, 4)
+        images   = batch["images"]    # list[(N, 3, H, W)]
+        depths   = batch["depths"]    # list[(N, 1, H, W)]
+        poses    = batch["poses"]     # list[(N, 4, 4)]
         scenes   = batch["scene"]
         all_fids = batch["frame_ids"] # list of N-length lists, one per sample
 
@@ -268,7 +268,10 @@ if __name__ == "__main__":
 
         # save each sample in the batch
         for b, scene_name in enumerate(tqdm(scenes, desc=f"  Saving samples", leave=False, unit="sample")):
-            N = images.shape[1]
+            sample_images = images[b]
+            sample_depths = depths[b]
+            sample_poses = poses[b]
+            N = sample_images.shape[0]
             fids = all_fids[b]
 
             # --- sampled_data: individual frames per sequence ---
@@ -295,17 +298,17 @@ if __name__ == "__main__":
 
             for f in tqdm(range(N), desc=f"    Saving frames", leave=False, unit="frame"):
                 fid = fids[f]
-                torchvision.utils.save_image(images[b, f], os.path.join(rgb_raw_dir, f"{fid}.png"))
-                np.save(os.path.join(dep_raw_dir, f"{fid}.npy"), depths[b, f].numpy())
-                np.savetxt(os.path.join(pose_dir, f"{fid}.txt"), poses[b, f].numpy())
+                torchvision.utils.save_image(sample_images[f], os.path.join(rgb_raw_dir, f"{fid}.png"))
+                np.save(os.path.join(dep_raw_dir, f"{fid}.npy"), sample_depths[f].numpy())
+                np.savetxt(os.path.join(pose_dir, f"{fid}.txt"), sample_poses[f].numpy())
 
             # --- sample_output: visualisation grids ---
-            rgb_frames = images[b]          # (N, 3, H, W)
+            rgb_frames = sample_images      # (N, 3, H, W)
             rgb_grid = torchvision.utils.make_grid(rgb_frames, nrow=N, padding=4)
             rgb_path = os.path.join(OUT_DIR, f"batch{i+1}_sample{b+1}_{scene_name}_rgb.png")
             torchvision.utils.save_image(rgb_grid, rgb_path)
 
-            dep_frames = depths[b]          # (N, 1, H, W)
+            dep_frames = sample_depths      # (N, 1, H, W)
             dep_min, dep_max = dep_frames.min(), dep_frames.max()
             dep_norm = (dep_frames - dep_min) / (dep_max - dep_min + 1e-6)
             dep_rgb  = dep_norm.repeat(1, 3, 1, 1)
