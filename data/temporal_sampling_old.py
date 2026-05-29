@@ -14,6 +14,17 @@ def load_pose(path):
     return np.loadtxt(path)
 
 
+def collate_temporal_batch(batch):
+    """Avoid PyTorch's default shared-memory tensor collation path."""
+    return {
+        "images": torch.stack([sample["images"] for sample in batch], dim=0),
+        "depths": torch.stack([sample["depths"] for sample in batch], dim=0),
+        "poses": torch.stack([sample["poses"] for sample in batch], dim=0),
+        "scene": [sample["scene"] for sample in batch],
+        "frame_ids": [sample["frame_ids"] for sample in batch],
+    }
+
+
 class ScanNetTemporalDataset(Dataset):
     def __init__(
         self,
@@ -230,7 +241,13 @@ if __name__ == "__main__":
             print(f"[resume] Found batch dirs up to batch {start_batch} — "
                   f"resuming from batch {start_batch + 1}.\n")
 
-    loader = DataLoader(dataset, batch_size=out_cfg["batch_size"], num_workers=out_cfg["num_workers"], shuffle=False)
+    loader = DataLoader(
+        dataset,
+        batch_size=out_cfg["batch_size"],
+        num_workers=out_cfg["num_workers"],
+        shuffle=False,
+        collate_fn=collate_temporal_batch,
+    )
 
     total_batches = len(loader)
     print(f"Sampling {total_batches} batches...\n")
@@ -252,8 +269,7 @@ if __name__ == "__main__":
         # save each sample in the batch
         for b, scene_name in enumerate(tqdm(scenes, desc=f"  Saving samples", leave=False, unit="sample")):
             N = images.shape[1]
-            # frame_ids is collated as a list of N lists (one per position), so transpose
-            fids = [all_fids[f][b] for f in range(N)]
+            fids = all_fids[b]
 
             # --- sampled_data: individual frames per sequence ---
             seq_dir = os.path.join(SAMPLE_DIR, f"batch{i+1}", f"sample{b+1}", scene_name)
