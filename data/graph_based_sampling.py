@@ -2,11 +2,15 @@ import os
 import random
 import pickle
 import shutil
+import threading
 import numpy as np
 import torch
 from torch.utils.data import Dataset
 from PIL import Image
 from tqdm import tqdm
+import threading
+from concurrent.futures import ThreadPoolExecutor
+import itertools
 
 
 from scene import ScanNetScene, load_depth_png, load_depth, find_scene_paths
@@ -21,7 +25,7 @@ class ScanNetGraphDataset(Dataset):
         graph_cache=None,
         min_overlap=0.2,
         max_overlap=0.9,
-        overlap_sample_step=16,
+        overlap_sample_step=64,
         depth_tolerance=0.05,
         max_frame_gap=50,
         transform=None,
@@ -186,10 +190,18 @@ class ScanNetGraphDataset(Dataset):
 
             # default-arg trick binds depth_dir and depth_cache at definition time,
             # avoiding the classic loop-closure bug
+            _lock = threading.Lock()  # ensure thread safety if DataLoader uses multiple workers
             def get_depth(fid, _scene=scene, _cache=depth_cache):
-                if fid not in _cache:
-                    _cache[fid] = load_depth(_scene.depth_path(fid))
-                return _cache[fid]
+                with _lock:
+                    if fid not in _cache:
+                        _cache[fid] = load_depth(_scene.depth_path(fid))
+                    return _cache[fid]
+
+            # Pre-load all depths once, sequentially, before threading to avoid
+            # duplicate loads and potential races in ThreadPoolExecutor.
+            for fid in valid_fids:
+                if fid not in depth_cache:
+                    depth_cache[fid] = load_depth(scene.depth_path(fid))
 
             # weighted adjacency: graph[fid_i][fid_j] = symmetric overlap score
             # nodes = individual frames; edge weight = how much the two views share
@@ -198,25 +210,22 @@ class ScanNetGraphDataset(Dataset):
             n = len(valid_fids)
             total_pairs = sum(min(self.max_frame_gap, n - 1 - i) for i in range(n))
             with tqdm(total=total_pairs, desc=f"  {scene} pairs", unit="pair", leave=False) as pbar:
-                for i, fid_i in enumerate(valid_fids):
-                    for j in range(i + 1, min(i + 1 + self.max_frame_gap, n)):
-                        fid_j = valid_fids[j]
+                # parallelize pairwise overlap computation for speed
+                graph = {fid: {} for fid in valid_fids}
 
-                        overlap = self._compute_pair_overlap(
-                            get_depth(fid_i),
-                            poses[fid_i],
-                            world_to_camera[fid_i],
-                            get_depth(fid_j),
-                            poses[fid_j],
-                            world_to_camera[fid_j],
-                            intrinsics,
-                        )
+                # build list of index pairs to evaluate
+                pairs = [
+                    (i, j)
+                    for i in range(n)
+                    for j in range(i + 1, min(i + 1 + self.max_frame_gap, n))
+                ]
 
-                        if self.min_overlap <= overlap <= self.max_overlap:
-                            graph[fid_i][fid_j] = overlap
-                            graph[fid_j][fid_i] = overlap
+                if pairs:
+                    # delegate to helper that uses ThreadPoolExecutor
+                    graph = self._compute_all_pairs(valid_fids, poses, world_to_camera, get_depth, intrinsics)
 
-                        pbar.update(1)
+                # advance progress bar by number of evaluated pairs
+                pbar.update(len(pairs))
 
             scene_data.append({
                 "scene": scene_name,
@@ -230,6 +239,41 @@ class ScanNetGraphDataset(Dataset):
             })
 
         return scene_data
+
+    def _compute_all_pairs(self, valid_fids, poses, world_to_camera, get_depth, intrinsics):
+        """Compute all pairwise overlaps in parallel using ThreadPoolExecutor.
+
+        Returns a graph dict mapping fid -> {other_fid: overlap}
+        """
+        n = len(valid_fids)
+        pairs = [
+            (i, j)
+            for i in range(n)
+            for j in range(i + 1, min(i + 1 + self.max_frame_gap, n))
+        ]
+
+        graph = {fid: {} for fid in valid_fids}
+
+        def compute_pair(args):
+            i, j = args
+            fid_i, fid_j = valid_fids[i], valid_fids[j]
+            overlap = self._compute_pair_overlap(
+                get_depth(fid_i), poses[fid_i], world_to_camera[fid_i],
+                get_depth(fid_j), poses[fid_j], world_to_camera[fid_j],
+                intrinsics,
+            )
+            return fid_i, fid_j, overlap
+
+        # ThreadPoolExecutor is fine here because numpy releases the GIL
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            results = list(executor.map(compute_pair, pairs))
+
+        for fid_i, fid_j, overlap in results:
+            if self.min_overlap <= overlap <= self.max_overlap:
+                graph[fid_i][fid_j] = overlap
+                graph[fid_j][fid_i] = overlap
+
+        return graph
 
     def resample_seq_len(self):
         """No-op when num_frames is fixed; kept for API compatibility."""
@@ -261,6 +305,7 @@ class ScanNetGraphDataset(Dataset):
 
             # sample next node weighted by overlap score:
             # higher overlap = more shared content = preferred transition
+            weights = [max(w, 1e-6) for w in weights]  # ensure no zero/nan weights
             nxt = random.choices(nbr_fids, weights=weights, k=1)[0]
             seq.append(nxt)
             current = nxt
