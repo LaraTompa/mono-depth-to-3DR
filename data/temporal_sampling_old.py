@@ -50,17 +50,12 @@ class ScanNetTemporalDataset(Dataset):
                 f.split(".")[0] for f in os.listdir(color_dir)
             ], key=lambda x: int(x))
 
-            poses = {
-                fid: load_pose(os.path.join(pose_dir, f"{fid}.txt"))
-                for fid in frame_ids
-            }
-
             raw_scenes.append({
-                "scene": scene,
+                "scene":     scene,
                 "color_dir": color_dir,
                 "depth_dir": depth_dir,
-                "poses": poses,
-                "frame_ids": frame_ids
+                "pose_dir":  pose_dir,   # lazy: load per-frame on demand
+                "frame_ids": frame_ids,
             })
 
         # Build scene_data: cycle raw_scenes if max_scenes exceeds available count,
@@ -127,13 +122,13 @@ class ScanNetTemporalDataset(Dataset):
         if self.transform:
             img = self.transform(img)
         else:
-            img = torch.from_numpy(np.array(img)).permute(2, 0, 1).float() / 255.0
+            # copy=True ensures a writable buffer → resizable storage for DataLoader collator
+            img = torch.from_numpy(np.array(img, copy=True)).permute(2, 0, 1).float() / 255.0
         return img
 
     def _load_depth(self, path):
-        depth = np.array(
-            Image.open(path)
-        ).astype(np.float32) / 1000.0
+        # copy=True ensures a writable buffer → resizable storage for DataLoader collator
+        depth = np.array(Image.open(path), copy=True).astype(np.float32) / 1000.0
         return torch.from_numpy(depth).unsqueeze(0)
 
     def __getitem__(self, idx):
@@ -149,9 +144,13 @@ class ScanNetTemporalDataset(Dataset):
             img_path = os.path.join(scene_info["color_dir"], f"{fid}.jpg")
             depth_path = os.path.join(scene_info["depth_dir"], f"{fid}.png")
 
+            pose_np = np.loadtxt(os.path.join(scene_info["pose_dir"], f"{fid}.txt")).astype(np.float32)
+            if not np.all(np.isfinite(pose_np)):
+                pose_np = np.eye(4, dtype=np.float32)  # ScanNet marks failed tracking with inf
+
             images.append(self._load_image(img_path))
             depths.append(self._load_depth(depth_path))
-            poses.append(torch.from_numpy(scene_info["poses"][fid]).float())
+            poses.append(torch.from_numpy(pose_np))
 
         return {
             "images": torch.stack(images),   # (N, 3, H, W)
@@ -216,12 +215,27 @@ if __name__ == "__main__":
     print(f"Saving visualisations to: {OUT_DIR}/")
     print(f"Saving sampled frames to: {SAMPLE_DIR}/\n")
 
+    # -- Resume: detect the highest already-completed batch ------------------
+    start_batch = 0
+    if os.path.isdir(SAMPLE_DIR):
+        done = [
+            int(d[5:]) for d in os.listdir(SAMPLE_DIR)
+            if d.startswith("batch") and d[5:].isdigit()
+        ]
+        if done:
+            start_batch = max(done)
+            print(f"[resume] Found batch dirs up to batch {start_batch} — "
+                  f"resuming from batch {start_batch + 1}.\n")
+
     loader = DataLoader(dataset, batch_size=out_cfg["batch_size"], num_workers=out_cfg["num_workers"], shuffle=False)
 
     total_batches = len(loader)
     print(f"Sampling {total_batches} batches...\n")
 
     for i, batch in enumerate(tqdm(loader, desc="Processing batches", unit="batch")):
+
+        if i < start_batch:
+            continue  # skip already-saved batches (fast: no disk I/O)
 
         images   = batch["images"]    # (B, N, 3, H, W)
         depths   = batch["depths"]    # (B, N, 1, H, W)
