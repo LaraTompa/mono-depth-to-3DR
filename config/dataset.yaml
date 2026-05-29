@@ -2,12 +2,12 @@
 
 dataset:
   root_dir: "/storage/group/dataset_mirrors/scannet/scans"
-  sampler_type: "graph"   # choose "temporal" or "graph"
-  num_samples: 600       # number of samples per epoch (__len__)
-  num_frames: 6          # exact number of frames per sample (seq_len)
+  sampler_type: "temporal"   # choose "temporal" or "graph"
+  num_samples: 1513       # number of samples per epoch (__len__)
+  num_frames: 20          # exact number of frames per sample (seq_len)
   min_stride: 40          # minimum temporal stride between frames
-  max_stride: 90         # maximum temporal stride between frames
-  max_scenes: 600      # limit scenes loaded; set to an integer to restrict to a subset of scenes (for testing)
+  max_stride: 70         # maximum temporal stride between frames
+  max_scenes: 1513      # limit scenes loaded; set to an integer to restrict to a subset of scenes (for testing)
 
 graph_sampling:
   graph_cache: null      # optional path to a pickle cache for the built frame graph
@@ -20,8 +20,8 @@ graph_sampling:
 output:
   sample_output_dir: "datasets/sample_output"          # temporal: visualisation grids
   sampled_data_dir:  "datasets/sampled_data"           # temporal: individual saved frames
-  batch_size: 4
-  num_workers: 2
+  batch_size: 8
+  num_workers: 4
 
 graph_output:
   sample_output_dir: "datasets/graph_sample_output"    # graph: visualisation grids
