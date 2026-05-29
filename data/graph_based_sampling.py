@@ -375,13 +375,18 @@ class ScanNetGraphDataset(Dataset):
             depths.append(self._load_depth(depth_path))
             mde_depths.append(self._load_mde_depth(mde_path))
             poses.append(torch.from_numpy(scene_info["poses"][fid]).float())
+        images_t = torch.stack(images).contiguous()
+        depths_t = torch.stack(depths).contiguous()
+        mde_t = torch.stack(mde_depths).contiguous()
+        poses_t = torch.stack(poses).contiguous()
+        intr_t = torch.from_numpy(scene_info["intrinsics"]).float().contiguous()
 
         return {
-            "images":     torch.stack(images),
-            "depths":     torch.stack(depths),                            # GT depths
-            "mde_depths": torch.stack(mde_depths),                        # MDE prior
-            "poses":      torch.stack(poses),
-            "intrinsics": torch.from_numpy(scene_info["intrinsics"]).float(),
+            "images":     images_t,
+            "depths":     depths_t,                            # GT depths
+            "mde_depths": mde_t,                               # MDE prior
+            "poses":      poses_t,
+            "intrinsics": intr_t,
             "scene": scene_info["scene"],
             "frame_ids": seq_ids
         }
