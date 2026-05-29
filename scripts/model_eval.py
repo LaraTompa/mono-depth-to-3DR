@@ -41,13 +41,9 @@ import torch
 import torch.nn.functional as F
 import yaml
 
-from models.model_image_depth.network import DepthAlignNet
-from models.model_image_depth.geometry import se3_inv
-
 from metrics.utils import load_intrinsics, load_pose, load_depth, load_image
 from metrics.pixel_consistency import compute_pixel_consistency, project_with_depth
 from metrics.depth_consistency import depth_metrics
-
 from metrics.photometric_consistency import compute_photometric
 
 
@@ -91,35 +87,59 @@ def main(args):
     # ── Build model ──────────────────────────────────────────────────────────
     # Extract config with fallbacks for new vs old checkpoint formats
     arch_cfg = ckpt.get("arch", {})  # new format: arch saved in checkpoint
-    if not arch_cfg:
-        # old format: manually specify defaults
-        arch_cfg = {
-            "encoder": {"out_channels": 64},
-            "attention": {"num_heads": 4, "window_size": 7},
-            "refinement": {"enabled": False, "num_iters": 4, "hidden_dim": 64},
-            "decoder": {"hidden_dim": 32},
-            "camera_head": {"hidden_dim": 64},
-        }
-        print("[eval] [WARNING] 'arch' not in checkpoint; using defaults")
- 
-    enc_cfg = arch_cfg.get("encoder", {})
-    att_cfg = arch_cfg.get("attention", {})
-    ref_cfg = arch_cfg.get("refinement", {})
-    dec_cfg = arch_cfg.get("decoder", {})
-    cam_cfg = arch_cfg.get("camera_head", {})
- 
-    model = DepthAlignNet(
-        feat_dim            = int(enc_cfg.get("out_channels", 64)),
-        hidden_dim          = int(ref_cfg.get("hidden_dim", 64)),
-        num_iters           = int(ref_cfg.get("num_iters", 4)),
-        num_heads           = int(att_cfg.get("num_heads", 4)),
-        window_size         = int(att_cfg.get("window_size", 7)),
-        pretrained          = False,
-        freeze_backbone     = False,
-        use_refinement      = bool(ref_cfg.get("enabled", False)),
-        decoder_hidden      = int(dec_cfg.get("hidden_dim", 32)),
-        camera_head_hidden  = int(cam_cfg.get("hidden_dim", 64)),
-    )
+    model_variant = arch_cfg.get("model", "v1")
+    print(f"[eval] Model variant: {model_variant}")
+
+    if model_variant == "depth_only":
+        from models.model_depth_only.network import build_depth_only_net
+        model = build_depth_only_net(arch_cfg)
+
+    elif model_variant == "vista":
+        from models.model_vista.network import DepthAlignNetV2
+        v_cfg = arch_cfg.get("vista", {})
+        model = DepthAlignNetV2(
+            dino_model         = str(v_cfg.get("dino_model",          "dinov2_vitl14")),
+            freeze_dino        = False,
+            depth_backbone     = str(v_cfg.get("depth_backbone",       "convnext_tiny")),
+            decoder_dim        = int(v_cfg.get("decoder_dim",          768)),
+            num_decoder_blocks = int(v_cfg.get("num_decoder_blocks",     4)),
+            num_decoder_heads  = int(v_cfg.get("num_decoder_heads",     12)),
+            depth_out_channels = int(v_cfg.get("depth_out_channels",   128)),
+            decoder_hidden     = int(v_cfg.get("decoder_hidden",        256)),
+            camera_head_hidden = int(v_cfg.get("camera_head_hidden",   256)),
+            pose_dropout       = 0.0,
+            mast3r_ckpt        = None,
+            freeze_cross_attn  = False,
+        )
+
+    else:  # "v1"
+        from models.model_image_depth.network import DepthAlignNet
+        if not arch_cfg:
+            arch_cfg = {
+                "encoder": {"out_channels": 64},
+                "attention": {"num_heads": 4, "window_size": 7},
+                "refinement": {"enabled": False, "num_iters": 4, "hidden_dim": 64},
+                "decoder": {"hidden_dim": 32},
+                "camera_head": {"hidden_dim": 64},
+            }
+            print("[eval] [WARNING] 'arch' not in checkpoint; using v1 defaults")
+        enc_cfg = arch_cfg.get("encoder",    {})
+        att_cfg = arch_cfg.get("attention",  {})
+        ref_cfg = arch_cfg.get("refinement", {})
+        dec_cfg = arch_cfg.get("decoder",    {})
+        cam_cfg = arch_cfg.get("camera_head", {})
+        model = DepthAlignNet(
+            feat_dim            = int(enc_cfg.get("out_channels", 64)),
+            hidden_dim          = int(ref_cfg.get("hidden_dim", 64)),
+            num_iters           = int(ref_cfg.get("num_iters", 4)),
+            num_heads           = int(att_cfg.get("num_heads", 4)),
+            window_size         = int(att_cfg.get("window_size", 7)),
+            pretrained          = False,
+            freeze_backbone     = False,
+            use_refinement      = bool(ref_cfg.get("enabled", False)),
+            decoder_hidden      = int(dec_cfg.get("hidden_dim", 32)),
+            camera_head_hidden  = int(cam_cfg.get("hidden_dim", 64)),
+        )
 
     # Extract model weights only; drop optimizer state (2× model size, not needed for eval)
     model_state = ckpt.pop("model")
@@ -152,9 +172,13 @@ def main(args):
         pred_depth2_np = cv2.resize(pred_depth2_np, (W, H), interpolation=cv2.INTER_NEAREST)
 
     # Convert to torch tensors (B=1)
-    rgb1 = torch.from_numpy(img1_np).permute(2, 0, 1).unsqueeze(0).to(device)           # (1,1,H,W)
+    rgb1 = torch.from_numpy(img1_np).permute(2, 0, 1).unsqueeze(0).to(device)           # (1,3,H,W)
     rgb2 = torch.from_numpy(img2_np).permute(2, 0, 1).unsqueeze(0).to(device)
-    depth_mono1 = torch.from_numpy(pred_depth1_np).unsqueeze(0).unsqueeze(0).to(device)  # (1,1,H,W)
+
+    # MDE sources (DepthPro / ZoeDepth) are metric estimators — pass raw metric
+    # depths directly.  No normalisation needed; the decoder uses them as a
+    # metric prior and geometric consistency operates in metric space.
+    depth_mono1 = torch.from_numpy(pred_depth1_np).unsqueeze(0).unsqueeze(0).to(device)  # (1,1,H,W) metres
     depth_mono2 = torch.from_numpy(pred_depth2_np).unsqueeze(0).unsqueeze(0).to(device)
 
     # ── Intrinsics and poses ─────────────────────────────────────────────────
@@ -177,61 +201,71 @@ def main(args):
         pose2_np = load_pose(args.pose2)
         pose1 = torch.from_numpy(pose1_np).unsqueeze(0).to(device)  # (1,4,4)
         pose2 = torch.from_numpy(pose2_np).unsqueeze(0).to(device)
-        # SE(3) closed-form inverse — no gradient instability
-        T_12_init = se3_inv(pose2) @ pose1 
+        T_12_init = torch.linalg.inv(pose2) @ pose1
     else:
-        # Identity transform (assume images already aligned)
         T_12_init = torch.eye(4, device=device, dtype=torch.float32).unsqueeze(0)
         print("[eval] No poses provided; using identity as initial T_12 estimate.")
 
     # ── Forward pass ───────────────────────────────────────────────────────────────
     print("[eval] Running model forward pass...")
     H_img, W_img = rgb1.shape[-2:]
- 
-    K_iter = K
- 
-    T_12_iter = T_12_init
-    # Get num_pose_iters from checkpoint config (not CLI arg anymore)
-    train_cfg = cfg.get("train", {})
-    num_pose_iters = int(train_cfg.get("num_pose_iters", 1))
-    print(f"[eval] num_pose_iters={num_pose_iters} (from checkpoint config)")
- 
-    with torch.no_grad():
-        for pose_it in range(num_pose_iters):
-            outputs = model(
-                rgb1=rgb1,
-                rgb2=rgb2,
-                depth_mono1=depth_mono1,
-                depth_mono2=depth_mono2,
-                T_12=T_12_iter,
-                K=K_iter,
-            )
-            if pose_it < num_pose_iters - 1:
-                K_pred_it = outputs["K_pred"]
-                T_pred_it = outputs["T_12_pred"]
-                if torch.isfinite(K_pred_it).all() and torch.isfinite(T_pred_it).all():
-                    K_iter    = K_pred_it
-                    T_12_iter = T_pred_it
-                else:
-                    print(f"[eval] iter {pose_it}: non-finite K/T pred, keeping previous.")
 
-    pred1_out = outputs["depth1"].squeeze(0).squeeze(0).cpu().numpy()  # (H/2, W/2)
-    pred2_out = outputs["depth2"].squeeze(0).squeeze(0).cpu().numpy()
-    conf1 = outputs["confidence1"].squeeze(0).squeeze(0).cpu().numpy()
-    conf2 = outputs["confidence2"].squeeze(0).squeeze(0).cpu().numpy()
+    K_iter    = K
+    T_12_iter = T_12_init
+    train_cfg = cfg.get("train", {})
+
+    with torch.no_grad():
+        if model_variant == "depth_only":
+            outputs = model(
+                depth1=depth_mono1,
+                depth2=depth_mono2,
+                T_12=T_12_iter,
+            )
+        else:
+            num_pose_iters = int(train_cfg.get("num_pose_iters", 1))
+            print(f"[eval] num_pose_iters={num_pose_iters} (from checkpoint config)")
+            for pose_it in range(num_pose_iters):
+                outputs = model(
+                    rgb1=rgb1,
+                    rgb2=rgb2,
+                    depth_mono1=depth_mono1,
+                    depth_mono2=depth_mono2,
+                    T_12=T_12_iter,
+                    K=K_iter,
+                )
+                if pose_it < num_pose_iters - 1:
+                    K_pred_it = outputs.get("K_pred")
+                    T_pred_it = outputs.get("T_12_pred")
+                    if (K_pred_it is not None and T_pred_it is not None
+                            and torch.isfinite(K_pred_it).all()
+                            and torch.isfinite(T_pred_it).all()):
+                        K_iter    = K_pred_it
+                        T_12_iter = T_pred_it
+                    else:
+                        print(f"[eval] iter {pose_it}: non-finite K/T pred, keeping previous.")
+
+    pred1_out = outputs["depth1"].squeeze().cpu().numpy()   # (pH, pW) metres
+    pred2_out = outputs["depth2"].squeeze().cpu().numpy()
+    print(f"[eval] Output depth range view1: "
+          f"{pred1_out[pred1_out > 0].min():.3f} – {pred1_out.max():.3f} m")
+    print(f"[eval] Output depth range view2: "
+          f"{pred2_out[pred2_out > 0].min():.3f} – {pred2_out.max():.3f} m")
+
+    conf1 = outputs["confidence1"].squeeze().cpu().numpy()
+    conf2 = outputs["confidence2"].squeeze().cpu().numpy()
 
     # ── Print predicted camera parameters ────────────────────────────────────
-    K_pred_np    = outputs["K_pred"][0].cpu().numpy()
-    T_12_pred_np = outputs["T_12_pred"][0].cpu().numpy()
-    print(f"\n[eval] Predicted intrinsics: fx={K_pred_np[0,0]:.1f}  fy={K_pred_np[1,1]:.1f}"
-          f"  cx={K_pred_np[0,2]:.1f}  cy={K_pred_np[1,2]:.1f}")
-    print(f"[eval] Predicted T_12 (cam1→cam2):\n{T_12_pred_np}")
- 
-    # Save predicted poses and intrinsics
-    np.savetxt(os.path.join(args.output_dir, "K_pred.txt"),    K_pred_np,    fmt="%.6f")
-    np.savetxt(os.path.join(args.output_dir, "T_12_pred.txt"), T_12_pred_np, fmt="%.6f")
-    print(f"  Saved: {args.output_dir}/K_pred.txt")
-    print(f"  Saved: {args.output_dir}/T_12_pred.txt")
+    if "T_12_pred" in outputs:
+        T_12_pred_np = outputs["T_12_pred"][0].cpu().numpy()
+        print(f"\n[eval] Predicted T_12 (cam1\u2192cam2):\n{T_12_pred_np}")
+        np.savetxt(os.path.join(args.output_dir, "T_12_pred.txt"), T_12_pred_np, fmt="%.6f")
+        print(f"  Saved: {args.output_dir}/T_12_pred.txt")
+    if "K_pred" in outputs:
+        K_pred_np = outputs["K_pred"][0].cpu().numpy()
+        print(f"[eval] Predicted intrinsics: fx={K_pred_np[0,0]:.1f}  fy={K_pred_np[1,1]:.1f}"
+              f"  cx={K_pred_np[0,2]:.1f}  cy={K_pred_np[1,2]:.1f}")
+        np.savetxt(os.path.join(args.output_dir, "K_pred.txt"), K_pred_np, fmt="%.6f")
+        print(f"  Saved: {args.output_dir}/K_pred.txt")
 
     # Upsample to full resolution for saving/evaluation
     pred1_full = cv2.resize(pred1_out, (W, H), interpolation=cv2.INTER_LINEAR)

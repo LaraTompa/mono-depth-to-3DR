@@ -56,6 +56,7 @@ def run_epoch(
     use_confidence: bool = True,
     camera_weight: float | None = None,
     scaler=None,          # torch.amp.GradScaler or None (enables AMP when set)
+    model_variant: str = "vista",
 ) -> dict:
     model.train(train)
     train_cfg = cfg["train"]
@@ -137,29 +138,40 @@ def run_epoch(
 
             num_pose_iters = train_cfg.get("num_pose_iters", 2)
             with torch.amp.autocast("cuda", enabled=(scaler is not None)):
-                for pose_it in range(num_pose_iters):
+                if model_variant == "depth_only":
+                    # depth_only: no RGB, no camera head, no iterative pose loop.
+                    # Use GT relative pose directly as conditioning.
                     outputs = model(
-                        rgb1=rgb1,
-                        rgb2=rgb2,
-                        depth_mono1=depth_mono1,
-                        depth_mono2=depth_mono2,
-                        T_12=T_12_iter,
-                        K=K_iter,
+                        depth1=depth_mono1,
+                        depth2=depth_mono2,
+                        T_12=T_12_gt,
                     )
-                    if pose_it < num_pose_iters - 1:
-                        # Feed predictions into next iteration.
-                        # .detach() avoids backpropagating through the unrolled
-                        # initialisation graph; remove to enable full unrolling.
-                        K_pred_it    = outputs["K_pred"].detach()
-                        T_pred_it    = outputs["T_12_pred"].detach()
-                        # Guard: only accept if both tensors are fully finite;
-                        # if NaN crept in, keep the previous-iteration values.
-                        if torch.isfinite(K_pred_it).all() and torch.isfinite(T_pred_it).all():
-                            K_iter    = K_pred_it
-                            T_12_iter = T_pred_it
-                        else:
-                            print(f"[NaN guard] iter {pose_it}: non-finite K/T pred "
-                                  f"at step {step}; keeping previous init values.")
+                    # Expose K/T for loss compatibility (no camera supervision).
+                    K_iter = K_gt
+                else:
+                    for pose_it in range(num_pose_iters):
+                        outputs = model(
+                            rgb1=rgb1,
+                            rgb2=rgb2,
+                            depth_mono1=depth_mono1,
+                            depth_mono2=depth_mono2,
+                            T_12=T_12_iter,
+                            K=K_iter,
+                        )
+                        if pose_it < num_pose_iters - 1:
+                            # Feed predictions into next iteration.
+                            # .detach() avoids backpropagating through the unrolled
+                            # initialisation graph; remove to enable full unrolling.
+                            K_pred_it    = outputs["K_pred"].detach()
+                            T_pred_it    = outputs["T_12_pred"].detach()
+                            # Guard: only accept if both tensors are fully finite;
+                            # if NaN crept in, keep the previous-iteration values.
+                            if torch.isfinite(K_pred_it).all() and torch.isfinite(T_pred_it).all():
+                                K_iter    = K_pred_it
+                                T_12_iter = T_pred_it
+                            else:
+                                print(f"[NaN guard] iter {pose_it}: non-finite K/T pred "
+                                      f"at step {step}; keeping previous init values.")
 
             # Cast fp16 model outputs → fp32 before loss computation.
             # Tensors produced inside autocast stay fp16 even after the context
@@ -299,7 +311,7 @@ def train(cfg: dict, arch_cfg: dict, resume: str | None = None) -> None:
     if not os.path.isabs(root_dir):
         root_dir = os.path.join(_REPO_ROOT, root_dir)
 
-    # 80/10/10 scene split (deterministic via fixed seed)
+    # Train / val: 80 / 20 split from root_dir (deterministic via fixed seed)
     all_scene_paths = find_scene_paths(root_dir)
     rng = random.Random(42)
     rng.shuffle(all_scene_paths)
@@ -307,21 +319,33 @@ def train(cfg: dict, arch_cfg: dict, resume: str | None = None) -> None:
     if max_scenes:
         all_scene_paths = all_scene_paths[:int(max_scenes)]
     n = len(all_scene_paths)
-    s1 = int(n * 0.8)
-    s2 = int(n * 0.9)
+    s1 = int(n * 0.9)
     train_paths = all_scene_paths[:s1]
-    val_paths   = all_scene_paths[s1:s2]
-    test_paths  = all_scene_paths[s2:]
-    # With very few scenes the 10 % slices can be empty; fall back to last train scene.
+    val_paths   = all_scene_paths[s1:]
     if not val_paths:
         val_paths = train_paths[-1:]
-    if not test_paths:
-        test_paths = train_paths[-1:]
+
+    # Test: entirely separate root (datasets_test/sampled_data)
+    raw_test_root = cfg["dataset"].get("test_root_dir")
+    if raw_test_root:
+        test_root_dir = raw_test_root if os.path.isabs(raw_test_root) \
+                        else os.path.join(_REPO_ROOT, raw_test_root)
+        test_paths = find_scene_paths(test_root_dir)
+        if not test_paths:
+            print(f"[train] WARNING: test_root_dir {test_root_dir!r} yielded no scenes; "
+                  f"using last val scene as placeholder.")
+            test_paths    = val_paths[-1:]
+            test_root_dir = root_dir
+    else:
+        print("[train] WARNING: no test_root_dir configured; using last val scene as test placeholder.")
+        test_paths    = val_paths[-1:]
+        test_root_dir = root_dir
+
     print(f"[train] Scenes: {len(train_paths)} train / {len(val_paths)} val / {len(test_paths)} test")
     augment = bool(cfg.get("augment", True))
-    train_ds = build_dataset(cfg, root_dir=root_dir, scene_paths=train_paths, augment=augment)
-    val_ds   = build_dataset(cfg, root_dir=root_dir, scene_paths=val_paths)
-    test_ds  = build_dataset(cfg, root_dir=root_dir, scene_paths=test_paths)
+    train_ds = build_dataset(cfg, root_dir=root_dir,      scene_paths=train_paths, augment=augment)
+    val_ds   = build_dataset(cfg, root_dir=root_dir,      scene_paths=val_paths)
+    test_ds  = build_dataset(cfg, root_dir=test_root_dir, scene_paths=test_paths)
 
     train_loader = build_loader(cfg, train_ds, shuffle=True)
     val_loader   = build_loader(cfg, val_ds,   shuffle=False)
@@ -333,7 +357,10 @@ def train(cfg: dict, arch_cfg: dict, resume: str | None = None) -> None:
     # --- model ---
     model_variant = arch_cfg.get("model", "v1")
 
-    if model_variant == "vista":
+    if model_variant == "depth_only":
+        from models.model_depth_only.network import build_depth_only_net
+        model = build_depth_only_net(arch_cfg).to(device)
+    elif model_variant == "vista":
         from models.model_vista.network import DepthAlignNetV2
         v_cfg = arch_cfg.get("vista", {})
         model = DepthAlignNetV2(
@@ -423,6 +450,7 @@ def train(cfg: dict, arch_cfg: dict, resume: str | None = None) -> None:
         train_metrics = run_epoch(
             model, train_loader, optimizer, cfg, device, train=True, epoch=epoch,
             writer=writer, use_confidence=use_conf, camera_weight=cam_w, scaler=scaler,
+            model_variant=model_variant,
         )
 
         val_metrics = {}
@@ -430,6 +458,7 @@ def train(cfg: dict, arch_cfg: dict, resume: str | None = None) -> None:
             val_metrics = run_epoch(
                 model, val_loader, None, cfg, device, train=False, epoch=epoch,
                 writer=writer, use_confidence=use_conf, camera_weight=cam_w, scaler=scaler,
+                model_variant=model_variant,
             )
 
         # --- scheduler step ---
@@ -535,7 +564,8 @@ def train(cfg: dict, arch_cfg: dict, resume: str | None = None) -> None:
     if os.path.isfile(best_ckpt):
         ckpt = torch.load(best_ckpt, map_location=device)
         model.load_state_dict(ckpt["model"])
-    test_metrics = run_epoch(model, test_loader, None, cfg, device, train=False, epoch=0)
+    test_metrics = run_epoch(model, test_loader, None, cfg, device, train=False, epoch=0,
+                             model_variant=model_variant)
 
     test_break = ""
     if test_metrics:

@@ -46,16 +46,18 @@ class ScanNetTemporalDataset(Dataset):
             if not scene.is_valid() or not scene.frame_ids:
                 continue
 
-            poses, valid_fids = scene.load_all_poses()
+            valid_fids = scene.valid_fids_fast()  # O(listdir) — no file reads
+            if not valid_fids:
+                continue
 
             self.scene_data.append({
-                "scene": scene_name,
-                "color_dir": scene.color_dir,
-                "depth_dir": scene.depth_dir,
+                "scene":         scene_name,
+                "color_dir":     scene.color_dir,
+                "depth_dir":     scene.depth_dir,
+                "pose_dir":      scene.pose_dir,      # lazy: load per-frame on demand
                 "mde_depth_dir": scene.mde_depth_dir,
-                "intrinsics": scene.intrinsics,   # (3, 3) float32
-                "poses": poses,
-                "frame_ids": valid_fids
+                "intrinsics":    scene.intrinsics,    # (3,3) float32
+                "frame_ids":     valid_fids,
             })
 
     def resample_seq_len(self):
@@ -110,17 +112,19 @@ class ScanNetTemporalDataset(Dataset):
         if self.transform:
             img = self.transform(img)
         else:
-            img = torch.from_numpy(np.array(img)).permute(2, 0, 1).float() / 255.0
+            # np.array(..., copy=True) ensures a writable buffer so the tensor
+            # has resizable storage — required by the DataLoader collator.
+            img = torch.from_numpy(np.array(img, copy=True)).permute(2, 0, 1).float() / 255.0
         return img
 
     def _load_depth(self, path):
-        arr = np.load(path).astype(np.float32)
+        arr = np.load(path).astype(np.float32, copy=True)  # copy=True → resizable storage
         t = torch.from_numpy(arr)
         return t if t.ndim == 3 else t.unsqueeze(0)  # ensure (1, H, W)
 
     def _load_mde_depth(self, path):
         """Load a ZoeDepth prediction (uint16 PNG, stored in mm → convert to metres)."""
-        arr = np.array(Image.open(path)).astype(np.float32) / 1000.0
+        arr = np.array(Image.open(path), copy=True).astype(np.float32) / 1000.0
         t = torch.from_numpy(arr)
         return t if t.ndim == 3 else t.unsqueeze(0)  # ensure (1, H, W)
 
@@ -141,11 +145,17 @@ class ScanNetTemporalDataset(Dataset):
             img_path   = os.path.join(scene_info["color_dir"],     f"{fid}{color_ext}")
             depth_path = os.path.join(scene_info["depth_dir"],     f"{fid}{depth_ext}")
             mde_path   = os.path.join(scene_info["mde_depth_dir"], f"{fid}{mde_ext}")
+            pose_path  = os.path.join(scene_info["pose_dir"],      f"{fid}{ScanNetScene.POSE_EXT}")
+
+            pose_np = np.loadtxt(pose_path).astype(np.float32)
+            if not np.all(np.isfinite(pose_np)):
+                # ScanNet marks failed tracking with inf; replace with identity
+                pose_np = np.eye(4, dtype=np.float32)
 
             images.append(self._load_image(img_path))
             depths.append(self._load_depth(depth_path))
             mde_depths.append(self._load_mde_depth(mde_path))
-            poses.append(torch.from_numpy(scene_info["poses"][fid]).float())
+            poses.append(torch.from_numpy(pose_np))
 
         return {
             "images":     torch.stack(images),                            # (N, 3, H, W)
@@ -211,13 +221,26 @@ if __name__ == "__main__":
     print(f"Saving visualisations to: {OUT_DIR}/")
     print(f"Saving sampled frames to: {SAMPLE_DIR}/\n")
 
-    loader = DataLoader(dataset, batch_size=out_cfg["batch_size"], num_workers=out_cfg["num_workers"], shuffle=False)
+    # ── Resume: detect the highest already-completed batch ────────────────
+    start_batch = 0
+    if os.path.isdir(SAMPLE_DIR):
+        done = [
+            int(d[5:]) for d in os.listdir(SAMPLE_DIR)
+            if d.startswith("batch") and d[5:].isdigit()
+        ]
+        if done:
+            start_batch = max(done)
+            print(f"[resume] Found batch dirs up to batch {start_batch} — "
+                  f"resuming from batch {start_batch + 1}.\n")
 
     total_batches = len(loader)
     milestone = max(1, total_batches // 4)
     print(f"Sampling {total_batches} batches — progress reported every {milestone} batches.\n")
 
     for i, batch in enumerate(loader):
+
+        if i < start_batch:
+            continue  # skip already-saved batches (fast: no disk I/O)
 
         images   = batch["images"]    # (B, N, 3, H, W)
         depths   = batch["depths"]    # (B, N, 1, H, W)

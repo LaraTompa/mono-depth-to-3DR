@@ -168,6 +168,22 @@ class ScanNetScene:
         ]
         return poses, valid_fids
 
+    def valid_fids_fast(self) -> list[str]:
+        """
+        Return frame IDs that have a corresponding pose file, without reading
+        any pose file contents.  ~1000× faster than load_all_poses() at startup
+        because it only calls os.listdir() once instead of np.loadtxt() per frame.
+
+        Trade-off: does not filter out ScanNet's inf-pose frames.  Those are a
+        small minority and are caught at load time in __getitem__.
+        """
+        pose_files = {
+            f[: -len(self.POSE_EXT)]
+            for f in os.listdir(self.pose_dir)
+            if f.endswith(self.POSE_EXT)
+        }
+        return [fid for fid in self.frame_ids if fid in pose_files]
+
     # ------------------------------------------------------------------
     # Repr
     # ------------------------------------------------------------------

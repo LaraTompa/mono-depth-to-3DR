@@ -156,4 +156,5 @@ class PreSampledPairDataset(Dataset):
         else:
             # ZoeDepth: uint16 PNG in mm → float32 metres
             t = torch.from_numpy(np.array(Image.open(path)).astype(np.float32) / 1000.0)
-        return t if t.ndim == 3 else t.unsqueeze(0)
+        t = t if t.ndim == 3 else t.unsqueeze(0)   # ensure (1, H, W)
+        return t

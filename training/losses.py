@@ -284,10 +284,11 @@ def camera_pose_loss(
     total_camera_loss : scalar tensor
     parts             : dict of float scalars for logging
     """
-    T_12_pred    = outputs["T_12_pred"]     # (B, 4, 4)
-    K_pred       = outputs["K_pred"]        # (B, 3, 3)
-    s_pose_raw   = outputs["log_conf_pose"] # (B,)
-    s_K_raw      = outputs["log_conf_K"]    # (B,)
+    T_12_pred    = outputs["T_12_pred"]                       # (B, 4, 4)
+    K_pred       = outputs.get("K_pred")                      # (B, 3, 3) or None
+    s_pose_raw   = outputs["log_conf_pose"]                   # (B,)
+    s_K_raw      = outputs.get("log_conf_K",
+                               torch.zeros_like(s_pose_raw)) # (B,)  dummy when absent
     s_pose       = s_pose_raw.clamp(LOG_CONF_MIN, LOG_CONF_MAX)
     s_K          = s_K_raw.clamp(LOG_CONF_MIN, LOG_CONF_MAX)
 
@@ -325,7 +326,7 @@ def camera_pose_loss(
 
     # ── Intrinsics regression loss ────────────────────────────────────────
     l_K = T_12_pred.new_tensor(0.0)
-    if K_gt is not None:
+    if K_gt is not None and K_pred is not None:
         K_gt_vec   = torch.stack([K_gt[:,  0,0], K_gt[:,  1,1],
                                   K_gt[:,  0,2], K_gt[:,  1,2]], dim=-1)  # (B,4)
         K_pred_vec = torch.stack([K_pred[:,0,0], K_pred[:,1,1],
@@ -642,27 +643,31 @@ def total_loss(
     total : scalar tensor
     parts : dict of scalar floats for logging
     """
-    imgs   = batch["images"]    # (B, N, 3, H, W)
     depths = batch["depths"]    # (B, N, 1, H, W)
 
-    B, N, _, H, W = imgs.shape
+    # Images are optional — depth_only models do not use RGB.
+    # H, W are derived from depths so pH/pW scaling is always correct
+    # (pH=480 height, pW=640 width for our 640×480 ScanNet setup).
+    has_images = "images" in batch
+    if has_images:
+        imgs = batch["images"]  # (B, N, 3, H, W)
+        B, N, _, H, W = imgs.shape
+        rgb1 = imgs[:, 0]       # (B, 3, H, W)
+        rgb2 = imgs[:, 1]
+    else:
+        B, N, _, H, W = depths.shape
 
-    rgb1 = imgs[:, 0]            # (B, 3, H, W)
-    rgb2 = imgs[:, 1]
     gt1  = depths[:, 0]         # (B, 1, H, W)
     gt2  = depths[:, 1]
 
-    pred1 = outputs["depth1"]   # (B, 1, H/2, W/2)
+    pred1 = outputs["depth1"]   # (B, 1, pH, pW)  e.g. (B, 1, 480, 640)
     pred2 = outputs["depth2"]
 
     # Scale GT to predicted resolution for supervised loss
+    # pred1.shape[-2:] = (480, 640) → pH=480 (height), pW=640 (width)
     pH, pW = pred1.shape[-2:]
     gt1_s = F.interpolate(gt1, size=(pH, pW), mode="nearest")
     gt2_s = F.interpolate(gt2, size=(pH, pW), mode="nearest")
-
-    # Scale images to predicted resolution for smoothness
-    rgb1_s = F.interpolate(rgb1, size=(pH, pW), mode="bilinear", align_corners=True)
-    rgb2_s = F.interpolate(rgb2, size=(pH, pW), mode="bilinear", align_corners=True)
 
     w = weights
 
@@ -672,17 +677,25 @@ def total_loss(
         si_log_loss(pred2, gt2_s)
     ) * 0.5
 
-    # --- Smoothness ---
-    l_smooth = (
-        smooth_loss(pred1, rgb1_s) +
-        smooth_loss(pred2, rgb2_s)
-    ) * 0.5
+    # --- Smoothness (RGB edge-weighted) — skipped when images are absent ---
+    l_smooth = pred1.new_tensor(0.0)
+    if has_images:
+        rgb1_s = F.interpolate(rgb1, size=(pH, pW), mode="bilinear", align_corners=True)
+        rgb2_s = F.interpolate(rgb2, size=(pH, pW), mode="bilinear", align_corners=True)
+        l_smooth = (
+            smooth_loss(pred1, rgb1_s) +
+            smooth_loss(pred2, rgb2_s)
+        ) * 0.5
 
     # --- Deep supervision over refinement iters ---
-    l_iters = (
-        iter_supervision_loss(outputs["depth1_iters"], gt1) +
-        iter_supervision_loss(outputs["depth2_iters"], gt2)
-    ) * 0.5
+    # Only computed for models that expose intermediate depth estimates
+    # (e.g. v1 with RAFT-style refinement). depth_only has no iters.
+    l_iters = pred1.new_tensor(0.0)
+    if "depth1_iters" in outputs and "depth2_iters" in outputs:
+        l_iters = (
+            iter_supervision_loss(outputs["depth1_iters"], gt1) +
+            iter_supervision_loss(outputs["depth2_iters"], gt2)
+        ) * 0.5
 
     total = (
         float(w.get("depth",            1.0)) * l_depth  +

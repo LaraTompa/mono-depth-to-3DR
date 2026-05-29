@@ -6,7 +6,8 @@
 # Dataset / scene root
 # ---------------------------------------------------------------------------
 dataset:
-  root_dir:   "datasets/sampled_data"
+  root_dir:      "datasets/sampled_data"       # train + val scenes (80 / 20 split)
+  test_root_dir: "datasets_test/sampled_data"  # held-out test scenes (separate root)
   mde_source: "zoedepth"   # "zoedepth" | "depthpro"
 
 # ---------------------------------------------------------------------------
