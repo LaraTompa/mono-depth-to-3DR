@@ -21,7 +21,7 @@ output:
   sample_output_dir: "datasets/sample_output"          # temporal: visualisation grids
   sampled_data_dir:  "datasets/sampled_data"           # temporal: individual saved frames
   batch_size: 8
-  num_workers: 4
+  num_workers: 6
 
 graph_output:
   sample_output_dir: "datasets/graph_sample_output"    # graph: visualisation grids

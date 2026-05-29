@@ -166,6 +166,7 @@ if __name__ == "__main__":
     import yaml
     import torchvision
     from torch.utils.data import DataLoader
+    from tqdm import tqdm
 
     CONFIG_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config", "dataset.yaml")
     with open(CONFIG_PATH) as f:
@@ -218,10 +219,9 @@ if __name__ == "__main__":
     loader = DataLoader(dataset, batch_size=out_cfg["batch_size"], num_workers=out_cfg["num_workers"], shuffle=False)
 
     total_batches = len(loader)
-    milestone = max(1, total_batches // 4)
-    print(f"Sampling {total_batches} batches — progress reported every {milestone} batches.\n")
+    print(f"Sampling {total_batches} batches...\n")
 
-    for i, batch in enumerate(loader):
+    for i, batch in enumerate(tqdm(loader, desc="Processing batches", unit="batch")):
 
         images   = batch["images"]    # (B, N, 3, H, W)
         depths   = batch["depths"]    # (B, N, 1, H, W)
@@ -229,11 +229,11 @@ if __name__ == "__main__":
         scenes   = batch["scene"]
         all_fids = batch["frame_ids"] # list of N-length lists, one per sample
 
-        print(f"\nBatch {i + 1}:")
+        print(f"\nBatch {i + 1}/{total_batches}:")
         print(f"  scenes : {list(scenes)}")
 
         # save each sample in the batch
-        for b, scene_name in enumerate(scenes):
+        for b, scene_name in enumerate(tqdm(scenes, desc=f"  Saving samples", leave=False, unit="sample")):
             N = images.shape[1]
             # frame_ids is collated as a list of N lists (one per position), so transpose
             fids = [all_fids[f][b] for f in range(N)]
@@ -260,7 +260,7 @@ if __name__ == "__main__":
                 else:
                     print(f"  warning: could not find {intr_filename} for scene {scene_name}")
 
-            for f in range(N):
+            for f in tqdm(range(N), desc=f"    Saving frames", leave=False, unit="frame"):
                 fid = fids[f]
                 torchvision.utils.save_image(images[b, f], os.path.join(rgb_raw_dir, f"{fid}.png"))
                 np.save(os.path.join(dep_raw_dir, f"{fid}.npy"), depths[b, f].numpy())
@@ -280,11 +280,8 @@ if __name__ == "__main__":
             dep_path = os.path.join(OUT_DIR, f"batch{i+1}_sample{b+1}_{scene_name}_depth.png")
             torchvision.utils.save_image(dep_grid, dep_path)
 
-            print(f"  saved frames : {seq_dir}/")
-            print(f"  saved rgb grid  : {rgb_path}")
-            print(f"  saved depth grid: {dep_path}")
-
-        if (i + 1) % milestone == 0 or (i + 1) == total_batches:
-            print(f"\nProgress: {i + 1}/{total_batches} batches complete ({(i + 1) * 100 // total_batches}%)")
+            print(f"    saved frames : {seq_dir}/")
+            print(f"    saved rgb grid  : {rgb_path}")
+            print(f"    saved depth grid: {dep_path}")
 
     print("\nDone.")
