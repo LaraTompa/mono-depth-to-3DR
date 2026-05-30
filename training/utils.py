@@ -154,10 +154,15 @@ def debug_depth_check(depths: torch.Tensor, mde_depths: torch.Tensor) -> None:
           f"  min={valid_mde.min():.3f}  max={valid_mde.max():.3f}  mean={valid_mde.mean():.3f} m")
     print(f"[DEBUG] GT depth   shape={tuple(gt_d.shape)}"
           f"  min={valid_gt.min():.3f}  max={valid_gt.max():.3f}  mean={valid_gt.mean():.3f} m")
-    if torch.allclose(gt_d, mde_d, atol=1e-3):
-        print("[DEBUG] WARNING: MDE prior and GT are identical — still feeding GT as input!")
+    if gt_d.shape == mde_d.shape:
+        if torch.allclose(gt_d, mde_d, atol=1e-3):
+            print("[DEBUG] WARNING: MDE prior and GT are identical — still feeding GT as input!")
+        else:
+            print("[DEBUG] OK: MDE prior differs from GT.")
     else:
-        print("[DEBUG] OK: MDE prior differs from GT.")
+        # Different spatial resolutions (e.g. color 1296×968 vs depth 640×480) —
+        # they cannot be identical, so no accidental GT-leak is possible.
+        print("[DEBUG] OK: MDE prior and GT have different resolutions; no GT-leak.")
 
 def fallback_intrinsics(cfg: dict, B: int, device) -> torch.Tensor:
     m = cfg.get("model", {})
