@@ -4,6 +4,7 @@ from PIL import Image
 import numpy as np
 import time
 import importlib
+from torchvision import transforms as T
 
 try:
     _zoe_misc = importlib.import_module("zoedepth.utils.misc")
@@ -24,6 +25,16 @@ SAMPLED_DATA_DIR = os.path.expanduser("~/mono-depth-to-3DR/datasets/sampled_data
 # ======================
 device = "cuda" if torch.cuda.is_available() else "cpu"
 print("Using device:", device)
+
+# ======================
+# INFERENCE CONFIG
+# match_size=True  -> output depth is resized to match the input image resolution
+# match_size=False -> output depth keeps ZoeDepth's internal processing resolution
+# batch_size       -> images sent to the GPU in one forward pass (all must share the
+#                     same resolution, which is always true within a ScanNet scene)
+# ======================
+MATCH_SIZE = False
+BATCH_SIZE = 4
 
 # ======================
 # LOAD MODEL
@@ -109,11 +120,13 @@ print(f"Found {len(seq_dirs)} sequence(s) under {SAMPLED_DATA_DIR}\n")
 total_frames = 0
 for seq_dir in seq_dirs:
     color_dir = os.path.join(seq_dir, "color")
+    pred_dir  = os.path.join(seq_dir, "zoe-depth_pred")
     if not os.path.isdir(color_dir):
         continue
     total_frames += len([
         f for f in os.listdir(color_dir)
         if f.lower().endswith((".png", ".jpg", ".jpeg"))
+        and not os.path.isfile(os.path.join(pred_dir, os.path.splitext(f)[0] + ".png"))
     ])
 
 if total_frames == 0:
@@ -150,28 +163,54 @@ for seq_idx, seq_dir in enumerate(seq_dirs, start=1):
 
     seq_start = time.time()
 
-    for frame_idx, fname in enumerate(image_files, start=1):
-        img_path = os.path.join(color_dir, fname)
-        img = Image.open(img_path).convert("RGB")
+    # Only frames whose output does not yet exist (resume support)
+    fname_to_seq_idx = {f: i for i, f in enumerate(image_files, start=1)}
+    pending = [
+        fname for fname in image_files
+        if not os.path.isfile(os.path.join(pred_dir, os.path.splitext(fname)[0] + ".png"))
+    ]
 
-        with torch.no_grad():
-            depth = model.infer_pil(img)  # numpy float32, metres
+    for b_start in range(0, len(pending), BATCH_SIZE):
+        batch_fnames = pending[b_start : b_start + BATCH_SIZE]
+        batch_imgs   = [
+            Image.open(os.path.join(color_dir, f)).convert("RGB")
+            for f in batch_fnames
+        ]
 
-        # Save as 16-bit PNG (millimetres) — consistent with ScanNet GT format
-        out_path = os.path.join(pred_dir, os.path.splitext(fname)[0] + ".png")
-        save_raw_16bit(depth, out_path)
+        if len(batch_imgs) > 1 and len({img.size for img in batch_imgs}) == 1:
+            # All same resolution → true batched GPU forward pass
+            x = torch.stack([T.ToTensor()(img) for img in batch_imgs]).to(device)
+            with torch.no_grad():
+                out = model.infer(x, match_size=MATCH_SIZE)  # (B, H, W) numpy or (B,1,H,W) tensor
+            if isinstance(out, torch.Tensor):
+                depths = out.squeeze(1).cpu().numpy()
+            elif isinstance(out, np.ndarray) and out.ndim == 4:
+                depths = out.squeeze(1)
+            else:
+                depths = out  # already (B, H, W) numpy
+        else:
+            # Single image or mixed resolutions → fall back to infer_pil
+            depths = []
+            for img in batch_imgs:
+                with torch.no_grad():
+                    depths.append(model.infer_pil(img, match_size=MATCH_SIZE))
 
-        processed_frames += 1
-        elapsed = time.time() - global_start
-        avg_per_frame = elapsed / processed_frames if processed_frames > 0 else None
-        remaining = (total_frames - processed_frames) * avg_per_frame if avg_per_frame else None
+        for i, fname in enumerate(batch_fnames):
+            out_path = os.path.join(pred_dir, os.path.splitext(fname)[0] + ".png")
+            # Save as 16-bit PNG (millimetres) — consistent with ScanNet GT format
+            save_raw_16bit(depths[i], out_path)
 
-        print(
-            f"    frame {frame_idx}/{len(image_files)} | "
-            f"global {processed_frames}/{total_frames} | "
-            f"elapsed {format_seconds(elapsed)} | "
-            f"eta {format_seconds(remaining)}"
-        )
+            processed_frames += 1
+            elapsed = time.time() - global_start
+            avg_per_frame = elapsed / processed_frames if processed_frames > 0 else None
+            remaining = (total_frames - processed_frames) * avg_per_frame if avg_per_frame else None
+
+            print(
+                f"    frame {fname_to_seq_idx[fname]}/{len(image_files)} | "
+                f"global {processed_frames}/{total_frames} | "
+                f"elapsed {format_seconds(elapsed)} | "
+                f"eta {format_seconds(remaining)}"
+            )
 
     seq_elapsed = time.time() - seq_start
     print(f"    -> saved predicted depths to {pred_dir}/")
