@@ -9,6 +9,10 @@ dataset:
   root_dir:      "datasets/sampled_data"       # train + val scenes (80 / 20 split)
   test_root_dir: "datasets_test/sampled_data"  # held-out test scenes (separate root)
   mde_source: "zoedepth"   # "zoedepth" | "depthpro"
+  # All color images and MDE-depth priors are resized to this (H, W) at load time
+  # so that batches are always collatable regardless of native scene resolution.
+  # 480x640 matches ScanNet's depth-camera resolution, so GT depths need no rescaling.
+  image_size: [480, 640]
 
 # ---------------------------------------------------------------------------
 # DataLoader

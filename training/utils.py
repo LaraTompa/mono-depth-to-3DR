@@ -26,11 +26,13 @@ def seed_everything(seed: int) -> None:
 def build_dataset(cfg: dict, root_dir: str, scene_paths=None, augment: bool = False):
     mde_source = cfg.get("dataset", {}).get("mde_source", "zoedepth")
     aug_cfg    = cfg.get("augmentation") if augment else None
+    image_size = cfg.get("dataset", {}).get("image_size")  # e.g. [480, 640]
     return PreSampledPairDataset(
         root_dir=root_dir,
         mde_source=mde_source,
         scene_paths=scene_paths,
         aug_cfg=aug_cfg,
+        image_size=image_size,
     )
 
 

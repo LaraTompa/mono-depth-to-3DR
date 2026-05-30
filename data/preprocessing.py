@@ -20,6 +20,7 @@ import os
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from PIL import Image
 from torch.utils.data import Dataset
 
@@ -49,16 +50,22 @@ class PreSampledPairDataset(Dataset):
         mde_source: str  = "zoedepth",
         scene_paths=None,
         aug_cfg:    dict | None = None,
+        image_size: tuple | list | None = None,
     ):
         """
-        aug_cfg : dict mapping augmentation parameters (see data/augmentation.py).
-                  Pass None (default) to disable all augmentation (val/test).
+        aug_cfg    : dict mapping augmentation parameters (see data/augmentation.py).
+                     Pass None (default) to disable all augmentation (val/test).
+        image_size : (H, W) target size for color images and MDE-depth priors.
+                     When set, all images/MDE depths are resized to this resolution
+                     at load time, ensuring all batch items are collatable even when
+                     scenes have different native resolutions.
         """
         if scene_paths is None:
             scene_paths = find_scene_paths(root_dir)
 
         self.mde_source = mde_source
         self.aug_cfg    = aug_cfg
+        self.image_size = tuple(image_size) if image_size is not None else None
         self.pairs = []
         for scene_path in scene_paths:
             scene = ScanNetScene(scene_path, mde_source=mde_source)
@@ -110,6 +117,33 @@ class PreSampledPairDataset(Dataset):
         mde_t   = torch.stack(mde_depths)                       # (2, 1, H, W)  MDE prior
         poses_t = torch.stack(poses)                            # (2, 4, 4)
         intr_t  = torch.from_numpy(info["intrinsics"])          # (3, 3)
+
+        # Resize color images and MDE priors to a fixed spatial size so that
+        # all samples in a batch are collatable (scenes may have different native
+        # resolutions, e.g. 480×640 vs 968×1296).
+        # GT depths are NOT resized — they stay at the depth-camera native resolution.
+        if self.image_size is not None:
+            if imgs_t.shape[-2:] != torch.Size(self.image_size):
+                imgs_t = F.interpolate(
+                    imgs_t, size=self.image_size, mode="bilinear", align_corners=False
+                )
+            if mde_t.shape[-2:] != torch.Size(self.image_size):
+                mde_t = F.interpolate(
+                    mde_t, size=self.image_size, mode="bilinear", align_corners=False
+                )
+            # Scale intrinsics to match the resized spatial resolution.
+            # intrinsic_depth.txt is defined for the GT-depth native resolution
+            # (deps_t has never been resized, so its shape is the reference).
+            native_h, native_w = deps_t.shape[-2], deps_t.shape[-1]
+            target_h, target_w = self.image_size
+            if (target_h, target_w) != (native_h, native_w):
+                scale_w = target_w / native_w
+                scale_h = target_h / native_h
+                intr_t = intr_t.clone()
+                intr_t[0, 0] *= scale_w   # fx
+                intr_t[1, 1] *= scale_h   # fy
+                intr_t[0, 2] *= scale_w   # cx
+                intr_t[1, 2] *= scale_h   # cy
 
         if self.aug_cfg is not None:
             imgs_t, deps_t, mde_t, poses_t, intr_t = augment_pair(
