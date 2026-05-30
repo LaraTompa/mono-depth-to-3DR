@@ -106,7 +106,7 @@ depth_only:
   # [640, 480] → s16 = 40×30 = 1200 tokens: 4× faster, fits comfortably.
   # Aspect ratio is preserved; depth_input for the residual head is unaffected.
   # Set to null to encode at full resolution (only safe for ≤512×512 inputs).
-  max_encode_hw: [640, 480]
+  max_encode_hw: [480, 640]
 
   # Freeze cross-attention blocks after MASt3R init.
   # true  → blocks act as a fixed feature extractor; only enc_to_dec,

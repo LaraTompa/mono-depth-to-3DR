@@ -179,9 +179,16 @@ for seq_idx, seq_dir in enumerate(seq_dirs, start=1):
 
         if len(batch_imgs) > 1 and len({img.size for img in batch_imgs}) == 1:
             # All same resolution → true batched GPU forward pass
+            # match_size is an infer_pil()-level concern; model.infer() does not accept it
+            # (the kwarg leaks into F.pad causing a TypeError). Resize manually if needed.
             x = torch.stack([T.ToTensor()(img) for img in batch_imgs]).to(device)
             with torch.no_grad():
-                out = model.infer(x, match_size=MATCH_SIZE)  # (B, H, W) numpy or (B,1,H,W) tensor
+                out = model.infer(x)  # (B, 1, H, W) tensor
+            if MATCH_SIZE:
+                orig_w, orig_h = batch_imgs[0].size  # PIL size is (W, H)
+                out = torch.nn.functional.interpolate(
+                    out, size=(orig_h, orig_w), mode="bilinear", align_corners=False
+                )
             if isinstance(out, torch.Tensor):
                 depths = out.squeeze(1).cpu().numpy()
             elif isinstance(out, np.ndarray) and out.ndim == 4:
