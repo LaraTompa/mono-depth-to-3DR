@@ -1,3 +1,5 @@
+arch_config: "config/arch/depth_only.yaml"
+
 checkpoint:
   mode: min
   monitor: val/loss

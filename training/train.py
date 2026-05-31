@@ -602,11 +602,13 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--arch",
-        default=os.path.join(_REPO_ROOT, "config", "arch", "depth_only.yaml"),
+        default=None,
         help=(
             "Path to a per-model architecture YAML. "
             "Available: config/arch/depth_only.yaml (default), "
-            "config/arch/vista.yaml, config/arch/v1.yaml"
+            "config/arch/vista.yaml, config/arch/v1.yaml. "
+            "If omitted, reads 'arch_config' from training.yaml, "
+            "then falls back to config/arch/depth_only.yaml."
         ),
     )
     parser.add_argument(
@@ -618,7 +620,14 @@ if __name__ == "__main__":
 
     with open(args.config) as f:
         cfg = yaml.safe_load(f)
-    with open(args.arch) as f:
+
+    # Resolve arch config: --arch flag > arch_config in training.yaml > default
+    _default_arch = os.path.join(_REPO_ROOT, "config", "arch", "depth_only.yaml")
+    arch_path = args.arch or cfg.get("arch_config") or _default_arch
+    # Resolve relative paths against the repo root so the script works from any cwd.
+    if not os.path.isabs(arch_path):
+        arch_path = os.path.join(_REPO_ROOT, arch_path)
+    with open(arch_path) as f:
         arch_cfg = yaml.safe_load(f)
 
     resume = args.resume or cfg.get("checkpoint", {}).get("resume")
