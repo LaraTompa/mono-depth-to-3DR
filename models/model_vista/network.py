@@ -214,7 +214,9 @@ class DepthAlignNetV2(nn.Module):
         # constraint as confidence weighting reshapes the loss landscape. Using
         # se3_inv makes pose_identity_loss = 0 by construction and removes the
         # need for the round-trip gradient signal entirely.
-        rel_12        = self.relative_pose_head(torch.cat([cam_embed1, cam_embed2], dim=-1))
+        # .detach() (change A): stop pose-head gradients from entering the depth
+        # encoder/cross-attention features used by the depth decoder.
+        rel_12        = self.relative_pose_head(torch.cat([cam_embed1.detach(), cam_embed2.detach()], dim=-1))
         # rel_21        = self.relative_pose_head(torch.cat([cam_embed2, cam_embed1], dim=-1))
         T_12_pred     = rel_12["T_12"]
         T_21_pred     = se3_inv(T_12_pred)   # exact: R^T, -R^T·t

@@ -11,7 +11,7 @@ model: "depth_only"
 # ---------------------------------------------------------------------------
 depth_only:
   # ConvNeXt-Tiny depth encoder
-  feature_dim: 256              # 1×1-projected encoder output channels
+  feature_dim: 128              # 1×1-projected encoder output channels
 
   # Cross-attention decoder
   # MUST be 768 to load MASt3R BaseDecoder weights.
@@ -61,5 +61,5 @@ depth_only:
   #   camera_pose_loss (geodesic rotation + normalised translation + identity
   #   round-trip) in total_loss since "T_12_pred" appears in outputs.
   #   K is not predicted; the K loss is suppressed.
-  predict_pose: false
+  predict_pose: true
   pose_head_hidden: 128         # hidden width of the 2-layer PoseHead MLP

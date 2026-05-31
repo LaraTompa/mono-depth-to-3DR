@@ -101,9 +101,18 @@ class PoseHead(nn.Module):
         self.log_conf_K    = nn.Parameter(torch.zeros(1))
 
         _mast3r_init(self.mlp)
-        # Zero last-layer weights — predictions start near zero / identity.
+        # Zero last-layer weights so all bias-free paths start at identity.
+        # IMPORTANT: do NOT zero the bias for the rotation columns — a zero
+        # 6D rotation vector causes F.normalize([0,0,0]) → NaN at init.
+        # Set bias = identity in 6D repr (cols 1,2 of the rotation) + a small
+        # but non-trivial translation (norm >> EPS_NORM=0.01) to avoid the
+        # ~100× gradient amplification from the normalization chain-rule.
         nn.init.zeros_(self.mlp[-1].weight)
-        nn.init.zeros_(self.mlp[-1].bias)
+        with torch.no_grad():
+            self.mlp[-1].bias.copy_(
+                torch.tensor([1., 0., 0., 0., 1., 0.,   # identity in 6D
+                               0., 0., 0.1])              # 10 cm forward; norm >> EPS_NORM
+            )
 
     def forward(
         self,
@@ -300,8 +309,13 @@ class DepthOnlyNet(nn.Module):
             "confidence2": out2["confidence"],
             "log_scale1":  out1["log_scale"],
             "log_scale2":  out2["log_scale"],
-            # pose predictions (only when predict_pose=True)
-            **(self.pose_head(cam_tok1, cam_tok2) if self.predict_pose else {}),
+            # Pose predictions (only when predict_pose=True).
+            # .detach() on cam_tok: pose-head gradients must not flow back
+            # through CrossAttentionDecoder → encoder (change A).  The large
+            # initial translation gradient (~10× amplified through the norm
+            # chain-rule) would otherwise corrupt the depth cross-attention
+            # features before either task has converged.
+            **(self.pose_head(cam_tok1.detach(), cam_tok2.detach()) if self.predict_pose else {}),
         }
 
 
