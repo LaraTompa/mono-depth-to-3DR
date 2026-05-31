@@ -261,6 +261,9 @@ def main(args):
     conf1 = outputs["confidence1"].squeeze().cpu().numpy()
     conf2 = outputs["confidence2"].squeeze().cpu().numpy()
 
+    # Create output dir early so T_12_pred.txt / K_pred.txt saves don't fail
+    os.makedirs(args.output_dir, exist_ok=True)
+
     # ── Print predicted camera parameters ────────────────────────────────────
     if "T_12_pred" in outputs:
         T_12_pred_np = outputs["T_12_pred"][0].cpu().numpy()
@@ -279,7 +282,6 @@ def main(args):
     pred2_full = cv2.resize(pred2_out, (W, H), interpolation=cv2.INTER_LINEAR)
 
     # ── Save outputs ─────────────────────────────────────────────────────────
-    os.makedirs(args.output_dir, exist_ok=True)
     print(f"[eval] Saving outputs to {args.output_dir}")
 
     save_depth(pred1_full, os.path.join(args.output_dir, "depth1_aligned.npy"))
