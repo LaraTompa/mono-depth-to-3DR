@@ -3,17 +3,6 @@
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ---------------------------------------------------------------------------
-# Architecture config (replaces the old monolithic config/arch.yaml)
-# The per-model YAML under config/arch/ is now separate so that training.yaml
-# is model-agnostic.  Point this at whichever variant you want to train:
-#   config/arch/depth_only.yaml  ← depth-only model (default)
-#   config/arch/v1.yaml          ← v1 ConvNeXt + FPN model
-#   config/arch/vista.yaml       ← DINOv2 + MASt3R vista model
-# Can be overridden on the command line:  --arch config/arch/vista.yaml
-# ---------------------------------------------------------------------------
-arch_config: "config/arch/depth_only.yaml"
-
-# ---------------------------------------------------------------------------
 # Dataset / scene root
 # ---------------------------------------------------------------------------
 dataset:
