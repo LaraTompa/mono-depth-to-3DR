@@ -319,12 +319,12 @@ class DepthOnlyNet(nn.Module):
             "log_scale1":  out1["log_scale"],
             "log_scale2":  out2["log_scale"],
             # Pose predictions (only when predict_pose=True).
-            # .detach() on cam_tok: pose-head gradients must not flow back
-            # through CrossAttentionDecoder → encoder (change A).  The large
-            # initial translation gradient (~10× amplified through the norm
-            # chain-rule) would otherwise corrupt the depth cross-attention
-            # features before either task has converged.
-            **(self.pose_head(cam_tok1.detach(), cam_tok2.detach()) if self.predict_pose else {}),
+            # cam_tok gradients are allowed to flow back into CrossAttentionDecoder
+            # so that the camera_token parameter receives pose supervision.
+            # Interference with depth is controlled by camera_warmup_epochs (15)
+            # and the scale-penalty mask — the camera loss weight is ~15× smaller
+            # at epoch 1 than at full strength.
+            **(self.pose_head(cam_tok1, cam_tok2) if self.predict_pose else {}),
         }
 
 

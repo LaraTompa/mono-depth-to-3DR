@@ -304,12 +304,19 @@ def camera_pose_loss(
     l_trans = normalized_translation_loss(t_pred, t_gt)  # (B,)
 
     # ── Translation scale loss ──────────────────────────────────────────
-    # The normalized loss only supervises direction. We add an L2 penalty on log-scale.
-    scale_pred = t_pred.norm(dim=-1).clamp(min=EPS_NORM)
-    scale_gt   = t_gt.norm(dim=-1).clamp(min=EPS_NORM)
-    l_trans_scale = F.l1_loss(torch.log(scale_pred), torch.log(scale_gt), reduction='none')
+    # The normalized loss only supervises direction. We add an L1 penalty on log-scale.
+    # Scale supervision is masked out for near-static pairs (||t_gt|| < EPS_NORM):
+    # when GT translation is below the normalisation floor its magnitude is
+    # undefined (clamped to EPS_NORM), so the log-scale penalty would be pure
+    # noise — typically adding ~1.15 nats of constant gradient that points the
+    # model toward predicting tiny translations rather than correct directions.
+    scale_pred  = t_pred.norm(dim=-1).clamp(min=EPS_NORM)          # (B,)
+    scale_gt    = t_gt.norm(dim=-1)                                  # (B,)  raw
+    valid_trans = (scale_gt > EPS_NORM).float()                      # (B,)  1 = has real translation
+    scale_gt    = scale_gt.clamp(min=EPS_NORM)
+    l_trans_scale = (torch.log(scale_pred) - torch.log(scale_gt)).abs()  # (B,)
 
-    l_trans = l_trans + l_trans_scale * 0.5  # Weight scale error relative to angle
+    l_trans = l_trans + valid_trans * l_trans_scale * 0.5  # scale penalty only where GT is defined
 
     # ── Confidence-weighted pose loss ─────────────────────────────────────
     w_rot   = float(weights.get("rot",   1.0))
