@@ -15,7 +15,7 @@ depth_only:
 
   # Cross-attention decoder
   # MUST be 768 to load MASt3R BaseDecoder weights.
-  # The enc_to_dec linear (256 → 768) bridges encoder ↔ decoder automatically.
+  # The enc_to_dec linear (128 → 768) bridges encoder ↔ decoder automatically.
   token_dim: 768
   num_blocks: 4                 # number of CrossBlocks to init from MASt3R
   num_heads: 12                 # 12 heads × 64 head_dim = 768
