@@ -267,13 +267,16 @@ def pose_iters_loss(
     total_w = float(sum(w_vals))
     loss    = T_12_gt.new_tensor(0.0)
     for T_i, wi in zip(T_12_iters, w_vals):
+        # T_12_gt is always float32; GRU iterates may be float16 under autocast.
+        # Cast GT to the iterate dtype so all matmuls inside camera_pose_loss agree.
+        T_gt_i = T_12_gt.to(dtype=T_i.dtype)
         fake_out = {
             "T_12_pred":     T_i,
             "T_21_pred":     se3_inv(T_i),
             "log_conf_pose": torch.zeros(T_i.shape[0], device=T_i.device, dtype=T_i.dtype),
             "log_conf_K":    torch.zeros(T_i.shape[0], device=T_i.device, dtype=T_i.dtype),
         }
-        l_i, _ = camera_pose_loss(fake_out, T_12_gt, None, weights, use_confidence=False)
+        l_i, _ = camera_pose_loss(fake_out, T_gt_i, None, weights, use_confidence=False)
         loss = loss + (wi / total_w) * l_i
     return loss
 
