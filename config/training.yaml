@@ -64,7 +64,7 @@ loss:
 # Data augmentation  (training split only; val/test are never augmented)
 # Set any value to 0.0 to disable that transform.
 # ---------------------------------------------------------------------------
-augment: True
+augment: False
 augmentation:
   # Geometric — applied to images, depths, mde_depths, poses, and intrinsics.
   # Both views of a pair are flipped together so the relative pose stays valid.

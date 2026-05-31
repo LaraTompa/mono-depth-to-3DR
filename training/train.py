@@ -602,8 +602,12 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--arch",
-        default=os.path.join(_REPO_ROOT, "config", "arch.yaml"),
-        help="Path to arch.yaml (architecture definition).",
+        default=os.path.join(_REPO_ROOT, "config", "arch", "depth_only.yaml"),
+        help=(
+            "Path to a per-model architecture YAML. "
+            "Available: config/arch/depth_only.yaml (default), "
+            "config/arch/vista.yaml, config/arch/v1.yaml"
+        ),
     )
     parser.add_argument(
         "--resume",
