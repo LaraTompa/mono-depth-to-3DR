@@ -80,20 +80,24 @@ from .decoder        import DepthDecoder
 
 class PoseHead(nn.Module):
     """
-    Regress T_12 and T_21 from the evolved camera tokens produced by
-    CrossAttentionDecoder when predict_pose=True.
+    Regress T_12 from encoder global features (not cross-attention camera tokens).
 
-    T_12 = f(cam_tok1, cam_tok2)
-    T_21 = f(cam_tok2, cam_tok1)   ← same weights, swapped order
+    Input: global-average-pool of feats['s16'] from each view independently.
+    These are genuinely view-specific (computed before any cross-attention) so
+    the pose head has a real signal to work with even when the two views are
+    geometrically similar.
+
+    T_12 = f(enc1_global, enc2_global)
+    T_21 = se3_inv(T_12)   — exact, no independent prediction needed.
 
     Outputs T_12_pred, T_21_pred (B,4,4) and per-sample log-confidence
     scalars for heteroscedastic uncertainty weighting in camera_pose_loss.
     """
 
-    def __init__(self, token_dim: int, hidden: int = 128):
+    def __init__(self, in_dim: int, hidden: int = 128):
         super().__init__()
         self.mlp = nn.Sequential(
-            nn.Linear(2 * token_dim, hidden),
+            nn.Linear(2 * in_dim, hidden),
             nn.GELU(),
             nn.Linear(hidden, 9),   # 6D rotation + 3D translation
         )
@@ -119,12 +123,12 @@ class PoseHead(nn.Module):
 
     def forward(
         self,
-        cam_tok1: torch.Tensor,   # (B, token_dim)  evolved camera token view-1
-        cam_tok2: torch.Tensor,   # (B, token_dim)  evolved camera token view-2
+        enc_global1: torch.Tensor,   # (B, in_dim)  global-avg-pool of encoder s16, view-1
+        enc_global2: torch.Tensor,   # (B, in_dim)  global-avg-pool of encoder s16, view-2
     ) -> dict:
-        B = cam_tok1.shape[0]
-        # T_12: conditioned on (tok1, tok2)
-        T_12_pred = _vec9_to_se3(self.mlp(torch.cat([cam_tok1, cam_tok2], dim=-1)))
+        B = enc_global1.shape[0]
+        # T_12: conditioned on per-view encoder globals (view-specific before cross-attn)
+        T_12_pred = _vec9_to_se3(self.mlp(torch.cat([enc_global1, enc_global2], dim=-1)))
         # T_21 is the exact SE(3) inverse of T_12 — no independent prediction needed,
         # so the identity round-trip loss is automatically satisfied by construction.
         T_21_pred = _se3_inv(T_12_pred)
@@ -212,10 +216,13 @@ class DepthOnlyNet(nn.Module):
             self.cross_attn.freeze_blocks()
 
         # ── Pose head (only when predict_pose=True) ──────────────────────
-        # Reads evolved camera tokens → T_12_pred, T_21_pred.
-        # When predict_pose=False this is absent and no pose loss fires.
+        # Reads encoder global features (feats['s16'] global-avg-pool) per view.
+        # Using encoder features (computed before cross-attention) rather than
+        # camera tokens: the camera_token is shared across views at init so
+        # cam_tok1 ≈ cam_tok2 early in training, giving the MLP no useful signal.
+        # Encoder features are genuinely view-specific (independent processing).
         if predict_pose:
-            self.pose_head = PoseHead(token_dim, hidden=pose_head_hidden)
+            self.pose_head = PoseHead(feature_dim, hidden=pose_head_hidden)
 
         # ── Depth decoders (one per view, weight-tied) ───────────────────
         # Both views share the same decoder weights.
@@ -319,12 +326,17 @@ class DepthOnlyNet(nn.Module):
             "log_scale1":  out1["log_scale"],
             "log_scale2":  out2["log_scale"],
             # Pose predictions (only when predict_pose=True).
-            # cam_tok gradients are allowed to flow back into CrossAttentionDecoder
-            # so that the camera_token parameter receives pose supervision.
-            # Interference with depth is controlled by camera_warmup_epochs (15)
-            # and the scale-penalty mask — the camera loss weight is ~15× smaller
-            # at epoch 1 than at full strength.
-            **(self.pose_head(cam_tok1, cam_tok2) if self.predict_pose else {}),
+            # Use encoder global features (global-avg-pool of s16) rather than
+            # cross-attention camera tokens.  Rationale: camera_token is the same
+            # nn.Parameter for both views at init, so cam_tok1 ≈ cam_tok2 until
+            # cross-attention has been trained to differentiate them — which
+            # requires pose supervision that hasn't arrived yet (chicken-and-egg).
+            # Encoder features are computed independently per view → genuinely
+            # different representations from the start.
+            **(self.pose_head(
+                   feats1["s16"].mean(dim=[2, 3]),   # (B, feature_dim)
+                   feats2["s16"].mean(dim=[2, 3]),   # (B, feature_dim)
+               ) if self.predict_pose else {}),
         }
 
 
