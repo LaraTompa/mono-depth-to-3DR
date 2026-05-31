@@ -66,9 +66,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from models.model_image_depth.geometry import se3_inv
+
 from .encoder        import DepthEncoder
-from .cross_attention import CrossAttentionDecoder, _mast3r_init, _vec9_to_se3
+from .cross_attention import CrossAttentionDecoder, _mast3r_init, _vec9_to_se3, _se3_inv
 from .decoder        import DepthDecoder
+
 
 
 # ---------------------------------------------------------------------------
@@ -120,9 +123,15 @@ class PoseHead(nn.Module):
         cam_tok2: torch.Tensor,   # (B, token_dim)  evolved camera token view-2
     ) -> dict:
         B = cam_tok1.shape[0]
-        # T_12: conditioned on (tok1, tok2);  T_21: swap order (same weights)
+        # T_12: conditioned on (tok1, tok2)
         T_12_pred = _vec9_to_se3(self.mlp(torch.cat([cam_tok1, cam_tok2], dim=-1)))
-        T_21_pred = _vec9_to_se3(self.mlp(torch.cat([cam_tok2, cam_tok1], dim=-1)))
+        # T_21 is the exact SE(3) inverse of T_12 — no independent prediction needed,
+        # so the identity round-trip loss is automatically satisfied by construction.
+        T_21_pred = _se3_inv(T_12_pred)
+        # Previous approach: predict T_21 independently with swapped token order.
+        # Requires an identity loss to enforce T_21 ≈ inv(T_12).
+        # T_21_pred = _vec9_to_se3(self.mlp(torch.cat([cam_tok2, cam_tok1], dim=-1)))
+
         return {
             "T_12_pred":     T_12_pred,                        # (B, 4, 4)
             "T_21_pred":     T_21_pred,                        # (B, 4, 4)

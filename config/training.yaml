@@ -18,7 +18,7 @@ dataset:
 # DataLoader
 # ---------------------------------------------------------------------------
 loader:
-  batch_size: 4
+  batch_size: 8
   num_workers: 4
   pin_memory: true
   drop_last: true
@@ -49,7 +49,7 @@ loss:
   camera:           0.5    # was 0.1 — pose needs stronger signal vs depth (1.0)
   camera_warmup_epochs: 5   # pose was learning faster after epoch 15 (confidence weighting); front-load it
   pixel_consistency: 0.0  # multiview reprojection consistency
-  identity:         0.05   # pose round-trip regulariser weight — raised from 0.05 (5x more signal for anti-parallel constraint)
+  identity:         0.0    # T_21 = se3_inv(T_12) by construction — identity loss not needed
   K_reg: 0.0             # was 0.0 — intrinsics supervision helps anchor pose
   rot: 0.8               # was implicit 1.0 — boost rotation signal
   trans: 0.8             # raised from 0.5 — translation stalling; more supervision signal
@@ -92,7 +92,7 @@ train:
   epochs: 50
   grad_clip: 1.0                 # max gradient norm; null → disabled
   val_every: 1                   # validate every N epochs
-  log_every: 50                  # log every N batches
+  log_every: 500                  # log every N batches
   seed: 0
   loss_spike_threshold: 50.0     # skip batch if loss exceeds this value
   patience: 50
