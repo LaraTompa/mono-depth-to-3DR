@@ -821,6 +821,10 @@ def total_loss(
         if t_gt_norms.mean() < 0.01:
             print(f"[WARNING] GT translation norms very small: min={t_gt_norms.min():.6f} max={t_gt_norms.max():.6f} mean={t_gt_norms.mean():.6f}")
             print(f"[WARNING] This suggests zero or near-zero GT motion — check pose convention!")
+            if "scene" in batch:
+                print(f"[WARNING] Affected scenes:    {list(batch['scene'])[:4]}")
+            if "frame_ids" in batch:
+                print(f"[WARNING] Affected frame_ids: {list(batch['frame_ids'])[:4]}")
         K_gt    = batch.get("intrinsics")                        # (B, 3, 3) or None
         l_cam, cam_parts = camera_pose_loss(outputs, T_12_gt, K_gt, w,
                                             use_confidence=use_confidence)

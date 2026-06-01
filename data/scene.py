@@ -159,12 +159,24 @@ class ScanNetScene:
         poses : dict[str, np.ndarray]
             Mapping from frame ID to 4×4 camera-to-world matrix.
         valid_fids : list[str]
-            Frame IDs whose pose contains no non-finite values.
-            (ScanNet marks missing/failed poses with inf.)
+            Frame IDs whose pose file exists, contains no non-finite values,
+            and has a non-zero translation column.
+            (ScanNet marks missing/failed poses with inf; some pre-sampled
+            scenes may contain all-zero pose matrices for stationary frames —
+            those are also excluded so they do not produce degenerate T_12.)
         """
-        poses = {fid: load_pose(self.pose_path(fid)) for fid in self.frame_ids}
+        # One listdir call to find existing pose files (avoids per-frame stat).
+        pose_files_exist = {
+            f[: -len(self.POSE_EXT)]
+            for f in os.listdir(self.pose_dir)
+            if f.endswith(self.POSE_EXT)
+        }
+        loadable_fids = [fid for fid in self.frame_ids if fid in pose_files_exist]
+        poses = {fid: load_pose(self.pose_path(fid)) for fid in loadable_fids}
         valid_fids = [
-            fid for fid in self.frame_ids if np.all(np.isfinite(poses[fid]))
+            fid for fid in loadable_fids
+            if np.all(np.isfinite(poses[fid]))
+            and np.linalg.norm(poses[fid][:3, 3]) > 1e-6  # skip zero-translation frames
         ]
         return poses, valid_fids
 
