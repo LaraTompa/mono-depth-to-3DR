@@ -25,7 +25,7 @@ depth_only:
   decoder_hidden: 128
 
   # Pose conditioning
-  use_pose_token: true          # encode T_12/T_21 as prepended token
+  use_pose_token: false          # encode T_12/T_21 as prepended token
 
   # Encoder training
   freeze_encoder: false         # true: keep ConvNeXt frozen (useful early)
@@ -61,7 +61,7 @@ depth_only:
   #   camera_pose_loss (geodesic rotation + normalised translation + identity
   #   round-trip) in total_loss since "T_12_pred" appears in outputs.
   #   K is not predicted; the K loss is suppressed.
-  predict_pose: true
+  predict_pose: false
   pose_head_hidden: 128         # hidden width of the 2-layer PoseHead MLP
 
   # Iterative GRU pose refinement (PoseRefinementModule).
