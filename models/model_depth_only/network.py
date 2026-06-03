@@ -68,9 +68,10 @@ import torch.nn.functional as F
 
 from models.model_image_depth.geometry import se3_inv
 
-from .encoder        import DepthEncoder
-from .cross_attention import CrossAttentionDecoder, _mast3r_init, _vec9_to_se3, _se3_inv
-from .decoder        import DepthDecoder
+from .encoder          import DepthEncoder
+from .cross_attention  import CrossAttentionDecoder, _mast3r_init, _vec9_to_se3, _se3_inv
+from .decoder          import DepthDecoder
+from .pose_refinement  import PoseRefinementModule
 
 
 
@@ -80,20 +81,24 @@ from .decoder        import DepthDecoder
 
 class PoseHead(nn.Module):
     """
-    Regress T_12 and T_21 from the evolved camera tokens produced by
-    CrossAttentionDecoder when predict_pose=True.
+    Regress T_12 from encoder global features (not cross-attention camera tokens).
 
-    T_12 = f(cam_tok1, cam_tok2)
-    T_21 = f(cam_tok2, cam_tok1)   ← same weights, swapped order
+    Input: global-average-pool of feats['s16'] from each view independently.
+    These are genuinely view-specific (computed before any cross-attention) so
+    the pose head has a real signal to work with even when the two views are
+    geometrically similar.
+
+    T_12 = f(enc1_global, enc2_global)
+    T_21 = se3_inv(T_12)   — exact, no independent prediction needed.
 
     Outputs T_12_pred, T_21_pred (B,4,4) and per-sample log-confidence
     scalars for heteroscedastic uncertainty weighting in camera_pose_loss.
     """
 
-    def __init__(self, token_dim: int, hidden: int = 128):
+    def __init__(self, in_dim: int, hidden: int = 128):
         super().__init__()
         self.mlp = nn.Sequential(
-            nn.Linear(2 * token_dim, hidden),
+            nn.Linear(2 * in_dim, hidden),
             nn.GELU(),
             nn.Linear(hidden, 9),   # 6D rotation + 3D translation
         )
@@ -119,12 +124,12 @@ class PoseHead(nn.Module):
 
     def forward(
         self,
-        cam_tok1: torch.Tensor,   # (B, token_dim)  evolved camera token view-1
-        cam_tok2: torch.Tensor,   # (B, token_dim)  evolved camera token view-2
+        enc_global1: torch.Tensor,   # (B, in_dim)  global-avg-pool of encoder s16, view-1
+        enc_global2: torch.Tensor,   # (B, in_dim)  global-avg-pool of encoder s16, view-2
     ) -> dict:
-        B = cam_tok1.shape[0]
-        # T_12: conditioned on (tok1, tok2)
-        T_12_pred = _vec9_to_se3(self.mlp(torch.cat([cam_tok1, cam_tok2], dim=-1)))
+        B = enc_global1.shape[0]
+        # T_12: conditioned on per-view encoder globals (view-specific before cross-attn)
+        T_12_pred = _vec9_to_se3(self.mlp(torch.cat([enc_global1, enc_global2], dim=-1)))
         # T_21 is the exact SE(3) inverse of T_12 — no independent prediction needed,
         # so the identity round-trip loss is automatically satisfied by construction.
         T_21_pred = _se3_inv(T_12_pred)
@@ -170,15 +175,19 @@ class DepthOnlyNet(nn.Module):
         mast3r_ckpt:      str | None = None,
         freeze_cross_attn: bool = False,
         max_encode_hw:    tuple | None = (480, 640),
-        predict_pose:     bool  = False,
-        pose_head_hidden: int   = 128,
+        predict_pose:          bool  = False,
+        pose_head_hidden:      int   = 128,
+        pose_refine_iters:     int   = 0,
+        pose_refine_feat_dim:  int   = 128,
+        pose_refine_hidden:    int   = 128,
     ):
         super().__init__()
 
-        self.token_dim       = token_dim
-        self.feature_dim     = feature_dim
-        self.predict_pose    = predict_pose
-        self.max_encode_hw   = max_encode_hw
+        self.token_dim          = token_dim
+        self.feature_dim        = feature_dim
+        self.predict_pose       = predict_pose
+        self.max_encode_hw      = max_encode_hw
+        self.pose_refine_iters  = pose_refine_iters
 
         # ── Shared depth encoder ─────────────────────────────────────────
         self.encoder = DepthEncoder(
@@ -212,11 +221,27 @@ class DepthOnlyNet(nn.Module):
             self.cross_attn.freeze_blocks()
 
         # ── Pose head (only when predict_pose=True) ──────────────────────
-        # Reads evolved camera tokens → T_12_pred, T_21_pred.
-        # When predict_pose=False this is absent and no pose loss fires.
+        # Reads encoder global features (feats['s16'] global-avg-pool) per view.
+        # Using encoder features (computed before cross-attention) rather than
+        # camera tokens: the camera_token is shared across views at init so
+        # cam_tok1 ≈ cam_tok2 early in training, giving the MLP no useful signal.
+        # Encoder features are genuinely view-specific (independent processing).
         if predict_pose:
-            self.pose_head = PoseHead(token_dim, hidden=pose_head_hidden)
-
+            self.pose_head = PoseHead(feature_dim, hidden=pose_head_hidden)
+        # ── Optional SE(3) GRU pose refinement ────────────────────────────
+        # When pose_refine_iters > 0, a ConvGRU refines the coarse PoseHead
+        # estimate using geometric warping of cross-attention spatial tokens.
+        # pose_refine_iters=0 (default) → no refiner instantiated; pipeline
+        # is completely identical to single-shot PoseHead.
+        # K must be passed to forward(); if K is None at runtime, refinement
+        # is silently skipped and the coarse PoseHead output is used instead.
+        if predict_pose and pose_refine_iters > 0:
+            self.pose_refiner = PoseRefinementModule(
+                token_dim  = token_dim,
+                feat_dim   = pose_refine_feat_dim,
+                hidden_dim = pose_refine_hidden,
+                num_iters  = pose_refine_iters,
+            )
         # ── Depth decoders (one per view, weight-tied) ───────────────────
         # Both views share the same decoder weights.
         self.decoder = DepthDecoder(
@@ -259,9 +284,10 @@ class DepthOnlyNet(nn.Module):
 
     def forward(
         self,
-        depth1: torch.Tensor,              # (B, 1, H1, W1) MDE depth view 1
-        depth2: torch.Tensor,              # (B, 1, H2, W2) MDE depth view 2
-        T_12:   torch.Tensor | None = None, # (B, 4, 4)  pose view-1 → view-2
+        depth1: torch.Tensor,                # (B, 1, H1, W1) MDE depth view 1
+        depth2: torch.Tensor,                # (B, 1, H2, W2) MDE depth view 2
+        T_12:   torch.Tensor | None = None,  # (B, 4, 4)  pose view-1 → view-2
+        K:      torch.Tensor | None = None,  # (B, 3, 3)  intrinsics — required for pose refinement
     ) -> dict:
         """
         Parameters
@@ -311,6 +337,41 @@ class DepthOnlyNet(nn.Module):
         out1 = self.decoder(t1_out, feats1, depth_input=depth1, input_hw=(H1, W1))
         out2 = self.decoder(t2_out, feats2, depth_input=depth2, input_hw=(H2, W2))
 
+        # ── 6. Pose prediction + optional iterative GRU refinement ────────────
+        # PoseHead uses encoder global features (view-specific, before cross-attn).
+        # When pose_refine_iters > 0 and K is provided, the coarse estimate is
+        # refined by a ConvGRU that warps cross-attn spatial tokens geometrically.
+        # With pose_refine_iters=0 (default) or K=None this block is identical
+        # to the original single-shot PoseHead path — no extra cost.
+        pose_preds: dict = {}
+        if self.predict_pose:
+            enc1_g = feats1["s16"].mean(dim=[2, 3])   # (B, feature_dim)
+            enc2_g = feats2["s16"].mean(dim=[2, 3])   # (B, feature_dim)
+            pose_preds = self.pose_head(enc1_g, enc2_g)
+
+            if hasattr(self, "pose_refiner") and K is not None:
+                # Geometric GRU refinement active.
+                # If K is None (e.g. inference without intrinsics) the refiner
+                # is skipped and the coarse PoseHead result is kept.
+                _, _, h14, w14 = feats1["s16"].shape
+                T_12_iters, T_21_iters = self.pose_refiner(
+                    T_0         = pose_preds["T_12_pred"],
+                    spatial1    = t1_out,
+                    spatial2    = t2_out,
+                    depth_mono1 = depth1,
+                    K           = K,
+                    conf1       = out1["confidence"],
+                    H=H1, W=W1, h14=h14, w14=w14,
+                )
+                # Last iterate becomes the final prediction;
+                # earlier iterates are exposed for deep supervision in losses.py.
+                pose_preds = {
+                    **pose_preds,
+                    "T_12_pred":  T_12_iters[-1],
+                    "T_21_pred":  T_21_iters[-1],
+                    "T_12_iters": T_12_iters[:-1],   # [T_1 … T_{N-1}] for pose_iters_loss
+                }
+
         return {
             "depth1":      out1["depth"],
             "depth2":      out2["depth"],
@@ -318,13 +379,7 @@ class DepthOnlyNet(nn.Module):
             "confidence2": out2["confidence"],
             "log_scale1":  out1["log_scale"],
             "log_scale2":  out2["log_scale"],
-            # Pose predictions (only when predict_pose=True).
-            # .detach() on cam_tok: pose-head gradients must not flow back
-            # through CrossAttentionDecoder → encoder (change A).  The large
-            # initial translation gradient (~10× amplified through the norm
-            # chain-rule) would otherwise corrupt the depth cross-attention
-            # features before either task has converged.
-            **(self.pose_head(cam_tok1.detach(), cam_tok2.detach()) if self.predict_pose else {}),
+            **pose_preds,
         }
 
 
@@ -361,6 +416,9 @@ def build_depth_only_net(cfg: dict) -> DepthOnlyNet:
         mast3r_ckpt      = c.get("mast3r_ckpt",      None),
         freeze_cross_attn = c.get("freeze_cross_attn", False),
         max_encode_hw    = tuple(c["max_encode_hw"]) if "max_encode_hw" in c else (480, 640),
-        predict_pose     = c.get("predict_pose",    False),
-        pose_head_hidden = c.get("pose_head_hidden", 128),
+        predict_pose         = c.get("predict_pose",          False),
+        pose_head_hidden     = c.get("pose_head_hidden",        128),
+        pose_refine_iters    = c.get("pose_refine_iters",         0),
+        pose_refine_feat_dim = c.get("pose_refine_feat_dim",     128),
+        pose_refine_hidden   = c.get("pose_refine_hidden",       128),
     )

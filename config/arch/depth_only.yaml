@@ -25,7 +25,7 @@ depth_only:
   decoder_hidden: 128
 
   # Pose conditioning
-  use_pose_token: true          # encode T_12/T_21 as prepended token
+  use_pose_token: false          # encode T_12/T_21 as prepended token
 
   # Encoder training
   freeze_encoder: false         # true: keep ConvNeXt frozen (useful early)
@@ -61,5 +61,15 @@ depth_only:
   #   camera_pose_loss (geodesic rotation + normalised translation + identity
   #   round-trip) in total_loss since "T_12_pred" appears in outputs.
   #   K is not predicted; the K loss is suppressed.
-  predict_pose: true
+  predict_pose: false
   pose_head_hidden: 128         # hidden width of the 2-layer PoseHead MLP
+
+  # Iterative GRU pose refinement (PoseRefinementModule).
+  # 0 (default): disabled — single-shot PoseHead only; pipeline is identical
+  #   to before; no extra parameters are created.
+  # N > 0: adds N GRU refinement steps after the coarse PoseHead estimate.
+  #   Requires K to be passed to forward(); if K is None, refinement is
+  #   silently skipped and the coarse estimate is used instead.
+  pose_refine_iters: 0
+  pose_refine_feat_dim: 128     # spatial token projection dim for the ConvGRU
+  pose_refine_hidden: 128       # ConvGRU hidden state channels

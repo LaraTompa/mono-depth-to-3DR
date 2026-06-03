@@ -83,8 +83,22 @@ class PreSampledPairDataset(Dataset):
                 "intrinsics":    scene.intrinsics,   # (3, 3) float32
                 "poses":         poses,              # dict[fid → 4×4 ndarray]
             }
+            n_skipped = 0
             for i in range(0, len(valid_fids) - 1, 2):
-                self.pairs.append((info, valid_fids[i], valid_fids[i + 1]))
+                fid_a, fid_b = valid_fids[i], valid_fids[i + 1]
+                # Filter pairs where the camera barely moved: compute the
+                # relative translation analytically (SE(3) inverse avoids
+                # np.linalg.inv instability for near-degenerate matrices).
+                #   T_12 = inv(pose_b) @ pose_a
+                #   t_12 = R_b^T (t_a − t_b)
+                pa, pb = poses[fid_a].astype(np.float32), poses[fid_b].astype(np.float32)
+                t_12 = pb[:3, :3].T @ (pa[:3, 3] - pb[:3, 3])
+                if np.linalg.norm(t_12) < 2e-2:   # < 2 cm relative motion
+                    n_skipped += 1
+                    continue
+                self.pairs.append((info, fid_a, fid_b))
+            if n_skipped:
+                print(f"[Dataset]   {scene.name}: skipped {n_skipped} near-stationary pair(s)")
 
         if not self.pairs:
             raise RuntimeError(f"No valid frame pairs found under {root_dir!r}")

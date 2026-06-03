@@ -155,25 +155,31 @@ def main(args):
 
     # ── Load inputs ──────────────────────────────────────────────────────────
     print("[eval] Loading inputs...")
-    img1_np = load_image(args.img1, as_gray=False)                         # (H,W,1) float32
-    img2_np = load_image(args.img2, as_gray=False)
-    # Grayscale copies for photometric metrics (consistent with photometric_consistency.py main())
-    img1_gray = cv2.cvtColor(img1_np, cv2.COLOR_RGB2GRAY)  # (H,W) float32
-    img2_gray = cv2.cvtColor(img2_np, cv2.COLOR_RGB2GRAY)
     pred_depth1_np = load_depth(args.pred_depth1, args.depth_scale_pred)  # (H,W) float32
     pred_depth2_np = load_depth(args.pred_depth2, args.depth_scale_pred)
 
-    H, W, _ = img1_np.shape
+    img1_np = img2_np = img1_gray = img2_gray = rgb1 = rgb2 = None
+    if args.img1 and args.img2:
+        img1_np = load_image(args.img1, as_gray=False)   # (H,W,3) float32
+        img2_np = load_image(args.img2, as_gray=False)
+        # Grayscale copies for photometric metrics (consistent with photometric_consistency.py main())
+        img1_gray = cv2.cvtColor(img1_np, cv2.COLOR_RGB2GRAY)  # (H,W) float32
+        img2_gray = cv2.cvtColor(img2_np, cv2.COLOR_RGB2GRAY)
+        H, W, _ = img1_np.shape
+        rgb1 = torch.from_numpy(img1_np).permute(2, 0, 1).unsqueeze(0).to(device)  # (1,3,H,W)
+        rgb2 = torch.from_numpy(img2_np).permute(2, 0, 1).unsqueeze(0).to(device)
+    else:
+        if model_variant not in ("depth_only",):
+            raise ValueError("--img1 and --img2 are required for model variant '{model_variant}'")
+        # Derive H, W from the depth map (depth_only does not use RGB)
+        H, W = pred_depth1_np.shape[:2]
+        print(f"[eval] No images provided; using depth map dimensions H={H}, W={W}")
 
     # Resize predictions to match image resolution if needed
     if pred_depth1_np.shape != (H, W):
         pred_depth1_np = cv2.resize(pred_depth1_np, (W, H), interpolation=cv2.INTER_NEAREST)
     if pred_depth2_np.shape != (H, W):
         pred_depth2_np = cv2.resize(pred_depth2_np, (W, H), interpolation=cv2.INTER_NEAREST)
-
-    # Convert to torch tensors (B=1)
-    rgb1 = torch.from_numpy(img1_np).permute(2, 0, 1).unsqueeze(0).to(device)           # (1,3,H,W)
-    rgb2 = torch.from_numpy(img2_np).permute(2, 0, 1).unsqueeze(0).to(device)
 
     # MDE sources (DepthPro / ZoeDepth) are metric estimators — pass raw metric
     # depths directly.  No normalisation needed; the decoder uses them as a
@@ -208,7 +214,7 @@ def main(args):
 
     # ── Forward pass ───────────────────────────────────────────────────────────────
     print("[eval] Running model forward pass...")
-    H_img, W_img = rgb1.shape[-2:]
+    H_img, W_img = (rgb1.shape[-2:] if rgb1 is not None else (H, W))
 
     K_iter    = K
     T_12_iter = T_12_init
@@ -220,6 +226,7 @@ def main(args):
                 depth1=depth_mono1,
                 depth2=depth_mono2,
                 T_12=T_12_iter,
+                K=K,  # passed for optional GRU refinement; ignored when pose_refine_iters=0
             )
         else:
             num_pose_iters = int(train_cfg.get("num_pose_iters", 1))
@@ -254,6 +261,9 @@ def main(args):
     conf1 = outputs["confidence1"].squeeze().cpu().numpy()
     conf2 = outputs["confidence2"].squeeze().cpu().numpy()
 
+    # Create output dir early so T_12_pred.txt / K_pred.txt saves don't fail
+    os.makedirs(args.output_dir, exist_ok=True)
+
     # ── Print predicted camera parameters ────────────────────────────────────
     if "T_12_pred" in outputs:
         T_12_pred_np = outputs["T_12_pred"][0].cpu().numpy()
@@ -272,7 +282,6 @@ def main(args):
     pred2_full = cv2.resize(pred2_out, (W, H), interpolation=cv2.INTER_LINEAR)
 
     # ── Save outputs ─────────────────────────────────────────────────────────
-    os.makedirs(args.output_dir, exist_ok=True)
     print(f"[eval] Saving outputs to {args.output_dir}")
 
     save_depth(pred1_full, os.path.join(args.output_dir, "depth1_aligned.npy"))
@@ -313,7 +322,7 @@ def main(args):
               f"delta3={(m1['delta3']+m2['delta3'])/2:.4f}")
 
         # ── Photometric consistency ──────────────────────────────────────────
-        if args.pose1 and args.pose2:
+        if args.pose1 and args.pose2 and img1_gray is not None and img2_gray is not None:
             # Prefer GT intrinsics for projection; fall back to predicted
             K_eval_np = K_np if args.intrinsics else K_pred_np
             print("\n=== Photometric Consistency ===")
@@ -348,8 +357,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Evaluate DepthAlignNet on an image pair.")
 
     # Required inputs
-    parser.add_argument("--img1", required=True, help="Path to RGB image 1 (JPG/PNG)")
-    parser.add_argument("--img2", required=True, help="Path to RGB image 2")
+    parser.add_argument("--img1", default=None, help="Path to RGB image 1 (JPG/PNG) — optional for depth_only")
+    parser.add_argument("--img2", default=None, help="Path to RGB image 2 — optional for depth_only")
     parser.add_argument("--pred_depth1", required=True, help="Path to predicted depth 1 (.npy/.npz/PNG)")
     parser.add_argument("--pred_depth2", required=True, help="Path to predicted depth 2")
     parser.add_argument("--checkpoint", required=True, help="Path to model checkpoint (best.pt)")

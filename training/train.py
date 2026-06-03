@@ -141,10 +141,13 @@ def run_epoch(
                 if model_variant == "depth_only":
                     # depth_only: no RGB, no camera head, no iterative pose loop.
                     # Use GT relative pose directly as conditioning.
+                    # K is passed for optional GRU pose refinement; it is ignored
+                    # when pose_refine_iters=0 (the default), so this is harmless.
                     outputs = model(
                         depth1=depth_mono1,
                         depth2=depth_mono2,
                         T_12=T_12_gt,
+                        K=K_gt,
                     )
                     # Expose K/T for loss compatibility (no camera supervision).
                     K_iter = K_gt

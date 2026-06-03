@@ -241,6 +241,47 @@ def pose_identity_loss(
 
 
 # ---------------------------------------------------------------------------
+# 9a. Iterative pose deep-supervision (for GRU refinement module)
+# ---------------------------------------------------------------------------
+
+def pose_iters_loss(
+    T_12_iters: list,           # list of (B, 4, 4) — intermediate iterates
+    T_12_gt:    torch.Tensor,   # (B, 4, 4)
+    weights:    dict,
+) -> torch.Tensor:
+    """
+    Deep supervision over GRU pose refinement intermediate iterates.
+
+    Applies camera_pose_loss (without confidence weighting) to each
+    intermediate iterate with exponentially increasing weights — the same
+    strategy as iter_supervision_loss for depth.  The final iterate is
+    covered by the main camera_pose_loss call (on T_12_pred) and is NOT
+    included here to avoid double-counting.
+
+    Returns a scalar tensor (0.0 when T_12_iters is empty).
+    """
+    n = len(T_12_iters)
+    if n == 0:
+        return T_12_gt.new_tensor(0.0)
+    w_vals  = [2 ** i for i in range(n)]
+    total_w = float(sum(w_vals))
+    loss    = T_12_gt.new_tensor(0.0)
+    for T_i, wi in zip(T_12_iters, w_vals):
+        # T_12_gt is always float32; GRU iterates may be float16 under autocast.
+        # Cast GT to the iterate dtype so all matmuls inside camera_pose_loss agree.
+        T_gt_i = T_12_gt.to(dtype=T_i.dtype)
+        fake_out = {
+            "T_12_pred":     T_i,
+            "T_21_pred":     se3_inv(T_i),
+            "log_conf_pose": torch.zeros(T_i.shape[0], device=T_i.device, dtype=T_i.dtype),
+            "log_conf_K":    torch.zeros(T_i.shape[0], device=T_i.device, dtype=T_i.dtype),
+        }
+        l_i, _ = camera_pose_loss(fake_out, T_gt_i, None, weights, use_confidence=False)
+        loss = loss + (wi / total_w) * l_i
+    return loss
+
+
+# ---------------------------------------------------------------------------
 # 9. Composite camera-pose loss with confidence weighting
 # ---------------------------------------------------------------------------
 
@@ -304,12 +345,19 @@ def camera_pose_loss(
     l_trans = normalized_translation_loss(t_pred, t_gt)  # (B,)
 
     # ── Translation scale loss ──────────────────────────────────────────
-    # The normalized loss only supervises direction. We add an L2 penalty on log-scale.
-    scale_pred = t_pred.norm(dim=-1).clamp(min=EPS_NORM)
-    scale_gt   = t_gt.norm(dim=-1).clamp(min=EPS_NORM)
-    l_trans_scale = F.l1_loss(torch.log(scale_pred), torch.log(scale_gt), reduction='none')
+    # The normalized loss only supervises direction. We add an L1 penalty on log-scale.
+    # Scale supervision is masked out for near-static pairs (||t_gt|| < EPS_NORM):
+    # when GT translation is below the normalisation floor its magnitude is
+    # undefined (clamped to EPS_NORM), so the log-scale penalty would be pure
+    # noise — typically adding ~1.15 nats of constant gradient that points the
+    # model toward predicting tiny translations rather than correct directions.
+    scale_pred  = t_pred.norm(dim=-1).clamp(min=EPS_NORM)          # (B,)
+    scale_gt    = t_gt.norm(dim=-1)                                  # (B,)  raw
+    valid_trans = (scale_gt > EPS_NORM).float()                      # (B,)  1 = has real translation
+    scale_gt    = scale_gt.clamp(min=EPS_NORM)
+    l_trans_scale = (torch.log(scale_pred) - torch.log(scale_gt)).abs()  # (B,)
 
-    l_trans = l_trans + l_trans_scale * 0.5  # Weight scale error relative to angle
+    l_trans = l_trans + valid_trans * l_trans_scale * 0.5  # scale penalty only where GT is defined
 
     # ── Confidence-weighted pose loss ─────────────────────────────────────
     w_rot   = float(weights.get("rot",   1.0))
@@ -773,12 +821,26 @@ def total_loss(
         if t_gt_norms.mean() < 0.01:
             print(f"[WARNING] GT translation norms very small: min={t_gt_norms.min():.6f} max={t_gt_norms.max():.6f} mean={t_gt_norms.mean():.6f}")
             print(f"[WARNING] This suggests zero or near-zero GT motion — check pose convention!")
+            if "scene" in batch:
+                print(f"[WARNING] Affected scenes:    {list(batch['scene'])[:4]}")
+            if "frame_ids" in batch:
+                print(f"[WARNING] Affected frame_ids: {list(batch['frame_ids'])[:4]}")
         K_gt    = batch.get("intrinsics")                        # (B, 3, 3) or None
         l_cam, cam_parts = camera_pose_loss(outputs, T_12_gt, K_gt, w,
                                             use_confidence=use_confidence)
         eff_camera_w = camera_weight if camera_weight is not None else float(w.get("camera", 0.5))
         total   = total + eff_camera_w * l_cam
         parts.update(cam_parts)
+
+        # --- Iterative pose deep supervision (refinement module only) ---
+        # outputs["T_12_iters"] contains [T_1 … T_{N-1}] (all iterates except
+        # the last, which is already T_12_pred above).  Skipped when the list
+        # is absent or empty, so this block has zero effect when
+        # pose_refine_iters=0.
+        if outputs.get("T_12_iters"):
+            l_pose_iters = pose_iters_loss(outputs["T_12_iters"], T_12_gt, w)
+            total = total + eff_camera_w * l_pose_iters
+            parts["cam_iters"] = float(l_pose_iters.detach())
 
     return total, parts
 
