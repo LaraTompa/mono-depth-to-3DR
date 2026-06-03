@@ -632,7 +632,12 @@ def geometric_consistency_loss(
         P_j   = torch.bmm(K_inv, uv1_j) * d_j_sampled.unsqueeze(1)  # (B, 3, N)
 
         # 7. 3-D distance: ‖ Q − P̂_j ‖  per pixel
-        dist = (Q - P_j).norm(dim=1)                 # (B, N)
+        # Use EPS inside the sqrt to avoid ∇sqrt(0)=inf/NaN when Q ≈ P_j
+        # (correct predictions or near-correct early in training).
+        # Note: NaN × 0 = NaN in IEEE 754, so a NaN dist propagates through
+        # the validity mask multiplication even when valid=False, corrupting
+        # model weights via backward.  The EPS floor prevents this entirely.
+        dist = ((Q - P_j).pow(2).sum(dim=1) + EPS).sqrt()   # (B, N)
 
         # 8. Validity mask ────────────────────────────────────────────────
         valid = (
