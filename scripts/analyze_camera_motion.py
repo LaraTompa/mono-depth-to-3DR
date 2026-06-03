@@ -151,15 +151,31 @@ def analyze_transform(T_12: np.ndarray) -> dict[str, float] | None:
     return values if np.all(np.isfinite(list(values.values()))) else None
 
 
+def safe_focal_length_x(scene: ScanNetScene) -> float | None:
+    """Extract fx = K[0, 0] from the scene intrinsics matrix."""
+    try:
+        K = scene.intrinsics.astype(np.float64)
+    except Exception:
+        return None
+    if K.shape[0] < 1 or K.shape[1] < 1 or not np.isfinite(K[0, 0]):
+        return None
+    return float(K[0, 0])
+
+
 def collect_split_statistics(scene_paths: list[str], root_dir: Path, split: str) -> tuple[pd.DataFrame, dict]:
     """Collect one row per valid pair in a split."""
     rows = []
     skipped_pose_frames = 0
     skipped_samples = 0
+    skipped_intrinsic_scenes = 0
 
     for scene_path in scene_paths:
         scene = ScanNetScene(scene_path)
         if not scene.is_valid() or not scene.frame_ids:
+            continue
+        focal_length_x = safe_focal_length_x(scene)
+        if focal_length_x is None:
+            skipped_intrinsic_scenes += 1
             continue
 
         poses, skipped = safe_load_scene_poses(scene)
@@ -185,6 +201,7 @@ def collect_split_statistics(scene_paths: list[str], root_dir: Path, split: str)
                     "scene": os.path.relpath(scene_path, root_dir),
                     "frame_1": fid_a,
                     "frame_2": fid_b,
+                    "focal_length_x": focal_length_x,
                 }
             )
             rows.append(stats)
@@ -194,6 +211,7 @@ def collect_split_statistics(scene_paths: list[str], root_dir: Path, split: str)
         "valid_samples": len(rows),
         "skipped_samples": skipped_samples,
         "skipped_pose_frames": skipped_pose_frames,
+        "skipped_intrinsic_scenes": skipped_intrinsic_scenes,
     }
     return pd.DataFrame(rows), diagnostics
 
@@ -227,8 +245,16 @@ def distribution_tests(data_by_split: dict[str, pd.DataFrame], value_col: str) -
     """Run pairwise KS tests and Wasserstein distances."""
     rows = []
     for split_a, split_b in combinations(SPLITS, 2):
-        a = data_by_split[split_a][value_col].to_numpy(dtype=np.float64)
-        b = data_by_split[split_b][value_col].to_numpy(dtype=np.float64)
+        a = (
+            data_by_split[split_a][value_col].to_numpy(dtype=np.float64)
+            if value_col in data_by_split[split_a]
+            else np.array([])
+        )
+        b = (
+            data_by_split[split_b][value_col].to_numpy(dtype=np.float64)
+            if value_col in data_by_split[split_b]
+            else np.array([])
+        )
         if a.size == 0 or b.size == 0:
             rows.append(
                 {
@@ -254,51 +280,136 @@ def distribution_tests(data_by_split: dict[str, pd.DataFrame], value_col: str) -
 
 
 def save_overlaid_hist(data_by_split, value_col, bins, xlabel, title, output_path, density=True, transform=None):
-    """Save an overlaid histogram for train/val/test."""
-    plt.figure(figsize=(9, 6))
+    """Save overlaid KDE curves + step histograms for train/val/test.
+
+    The x-axis is clipped to the 1st–99th percentile of the combined data so
+    that a handful of outliers (or a tiny test split) cannot dominate the scale.
+    Each split shows:
+      - a step-outline histogram (no filled overlap)
+      - a smooth KDE curve (when n ≥ 10)
+      - a dashed vertical line at the median
+    The legend includes the sample count and median for quick reference.
+    """
+    from scipy.stats import gaussian_kde
+
+    fig, ax = plt.subplots(figsize=(9, 6))
+
+    # Collect and optionally transform each split's values.
+    split_arrays: dict[str, np.ndarray] = {}
     for split in SPLITS:
+        if value_col not in data_by_split[split] or len(data_by_split[split]) == 0:
+            split_arrays[split] = np.array([])
+            continue
         x = data_by_split[split][value_col].to_numpy(dtype=np.float64)
         if transform is not None:
             x = transform(x)
-        if x.size:
-            plt.hist(
-                x,
-                bins=bins,
-                density=density,
-                alpha=0.45,
-                label=split,
-                color=SPLIT_COLORS[split],
-            )
-    plt.xlabel(xlabel)
-    plt.ylabel("Density" if density else "Count")
-    plt.title(title)
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(output_path, dpi=200)
-    plt.close()
+        split_arrays[split] = x[np.isfinite(x)]
 
+    combined = np.concatenate([v for v in split_arrays.values() if v.size > 0])
+    if combined.size == 0:
+        plt.close(fig)
+        return
 
-def save_rotation_cdf(data_by_split, output_path):
-    """Save empirical CDF curves for rotation angle."""
-    plt.figure(figsize=(9, 6))
+    # Clip x range to 1st–99th percentile so small/large outliers don't
+    # compress the interesting part of the distribution.
+    x_lo = float(np.percentile(combined, 1))
+    x_hi = float(np.percentile(combined, 99))
+    if x_lo >= x_hi:
+        x_lo, x_hi = float(combined.min()), float(combined.max())
+    x_eval = np.linspace(x_lo, x_hi, 500)
+
     for split in SPLITS:
-        x = np.sort(data_by_split[split]["rotation_angle_deg"].to_numpy(dtype=np.float64))
+        x = split_arrays[split]
+        color = SPLIT_COLORS[split]
+        n = x.size
+        if n == 0:
+            continue
+        med = float(np.median(x))
+        label = f"{split}  (n={n:,}, median={med:.3g})"
+
+        # Step-outline histogram — no filled overlap between splits.
+        ax.hist(
+            x, bins=bins, density=True, histtype="step",
+            color=color, linewidth=1.4, range=(x_lo, x_hi),
+        )
+        # Smooth KDE curve on top (requires at least 10 distinct points).
+        if n >= 10:
+            try:
+                kde = gaussian_kde(x)
+                ax.plot(x_eval, kde(x_eval), color=color, linewidth=2.5, label=label)
+            except Exception:
+                ax.plot([], [], color=color, linewidth=2.5, label=label)
+        else:
+            ax.plot([], [], color=color, linewidth=2.5, label=label)
+
+        # Dashed vertical line at the median.
+        ax.axvline(med, color=color, linewidth=1.2, linestyle="--", alpha=0.75)
+
+    ax.set_xlim(x_lo, x_hi)
+    ax.set_xlabel(xlabel)
+    # "Probability density" is technically correct (area under curve = 1),
+    # but we add a note so it's clear this is not a count or percentage.
+    ax.set_ylabel("Probability density  (area = 1)")
+    ax.set_title(title)
+    ax.legend(fontsize=9)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=200)
+    plt.close(fig)
+
+
+def save_empirical_cdf(data_by_split, value_col, xlabel, title, output_path):
+    """Save empirical CDF curves for a scalar value.
+
+    The y-axis is fraction of samples ≤ x, so 0.5 = 50 % of pairs have a
+    value at or below that point.  The x-axis is clipped to the combined
+    1st–99th percentile so a tiny test split cannot compress the view.
+    """
+    fig, ax = plt.subplots(figsize=(9, 6))
+
+    all_vals = []
+    for split in SPLITS:
+        if value_col in data_by_split[split]:
+            v = data_by_split[split][value_col].to_numpy(dtype=np.float64)
+            all_vals.append(v[np.isfinite(v)])
+    combined = np.concatenate(all_vals) if all_vals else np.array([])
+    if combined.size == 0:
+        plt.close(fig)
+        return
+    x_lo = float(np.percentile(combined, 1))
+    x_hi = float(np.percentile(combined, 99))
+    if x_lo >= x_hi:
+        x_lo, x_hi = float(combined.min()), float(combined.max())
+
+    for split in SPLITS:
+        if value_col not in data_by_split[split]:
+            continue
+        x = np.sort(data_by_split[split][value_col].to_numpy(dtype=np.float64))
+        x = x[np.isfinite(x)]
         if x.size:
             y = np.arange(1, x.size + 1) / x.size
-            plt.plot(x, y, label=split, color=SPLIT_COLORS[split])
-    plt.xlabel("Rotation angle (deg)")
-    plt.ylabel("Empirical CDF")
-    plt.title("Rotation Angle Empirical CDF")
-    plt.grid(alpha=0.25)
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(output_path, dpi=200)
-    plt.close()
+            label = f"{split}  (n={x.size:,})"
+            ax.plot(x, y, label=label, color=SPLIT_COLORS[split], linewidth=2)
+    ax.set_xlim(x_lo, x_hi)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel("Fraction of pairs ≤ x")
+    ax.set_title(title)
+    ax.grid(alpha=0.25)
+    ax.legend(fontsize=9)
+    # Add horizontal reference lines at 25 %, 50 %, 75 %.
+    for frac in (0.25, 0.50, 0.75):
+        ax.axhline(frac, color="grey", linewidth=0.7, linestyle=":")
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=200)
+    plt.close(fig)
 
 
 def save_axis_histograms(data_by_split, output_dir):
     """Save overlaid histograms for each rotation-axis component."""
-    axis_cols = [("axis_x", "Rotation Axis X"), ("axis_y", "Rotation Axis Y"), ("axis_z", "Rotation Axis Z")]
+    axis_cols = [
+        ("axis_x", "Rotation Axis X  (−1 = pure −X, +1 = pure +X)"),
+        ("axis_y", "Rotation Axis Y  (−1 = pure −Y, +1 = pure +Y)"),
+        ("axis_z", "Rotation Axis Z  (−1 = pure −Z, +1 = pure +Z)"),
+    ]
     for col, title in axis_cols:
         save_overlaid_hist(
             data_by_split,
@@ -356,6 +467,76 @@ def save_axis_pair_density(data_by_split, output_dir):
         plt.close(fig)
 
 
+def _save_log_translation_hist(data_by_split, output_path):
+    """Translation magnitude on a log x-axis.
+
+    A log x-axis is far clearer than manually computing log(m + eps) because:
+    - x-tick labels remain in original metres (e.g. 0.01, 0.1, 1.0)
+    - there are no negative values that shift the bulk of data to the right
+    - the 2 cm training filter threshold is visible as a clear cut-off
+    """
+    from scipy.stats import gaussian_kde
+
+    fig, ax = plt.subplots(figsize=(9, 6))
+
+    split_arrays: dict[str, np.ndarray] = {}
+    for split in SPLITS:
+        if "translation_magnitude" not in data_by_split[split]:
+            split_arrays[split] = np.array([])
+            continue
+        x = data_by_split[split]["translation_magnitude"].to_numpy(dtype=np.float64)
+        x = x[np.isfinite(x) & (x > 0)]
+        split_arrays[split] = x
+
+    combined = np.concatenate([v for v in split_arrays.values() if v.size > 0])
+    if combined.size == 0:
+        plt.close(fig)
+        return
+
+    x_lo = max(float(np.percentile(combined, 1)), 1e-4)
+    x_hi = float(np.percentile(combined, 99))
+    x_eval = np.logspace(np.log10(x_lo), np.log10(x_hi), 500)
+
+    for split in SPLITS:
+        x = split_arrays[split]
+        color = SPLIT_COLORS[split]
+        n = x.size
+        if n == 0:
+            continue
+        med = float(np.median(x))
+        label = f"{split}  (n={n:,}, median={med:.3g} m)"
+        log_x = np.log10(x)
+        log_lo, log_hi = np.log10(x_lo), np.log10(x_hi)
+        ax.hist(
+            x, bins=np.logspace(log_lo, log_hi, 60),
+            density=True, histtype="step", color=color, linewidth=1.4,
+        )
+        if n >= 10:
+            try:
+                kde_log = gaussian_kde(log_x)
+                # Convert KDE from log10 space back to linear density.
+                ax.plot(
+                    x_eval,
+                    kde_log(np.log10(x_eval)) / (x_eval * np.log(10)),
+                    color=color, linewidth=2.5, label=label,
+                )
+            except Exception:
+                ax.plot([], [], color=color, linewidth=2.5, label=label)
+        else:
+            ax.plot([], [], color=color, linewidth=2.5, label=label)
+        ax.axvline(med, color=color, linewidth=1.2, linestyle="--", alpha=0.75)
+
+    ax.set_xscale("log")
+    ax.set_xlim(x_lo, x_hi)
+    ax.set_xlabel("Translation magnitude (metres, log scale)")
+    ax.set_ylabel("Probability density  (area = 1)")
+    ax.set_title("Log-Scale Translation Magnitude Distribution")
+    ax.legend(fontsize=9)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=200)
+    plt.close(fig)
+
+
 def save_translation_direction(data_by_split, output_dir):
     """Save azimuth/elevation 2D histograms with identical axis limits."""
     xlim = (-np.pi, np.pi)
@@ -397,18 +578,21 @@ def print_axis_reports(data_by_split):
         print("covariance:\n", np.array2string(cov, precision=4, suppress_small=True))
 
 
-def interpret_results(data_by_split, rotation_stats, translation_stats, rot_tests, trans_tests):
+def interpret_results(data_by_split, rotation_stats, translation_stats, focal_stats, rot_tests, trans_tests, focal_tests):
     """Print concise data-driven interpretations."""
     print("\nInterpretation")
 
     train_rot = rotation_stats.set_index("split").loc["train"]
     train_trans = translation_stats.set_index("split").loc["train"]
+    train_fx = focal_stats.set_index("split").loc["train"]
     for split in ("val", "test"):
         rot = rotation_stats.set_index("split").loc[split]
         trans = translation_stats.set_index("split").loc[split]
+        fx = focal_stats.set_index("split").loc[split]
         pair_name = f"train vs {split}"
         rot_test = rot_tests[(rot_tests["split_a"] == "train") & (rot_tests["split_b"] == split)].iloc[0]
         trans_test = trans_tests[(trans_tests["split_a"] == "train") & (trans_tests["split_b"] == split)].iloc[0]
+        fx_test = focal_tests[(focal_tests["split_a"] == "train") & (focal_tests["split_b"] == split)].iloc[0]
 
         if rot["median"] > train_rot["median"] * 1.2 and rot_test["KS_p"] < 0.05:
             print(f"- {split} contains significantly larger rotations than training.")
@@ -423,6 +607,13 @@ def interpret_results(data_by_split, rotation_stats, translation_stats, rot_test
             print(f"- {split} contains a heavier tail of large-baseline motions.")
         else:
             print(f"- Translation magnitudes look broadly matched for {pair_name}.")
+
+        if fx["median"] > train_fx["median"] * 1.05 and fx_test["KS_p"] < 0.05:
+            print(f"- {split} has significantly larger x focal lengths than training.")
+        elif fx["median"] < train_fx["median"] * 0.95 and fx_test["KS_p"] < 0.05:
+            print(f"- {split} has significantly smaller x focal lengths than training.")
+        else:
+            print(f"- X focal lengths look broadly matched for {pair_name}.")
 
     for split in SPLITS:
         df = data_by_split[split]
@@ -468,18 +659,23 @@ def main():
         print(
             f"[{split}] samples={diag['valid_samples']} "
             f"skipped_samples={diag['skipped_samples']} "
-            f"skipped_pose_frames={diag['skipped_pose_frames']}"
+            f"skipped_pose_frames={diag['skipped_pose_frames']} "
+            f"skipped_intrinsic_scenes={diag['skipped_intrinsic_scenes']}"
         )
 
     rotation_stats = summary_table(data_by_split, "rotation_angle_deg")
     translation_stats = summary_table(data_by_split, "translation_magnitude")
+    focal_stats = summary_table(data_by_split, "focal_length_x")
     rot_tests = distribution_tests(data_by_split, "rotation_angle_deg")
     trans_tests = distribution_tests(data_by_split, "translation_magnitude")
+    focal_tests = distribution_tests(data_by_split, "focal_length_x")
 
     rotation_stats.to_csv(output_dir / "rotation_statistics.csv", index=False)
     translation_stats.to_csv(output_dir / "translation_statistics.csv", index=False)
+    focal_stats.to_csv(output_dir / "focal_length_x_statistics.csv", index=False)
     rot_tests.to_csv(output_dir / "rotation_distribution_tests.csv", index=False)
     trans_tests.to_csv(output_dir / "translation_distribution_tests.csv", index=False)
+    focal_tests.to_csv(output_dir / "focal_length_x_distribution_tests.csv", index=False)
 
     save_overlaid_hist(
         data_by_split,
@@ -490,7 +686,13 @@ def main():
         output_path=output_dir / "rotation_histogram.png",
         density=True,
     )
-    save_rotation_cdf(data_by_split, output_dir / "rotation_cdf.png")
+    save_empirical_cdf(
+        data_by_split,
+        "rotation_angle_deg",
+        xlabel="Rotation angle (deg)",
+        title="Rotation Angle Empirical CDF",
+        output_path=output_dir / "rotation_cdf.png",
+    )
     save_axis_histograms(data_by_split, output_dir)
     save_axis_pair_density(data_by_split, output_dir)
     save_overlaid_hist(
@@ -502,28 +704,42 @@ def main():
         output_path=output_dir / "translation_histogram.png",
         density=True,
     )
+    # Log-scale translation: plot the same data but on a log x-axis so
+    # the shape of the distribution is visible without a manual transform
+    # that produces confusing negative values.
+    _save_log_translation_hist(data_by_split, output_dir / "translation_log_histogram.png")
+    save_translation_direction(data_by_split, output_dir)
     save_overlaid_hist(
         data_by_split,
-        "translation_magnitude",
-        bins=100,
-        xlabel="log(m + 1e-6)",
-        title="Log Translation Magnitude Distribution",
-        output_path=output_dir / "translation_log_histogram.png",
+        "focal_length_x",
+        bins=50,
+        xlabel="Focal length fx (pixels)",
+        title="X Focal Length Distribution",
+        output_path=output_dir / "focal_length_x_histogram.png",
         density=True,
-        transform=lambda x: np.log(x + 1e-6),
     )
-    save_translation_direction(data_by_split, output_dir)
+    save_empirical_cdf(
+        data_by_split,
+        "focal_length_x",
+        xlabel="Focal length fx (pixels)",
+        title="X Focal Length Empirical CDF",
+        output_path=output_dir / "focal_length_x_cdf.png",
+    )
 
     print("\nRotation angle statistics")
     print(rotation_stats.to_string(index=False))
     print("\nTranslation magnitude statistics")
     print(translation_stats.to_string(index=False))
+    print("\nX focal length statistics")
+    print(focal_stats.to_string(index=False))
     print("\nRotation distribution comparison")
     print(rot_tests.to_string(index=False))
     print("\nTranslation magnitude distribution comparison")
     print(trans_tests.to_string(index=False))
+    print("\nX focal length distribution comparison")
+    print(focal_tests.to_string(index=False))
     print_axis_reports(data_by_split)
-    interpret_results(data_by_split, rotation_stats, translation_stats, rot_tests, trans_tests)
+    interpret_results(data_by_split, rotation_stats, translation_stats, focal_stats, rot_tests, trans_tests, focal_tests)
     print(f"\nSaved outputs to: {output_dir}")
 
 
