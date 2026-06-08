@@ -130,7 +130,7 @@ class PreSampledPairDataset(Dataset):
         deps_t  = torch.stack(depths)                           # (2, 1, H, W)  GT
         mde_t   = torch.stack(mde_depths)                       # (2, 1, H, W)  MDE prior
         poses_t = torch.stack(poses)                            # (2, 4, 4)
-        intr_t  = torch.from_numpy(info["intrinsics"])          # (3, 3)
+        intr_t  = torch.from_numpy(info["intrinsics"]).clone()    # (3, 3)  clone: from_numpy shares storage (non-resizable); collate requires owned storage
 
         # Resize color images and MDE priors to a fixed spatial size so that
         # all samples in a batch are collatable (scenes may have different native
