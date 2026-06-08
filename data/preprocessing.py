@@ -124,7 +124,7 @@ class PreSampledPairDataset(Dataset):
                 os.path.join(info["mde_depth_dir"], f"{fid}{info['mde_depth_ext']}"),
                 self.mde_source,
             ))
-            poses.append(torch.from_numpy(info["poses"][fid]).float())
+            poses.append(torch.from_numpy(np.array(info["poses"][fid], dtype=np.float32)))
 
         imgs_t  = torch.stack(images)                           # (2, 3, H, W)
         deps_t  = torch.stack(depths)                           # (2, 1, H, W)  GT
@@ -185,7 +185,10 @@ class PreSampledPairDataset(Dataset):
 
     @staticmethod
     def _load_npy(path: str) -> torch.Tensor:
-        t = torch.from_numpy(np.load(path).astype(np.float32))
+        # np.load returns a numpy-backed array; torch.from_numpy shares its buffer
+        # (non-resizable storage).  Copying via np.array() breaks the sharing so
+        # DataLoader workers can place the tensor in resizable shared memory.
+        t = torch.from_numpy(np.array(np.load(path), dtype=np.float32))
         return t if t.ndim == 3 else t.unsqueeze(0)
 
     @staticmethod
@@ -200,9 +203,10 @@ class PreSampledPairDataset(Dataset):
                 depth = data[list(data.keys())[0]].astype(np.float32)
             if depth.ndim == 3 and depth.shape[0] == 1:
                 depth = depth[0]
-            t = torch.from_numpy(depth)
+            # np.array(...) copies the buffer so the resulting tensor owns its storage
+            t = torch.from_numpy(np.array(depth, dtype=np.float32))
         else:
             # ZoeDepth: uint16 PNG in mm → float32 metres
-            t = torch.from_numpy(np.array(Image.open(path)).astype(np.float32) / 1000.0)
+            t = torch.from_numpy(np.array(Image.open(path), dtype=np.float32) / 1000.0)
         t = t if t.ndim == 3 else t.unsqueeze(0)   # ensure (1, H, W)
         return t
