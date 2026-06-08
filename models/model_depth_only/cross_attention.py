@@ -140,6 +140,8 @@ class Attention(nn.Module):
         qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, self.head_dim)
         qkv = qkv.permute(2, 0, 3, 1, 4)
         q, k, v = qkv.unbind(0)
+        q = F.normalize(q, dim=-1)
+        k = F.normalize(k, dim=-1)
         out = F.scaled_dot_product_attention(q, k, v, scale=self.scale)
         return self.proj(out.transpose(1, 2).reshape(B, N, C))
 
@@ -171,6 +173,8 @@ class CrossAttention(nn.Module):
         Q = _split(self.projq(q),  Nq)
         K = _split(self.projk(kv), Nk)
         V = _split(self.projv(kv), Nk)
+        Q = F.normalize(Q, dim=-1)
+        K = F.normalize(K, dim=-1)
         out = F.scaled_dot_product_attention(Q, K, V, scale=self.scale)
         return self.proj(out.transpose(1, 2).reshape(B, Nq, C))
 
