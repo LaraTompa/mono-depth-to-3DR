@@ -164,6 +164,14 @@ class PreSampledPairDataset(Dataset):
                 imgs_t, deps_t, mde_t, poses_t, intr_t, self.aug_cfg
             )
 
+        # Ensure returned tensors own PyTorch storage (resizable) so the
+        # DataLoader collate across workers can safely create shared buffers.
+        imgs_t = imgs_t.clone()
+        deps_t = deps_t.clone()
+        mde_t  = mde_t.clone()
+        poses_t = poses_t.clone()
+        intr_t = intr_t.clone()
+
         return {
             "images":     imgs_t,
             "depths":     deps_t,
