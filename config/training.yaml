@@ -89,7 +89,7 @@ train:
   epochs: 50
   grad_clip: 1.0                 # max gradient norm; null → disabled
   val_every: 1                   # validate every N epochs
-  log_every: 50                  # log every N batches
+  log_every: 500                  # log every N batches
   seed: 0
   loss_spike_threshold: 50.0     # skip batch if loss exceeds this value
   patience: 50
