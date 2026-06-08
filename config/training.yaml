@@ -24,8 +24,8 @@ loader:
 # ---------------------------------------------------------------------------
 optimizer:
   type:         adamw
-  lr:           1.0e-4   # raised from 1e-4 — backbone is frozen so high LR is safe; pose head trains from scratch and needs stronger updates to escape local min
-  weight_decay: 1.0e-3   # raised from 5e-4 — extra regularisation for pose head generalisation
+  lr:           1.0e-4
+  weight_decay: 1.0e-3
   betas:        [0.9, 0.999]
 
 # ---------------------------------------------------------------------------
@@ -39,8 +39,8 @@ scheduler:
 # Loss weights
 # ---------------------------------------------------------------------------
 loss:
-  depth:            0.3    # scale-invariant log loss (supervised)
-  smooth:           0.005   # edge-aware smoothness
+  depth:            0.5    # scale-invariant log loss (supervised)
+  smooth:           0.0   # edge-aware smoothness
   iter_supervision: 0.0    # deep supervision over refinement iterations
   camera:           0.5    # was 0.1 — pose needs stronger signal vs depth (1.0)
   camera_warmup_epochs: 5   # pose was learning faster after epoch 15 (confidence weighting); front-load it
