@@ -61,7 +61,7 @@ depth_only:
   #   camera_pose_loss (geodesic rotation + normalised translation + identity
   #   round-trip) in total_loss since "T_12_pred" appears in outputs.
   #   K is not predicted; the K loss is suppressed.
-  predict_pose: false
+  predict_pose: true
   pose_head_hidden: 128         # hidden width of the 2-layer PoseHead MLP
 
   # Iterative GRU pose refinement (PoseRefinementModule).
