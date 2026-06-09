@@ -316,8 +316,14 @@ class DepthOnlyNet(nn.Module):
         d2_enc = self._cap_resolution(depth2)
 
         # ── 2. Shared encoder ────────────────────────────────────────────
-        feats1 = self.encoder(d1_enc)   # {s4, s8, s16}
-        feats2 = self.encoder(d2_enc)   # {s4, s8, s16}
+        # Normalize capped depths to [0, 1] per sample before encoding so
+        # the single-channel ConvNeXt input matches the scale expected by
+        # ImageNet-pretrained weights.  The original metric tensors (depth1,
+        # depth2) are passed unchanged to the decoder for scale+residual.
+        d1_max = d1_enc.flatten(1).max(dim=1).values.view(-1, 1, 1, 1).clamp(min=1e-3)
+        d2_max = d2_enc.flatten(1).max(dim=1).values.view(-1, 1, 1, 1).clamp(min=1e-3)
+        feats1 = self.encoder(d1_enc / d1_max)   # {s4, s8, s16}
+        feats2 = self.encoder(d2_enc / d2_max)   # {s4, s8, s16}
 
         # Remember spatial dims for reshaping tokens back to spatial maps.
         _, _, H1, W1 = depth1.shape

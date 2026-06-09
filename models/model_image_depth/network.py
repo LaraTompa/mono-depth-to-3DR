@@ -317,8 +317,14 @@ class DepthAlignNet(nn.Module):
         T_21 = se3_inv(T_12)
 
         # ── Encode both views once (weight-tied encoder) ─────────────────
-        x1 = torch.cat([rgb1, depth_mono1], dim=1)   # (B, 4, H, W)
-        x2 = torch.cat([rgb2, depth_mono2], dim=1)
+        # Normalize depth to [0, 1] per sample for the encoder input so the
+        # depth channel is at the same scale as RGB.  The original metric
+        # depth_mono1/2 are kept unchanged for geometric warping (_cross_attend)
+        # and the decoder's scale+residual formula.
+        d1_max = depth_mono1.flatten(1).max(dim=1).values.view(-1, 1, 1, 1).clamp(min=1e-3)
+        d2_max = depth_mono2.flatten(1).max(dim=1).values.view(-1, 1, 1, 1).clamp(min=1e-3)
+        x1 = torch.cat([rgb1, depth_mono1 / d1_max], dim=1)   # (B, 4, H, W)
+        x2 = torch.cat([rgb2, depth_mono2 / d2_max], dim=1)
         feats1_raw = self.encoder(x1)                  # {"s4", "s8", "s16"}
         feats2_raw = self.encoder(x2)
 
