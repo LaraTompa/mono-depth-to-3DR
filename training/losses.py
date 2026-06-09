@@ -357,7 +357,12 @@ def camera_pose_loss(
     scale_gt    = scale_gt.clamp(min=EPS_NORM)
     l_trans_scale = (torch.log(scale_pred) - torch.log(scale_gt)).abs()  # (B,)
 
-    l_trans = l_trans + valid_trans * l_trans_scale * 0.5  # scale penalty only where GT is defined
+    #l_trans = l_trans + valid_trans * l_trans_scale * 0.5  # scale penalty only where GT is defined
+
+    #Compute normalized L2 loss on prediction and ground truth tranlsation directions
+    t_pred_norm = t_pred / scale_pred.unsqueeze(-1)
+    t_gt_norm = t_gt / scale_gt.unsqueeze(-1)
+    l_trans = ((t_pred_norm - t_gt_norm) ** 2).sum(dim=-1)  # (B,)
 
     # ── Confidence-weighted pose loss ─────────────────────────────────────
     w_rot   = float(weights.get("rot",   1.0))
