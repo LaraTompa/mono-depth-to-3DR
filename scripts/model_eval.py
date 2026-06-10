@@ -63,7 +63,14 @@ def save_visualization(depth, path, vmin=0.0, vmax=10.0):
     import matplotlib.pyplot as plt
 
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    plt.imsave(path, depth, cmap='plasma', vmin=vmin, vmax=vmax)
+    # Use a full matplotlib figure with colorbar to match test_npz_read output
+    fig = plt.figure(frameon=False)
+    ax = fig.add_subplot(111)
+    im = ax.imshow(depth, cmap='hot', interpolation='nearest', vmin=vmin, vmax=vmax)
+    ax.axis('off')
+    cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    plt.savefig(path, bbox_inches='tight', dpi=150)
+    plt.close(fig)
     print(f"  Saved: {path}")
 
 
@@ -294,6 +301,15 @@ def main(args):
     save_visualization(conf1, os.path.join(args.output_dir, "confidence1_vis.png"), vmin=0.0, vmax=1.0)
     save_visualization(conf2, os.path.join(args.output_dir, "confidence2_vis.png"), vmin=0.0, vmax=1.0)
 
+    # Save monocular (input) depth heatmaps/npy
+    try:
+        save_depth(pred_depth1_np, os.path.join(args.output_dir, "depth1_mono.npy"))
+        save_depth(pred_depth2_np, os.path.join(args.output_dir, "depth2_mono.npy"))
+        save_visualization(pred_depth1_np, os.path.join(args.output_dir, "depth1_mono_vis.png"))
+        save_visualization(pred_depth2_np, os.path.join(args.output_dir, "depth2_mono_vis.png"))
+    except Exception:
+        print("[eval] Warning: failed to save monocular depth visualizations")
+
     # ── Optional: Evaluation against GT ──────────────────────────────────────
     if args.gt_depth1 and args.gt_depth2:
         print("\n[eval] Loading GT depths for evaluation...")
@@ -304,6 +320,15 @@ def main(args):
             gt_depth1_np = cv2.resize(gt_depth1_np, (W, H), interpolation=cv2.INTER_NEAREST)
         if gt_depth2_np.shape != (H, W):
             gt_depth2_np = cv2.resize(gt_depth2_np, (W, H), interpolation=cv2.INTER_NEAREST)
+
+        # Save GT heatmaps
+        try:
+            save_depth(gt_depth1_np, os.path.join(args.output_dir, "depth1_gt.npy"))
+            save_depth(gt_depth2_np, os.path.join(args.output_dir, "depth2_gt.npy"))
+            save_visualization(gt_depth1_np, os.path.join(args.output_dir, "depth1_gt_vis.png"))
+            save_visualization(gt_depth2_np, os.path.join(args.output_dir, "depth2_gt_vis.png"))
+        except Exception:
+            print("[eval] Warning: failed to save GT depth visualizations")
 
         # ── Depth metrics ────────────────────────────────────────────────────
         print("\n=== Depth Metrics ===")
@@ -320,6 +345,21 @@ def main(args):
               f"delta1={(m1['delta1']+m2['delta1'])/2:.4f}  "
               f"delta2={(m1['delta2']+m2['delta2'])/2:.4f}  "
               f"delta3={(m1['delta3']+m2['delta3'])/2:.4f}")
+
+        # ── Monocular (pre-alignment) depth metrics ───────────────────────
+        print("\n=== Monocular (pre-align) Depth Metrics ===")
+        try:
+            mm1 = depth_metrics(pred_depth1_np, gt_depth1_np, mask1)
+            mm2 = depth_metrics(pred_depth2_np, gt_depth2_np, mask2)
+            print(f"Mono View 1: abs_rel={mm1['abs_rel']:.4f}  rmse={mm1['rmse']:.4f}  delta1={mm1['delta1']:.4f}")
+            print(f"Mono View 2: abs_rel={mm2['abs_rel']:.4f}  rmse={mm2['rmse']:.4f}  delta1={mm2['delta1']:.4f}")
+            # Save monocular metric summary
+            with open(os.path.join(args.output_dir, "metrics_monocular.txt"), "w") as f:
+                f.write("Monocular pre-alignment metrics\n")
+                f.write(f"View1: {mm1}\n")
+                f.write(f"View2: {mm2}\n")
+        except Exception:
+            print("[eval] Warning: failed to compute/save monocular metrics")
 
         # ── Photometric consistency ──────────────────────────────────────────
         if args.pose1 and args.pose2 and img1_gray is not None and img2_gray is not None:
@@ -347,6 +387,49 @@ def main(args):
             print(f"MAE  (1→2): {mae_12:.4f}  RMSE: {rmse_12:.4f}  valid_ratio: {vr_pc_12:.3f}")
             print(f"MAE  (2→1): {mae_21:.4f}  RMSE: {rmse_21:.4f}  valid_ratio: {vr_pc_21:.3f}")
             print(f"MAE  avg:   {(mae_12 + mae_21)/2:.4f}  RMSE avg: {(rmse_12 + rmse_21)/2:.4f}")
+
+    # ── Save model scale / residual heatmaps if provided by network ─────
+    # handle a few possible output keys across model variants
+    def _save_map(tensor, name, out_h=H, out_w=W, vmin=None, vmax=None):
+        if tensor is None:
+            return
+        try:
+            a = tensor.squeeze().cpu().numpy()
+            # Upsample to full resolution if needed
+            if a.ndim == 2 and a.shape != (out_h, out_w):
+                a_up = cv2.resize(a, (out_w, out_h), interpolation=cv2.INTER_LINEAR)
+            else:
+                a_up = a
+            save_depth(a_up, os.path.join(args.output_dir, f"{name}.npy"))
+            save_visualization(a_up, os.path.join(args.output_dir, f"{name}_vis.png"), vmin=(vmin if vmin is not None else a_up.min()), vmax=(vmax if vmax is not None else a_up.max()))
+        except Exception:
+            print(f"[eval] Warning: failed to save map {name}")
+
+    # scale / bias from iterative refinement (s16) or direct outputs
+    # possible keys: 'scale1','bias1','scale2','bias2','log_scale1','log_scale2'
+    if "scale1" in outputs:
+        _save_map(outputs.get("scale1"), "scale1")
+    if "scale2" in outputs:
+        _save_map(outputs.get("scale2"), "scale2")
+    if "bias1" in outputs:
+        _save_map(outputs.get("bias1"), "bias1")
+    if "bias2" in outputs:
+        _save_map(outputs.get("bias2"), "bias2")
+    # handle log_scale keys (compute softplus to get positive scale)
+    if "log_scale1" in outputs:
+        try:
+            ls = outputs.get("log_scale1").squeeze().cpu().numpy()
+            scale_np = np.log1p(np.exp(ls)) + 1e-4
+            _save_map(torch.from_numpy(scale_np), "log_scale1_as_scale")
+        except Exception:
+            print("[eval] Warning: failed to process log_scale1")
+    if "log_scale2" in outputs:
+        try:
+            ls = outputs.get("log_scale2").squeeze().cpu().numpy()
+            scale_np = np.log1p(np.exp(ls)) + 1e-4
+            _save_map(torch.from_numpy(scale_np), "log_scale2_as_scale")
+        except Exception:
+            print("[eval] Warning: failed to process log_scale2")
 
     print(f"\n[eval] Done. Results saved to {args.output_dir}")
 
