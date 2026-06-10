@@ -543,6 +543,8 @@ def pixel_consistency_loss(
 def geometric_consistency_loss(
     pred_depth1: torch.Tensor,   # (B, 1, H, W)  predicted depth, frame i
     pred_depth2: torch.Tensor,   # (B, 1, H, W)  predicted depth, frame j
+    gt_depth1:   torch.Tensor,   # (B, 1, H, W)  ground-truth depth, frame i (for unprojection)
+    gt_depth2:   torch.Tensor,   # (B, 1, H, W)  ground-truth depth, frame j (for unprojection)
     T_12:        torch.Tensor,   # (B, 4, 4)  cam_i → cam_j  (GT or predicted)
     K:           torch.Tensor,   # (B, 3, 3)  intrinsics (at H×W resolution)
     min_depth:   float = 0.1,
@@ -596,19 +598,21 @@ def geometric_consistency_loss(
     K_inv = k_inv(K)   # (B, 3, 3)  analytical, gradient-friendly
 
     def _one_dir(
-        depth_i: torch.Tensor,   # (B, 1, H, W)  source depth
-        depth_j: torch.Tensor,   # (B, 1, H, W)  target depth
-        T: torch.Tensor,         # (B, 4, 4)
+        depth_pred_i: torch.Tensor,   # (B, 1, H, W)  source predicted depth (unused for correspondence)
+        depth_pred_j: torch.Tensor,   # (B, 1, H, W)  target predicted depth (sampled at correspondence)
+        depth_gt_i:   torch.Tensor,   # (B, 1, H, W)  source ground-truth depth (used to find correspondence)
+        T: torch.Tensor,              # (B, 4, 4)
     ) -> torch.Tensor:
         R = T[:, :3, :3]          # (B, 3, 3)
         t = T[:, :3,  3]          # (B, 3)
 
         # 1. Unproject frame i → 3-D in frame i coords
-        d_i  = depth_i.reshape(B, 1, N).clamp(min=min_depth, max=max_depth)
-        P_i  = torch.bmm(K_inv, xy1) * d_i          # (B, 3, N)
+        # Use GT depth to establish pixel correspondences (anchor projection).
+        d_i_gt  = depth_gt_i.reshape(B, 1, N).clamp(min=min_depth, max=max_depth)
+        P_i_gt  = torch.bmm(K_inv, xy1) * d_i_gt   # (B, 3, N)
 
         # 2. Warp into frame j coords:  Q = R @ P_i + t
-        Q    = torch.bmm(R, P_i) + t.unsqueeze(-1)  # (B, 3, N)
+        Q    = torch.bmm(R, P_i_gt) + t.unsqueeze(-1)  # (B, 3, N)
         Q_z  = Q[:, 2, :]                            # (B, N)
 
         # 3. Project Q into frame j (homogeneous pixel coords)
@@ -625,7 +629,7 @@ def geometric_consistency_loss(
         # 5. Bilinearly sample pred depth_j at correspondence
         #    align_corners=True matches the u_n / v_n formula above
         d_j_sampled = F.grid_sample(
-            depth_j, grid,
+            depth_pred_j, grid,
             mode='bilinear', padding_mode='zeros', align_corners=True,
         ).reshape(B, N)                               # (B, N)
 
@@ -666,8 +670,8 @@ def geometric_consistency_loss(
         return (dist_capped * valid.float()).sum() / n_valid
 
     T_21 = se3_inv(T_12)
-    l_12 = _one_dir(pred_depth1, pred_depth2, T_12)
-    l_21 = _one_dir(pred_depth2, pred_depth1, T_21)
+    l_12 = _one_dir(pred_depth1, pred_depth2, gt_depth1, T_12)
+    l_21 = _one_dir(pred_depth2, pred_depth1, gt_depth2, T_21)
     return (l_12 + l_21) * 0.5
 
 
@@ -818,7 +822,7 @@ def total_loss(
         K_gc[:, 1, 1] = K_gc[:, 1, 1] * scale_h_gc
         K_gc[:, 0, 2] = K_gc[:, 0, 2] * scale_w_gc
         K_gc[:, 1, 2] = K_gc[:, 1, 2] * scale_h_gc
-        l_gc = geometric_consistency_loss(pred1, pred2, T_gc, K_gc)
+        l_gc = geometric_consistency_loss(pred1, pred2, gt1_s, gt2_s, T_gc, K_gc)
         total = total + geo_w * l_gc
         parts["geometric"] = float(l_gc.detach())
 
