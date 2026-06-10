@@ -56,7 +56,7 @@ def save_depth(depth, path):
     print(f"  Saved: {path}")
 
 
-def save_visualization(depth, path, vmin=0.0, vmax=10.0):
+def save_visualization(depth, path, vmin=0.0, vmax=None):
     """Save depth as colorized PNG."""
     import matplotlib
     matplotlib.use('Agg')
