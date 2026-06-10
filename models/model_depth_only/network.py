@@ -191,7 +191,7 @@ class DepthOnlyNet(nn.Module):
 
         # ── Shared depth encoder ─────────────────────────────────────────
         self.encoder = DepthEncoder(
-            pretrained      = True,
+            pretrained      = False,
             feature_dim     = feature_dim,
             freeze_backbone = freeze_encoder,
         )
