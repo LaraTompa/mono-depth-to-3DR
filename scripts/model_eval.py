@@ -132,6 +132,89 @@ def save_point_cloud_ply(depth, K, path, rgb=None):
     print(f"  Saved: {path}  ({N:,} points)")
 
 
+def save_combined_point_cloud_ply(depth1, depth2, K, T_2to1, path, rgb1=None, rgb2=None):
+    """Back-project two depth maps and merge them in view-1 camera frame.
+
+    Parameters
+    ----------
+    depth1/depth2 : (H, W) float32 ndarray  – metric depths in metres.
+    K             : (3, 3) float32 ndarray  – shared camera intrinsics.
+    T_2to1        : (4, 4) float32 ndarray  – rigid transform cam2 → cam1.
+    path          : str                      – output .ply file path.
+    rgb1/rgb2     : (H, W, 3) float32 in [0,1], optional – per-pixel colour.
+    """
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+
+    fx, fy = float(K[0, 0]), float(K[1, 1])
+    cx, cy = float(K[0, 2]), float(K[1, 2])
+
+    def _backproject(depth, rgb):
+        H, W = depth.shape
+        u = np.arange(W, dtype=np.float32)
+        v = np.arange(H, dtype=np.float32)
+        uu, vv = np.meshgrid(u, v)
+        valid = np.isfinite(depth) & (depth > 0.0)
+        Z = depth[valid]
+        X = (uu[valid] - cx) * Z / fx
+        Y = (vv[valid] - cy) * Z / fy
+        pts = np.stack([X, Y, Z], axis=1).astype(np.float32)
+        col = None
+        if rgb is not None:
+            rgb_u8 = (np.clip(rgb, 0.0, 1.0) * 255).astype(np.uint8)
+            col = rgb_u8[valid]
+        return pts, col
+
+    pts1, col1 = _backproject(depth1, rgb1)
+    pts2, col2 = _backproject(depth2, rgb2)
+
+    # Transform pts2 into cam1 frame
+    R = T_2to1[:3, :3].astype(np.float32)
+    t = T_2to1[:3,  3].astype(np.float32)
+    pts2_in_1 = (R @ pts2.T).T + t  # (N2, 3)
+
+    pts_all = np.concatenate([pts1, pts2_in_1], axis=0)
+    has_color = col1 is not None and col2 is not None
+    if has_color:
+        col_all = np.concatenate([col1, col2], axis=0)
+
+    N = len(pts_all)
+
+    with open(path, "wb") as f:
+        header = (
+            "ply\n"
+            "format binary_little_endian 1.0\n"
+            f"element vertex {N}\n"
+            "property float x\n"
+            "property float y\n"
+            "property float z\n"
+        )
+        if has_color:
+            header += (
+                "property uchar red\n"
+                "property uchar green\n"
+                "property uchar blue\n"
+            )
+        header += "end_header\n"
+        f.write(header.encode("ascii"))
+
+        if has_color:
+            dt = np.dtype([
+                ("x", "<f4"), ("y", "<f4"), ("z", "<f4"),
+                ("r", "u1"),  ("g", "u1"),  ("b", "u1"),
+            ])
+            data = np.empty(N, dtype=dt)
+            data["x"], data["y"], data["z"] = pts_all[:, 0], pts_all[:, 1], pts_all[:, 2]
+            data["r"], data["g"], data["b"] = col_all[:, 0], col_all[:, 1], col_all[:, 2]
+        else:
+            dt = np.dtype([("x", "<f4"), ("y", "<f4"), ("z", "<f4")])
+            data = np.empty(N, dtype=dt)
+            data["x"], data["y"], data["z"] = pts_all[:, 0], pts_all[:, 1], pts_all[:, 2]
+
+        f.write(data.tobytes())
+
+    print(f"  Saved: {path}  ({N:,} points, merged in cam1 frame)")
+
+
 def save_visualization(depth, path, vmin=0.0, vmax=None):
     """Save depth as colorized PNG."""
     import matplotlib
@@ -295,6 +378,8 @@ def main(args):
         T_12_init = torch.eye(4, device=device, dtype=torch.float32).unsqueeze(0)
         print("[eval] No poses provided; using identity as initial T_12 estimate.")
 
+    T_12_init_np = T_12_init.squeeze().cpu().numpy()  # (4,4) – used for combined PLY fallback
+
     # ── Forward pass ───────────────────────────────────────────────────────────────
     print("[eval] Running model forward pass...")
     H_img, W_img = (rgb1.shape[-2:] if rgb1 is not None else (H, W))
@@ -383,6 +468,19 @@ def main(args):
     save_point_cloud_ply(pred2_full, K_np, os.path.join(args.output_dir, "depth2_aligned.ply"),
                          rgb=img2_np)
 
+    # Combined aligned point cloud: both views merged in cam1 frame
+    if args.pose1 and args.pose2:
+        _T_2to1_aligned = np.linalg.inv(pose1_np) @ pose2_np
+    elif "T_12_pred" in outputs:
+        _T_2to1_aligned = np.linalg.inv(outputs["T_12_pred"][0].cpu().numpy())
+    else:
+        _T_2to1_aligned = np.linalg.inv(T_12_init_np)
+    save_combined_point_cloud_ply(
+        pred1_full, pred2_full, K_np, _T_2to1_aligned,
+        os.path.join(args.output_dir, "combined_aligned.ply"),
+        rgb1=img1_np, rgb2=img2_np,
+    )
+
     # Save monocular (input) depth heatmaps/npy
     try:
         save_depth(pred_depth1_np, os.path.join(args.output_dir, "depth1_mono.npy"))
@@ -417,6 +515,14 @@ def main(args):
                                  rgb=img1_np)
             save_point_cloud_ply(gt_depth2_np, K_np, os.path.join(args.output_dir, "depth2_gt.ply"),
                                  rgb=img2_np)
+            # Combined GT point cloud in cam1 frame (requires poses)
+            if args.pose1 and args.pose2:
+                _T_2to1_gt = np.linalg.inv(pose1_np) @ pose2_np
+                save_combined_point_cloud_ply(
+                    gt_depth1_np, gt_depth2_np, K_np, _T_2to1_gt,
+                    os.path.join(args.output_dir, "combined_gt.ply"),
+                    rgb1=img1_np, rgb2=img2_np,
+                )
         except Exception:
             print("[eval] Warning: failed to save GT depth visualizations")
 
