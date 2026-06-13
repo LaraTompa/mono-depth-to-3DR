@@ -646,7 +646,7 @@ def geometric_consistency_loss(
         # Note: NaN × 0 = NaN in IEEE 754, so a NaN dist propagates through
         # the validity mask multiplication even when valid=False, corrupting
         # model weights via backward.  The EPS floor prevents this entirely.
-        dist = ((Q - P_j).pow(2).sum(dim=1) + EPS).sqrt()   # (B, N)
+        dist = (Q - P_j).pow(2).sum(dim=1)   # (B, N)
 
         # 8. Validity mask ────────────────────────────────────────────────
         valid = (
