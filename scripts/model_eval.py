@@ -557,6 +557,53 @@ def main(args):
         except Exception:
             print("[eval] Warning: failed to compute/save monocular metrics")
 
+        # Compute median scale ratios and save scaled monocular point clouds + combined.
+        try:
+            eps = 1e-6
+            valid1 = mask1 if 'mask1' in locals() else ((gt_depth1_np > 1e-3) & np.isfinite(gt_depth1_np) & (pred_depth1_np > 0))
+            valid2 = mask2 if 'mask2' in locals() else ((gt_depth2_np > 1e-3) & np.isfinite(gt_depth2_np) & (pred_depth2_np > 0))
+            n1 = int(np.count_nonzero(valid1))
+            n2 = int(np.count_nonzero(valid2))
+            if n1 > 0 and n2 > 0:
+                s1 = float(np.median(gt_depth1_np[valid1] / (pred_depth1_np[valid1] + eps)))
+                s2 = float(np.median(gt_depth2_np[valid2] / (pred_depth2_np[valid2] + eps)))
+                print(f"[eval] Monocular median scales: s1={s1:.4f}, s2={s2:.4f}")
+
+                # Save individually scaled monocular point clouds (each scaled by its median ratio)
+                pred1_scaled = pred_depth1_np * s1
+                pred2_scaled = pred_depth2_np * s2
+                try:
+                    save_point_cloud_ply(pred1_scaled, K_np, os.path.join(args.output_dir, "depth1_mono_scaled.ply"), rgb=img1_np)
+                    save_point_cloud_ply(pred2_scaled, K_np, os.path.join(args.output_dir, "depth2_mono_scaled.ply"), rgb=img2_np)
+                except Exception:
+                    print("[eval] Warning: failed to save individually scaled monocular PLYs")
+
+                # For the combined two-view monocular point cloud, use the minimum ratio
+                s_comb = min(s1, s2)
+                pred1_comb = pred_depth1_np * s_comb
+                pred2_comb = pred_depth2_np * s_comb
+
+                # Determine transform cam2 -> cam1 (prefer GT poses, then predicted, then fallback)
+                if args.pose1 and args.pose2:
+                    T_2to1_mono = np.linalg.inv(pose1_np) @ pose2_np
+                elif "T_12_pred" in outputs:
+                    T_2to1_mono = np.linalg.inv(outputs["T_12_pred"][0].cpu().numpy())
+                else:
+                    T_2to1_mono = np.linalg.inv(T_12_init_np)
+
+                try:
+                    save_combined_point_cloud_ply(
+                        pred1_comb, pred2_comb, K_np, T_2to1_mono,
+                        os.path.join(args.output_dir, "combined_mono_before.ply"),
+                        rgb1=img1_np, rgb2=img2_np,
+                    )
+                except Exception:
+                    print("[eval] Warning: failed to save combined monocular before-alignment PLY")
+            else:
+                print("[eval] Warning: insufficient valid pixels to compute monocular scaling or combined mono PLY")
+        except Exception:
+            print("[eval] Warning: failed to compute/save scaled monocular point clouds")
+
         # ── Photometric consistency ──────────────────────────────────────────
         if args.pose1 and args.pose2 and img1_gray is not None and img2_gray is not None:
             # Prefer GT intrinsics for projection; fall back to predicted
