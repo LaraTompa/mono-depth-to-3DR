@@ -56,6 +56,82 @@ def save_depth(depth, path):
     print(f"  Saved: {path}")
 
 
+def save_point_cloud_ply(depth, K, path, rgb=None):
+    """Back-project a depth map to a 3-D point cloud and save as binary PLY.
+
+    Parameters
+    ----------
+    depth : (H, W) float32 ndarray  – metric depth in metres.
+    K     : (3, 3) float32 ndarray  – camera intrinsic matrix.
+    path  : str                      – output .ply file path.
+    rgb   : (H, W, 3) float32 ndarray in [0, 1], optional – per-pixel colour.
+    """
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+
+    H, W = depth.shape
+    fx, fy = float(K[0, 0]), float(K[1, 1])
+    cx, cy = float(K[0, 2]), float(K[1, 2])
+
+    # Build pixel grid
+    u = np.arange(W, dtype=np.float32)
+    v = np.arange(H, dtype=np.float32)
+    uu, vv = np.meshgrid(u, v)          # (H, W)
+
+    # Valid-depth mask
+    valid = np.isfinite(depth) & (depth > 0.0)
+
+    Z = depth[valid]
+    X = (uu[valid] - cx) * Z / fx
+    Y = (vv[valid] - cy) * Z / fy
+
+    pts = np.stack([X, Y, Z], axis=1).astype(np.float32)  # (N, 3)
+
+    has_color = rgb is not None
+    if has_color:
+        rgb_u8 = (np.clip(rgb, 0.0, 1.0) * 255).astype(np.uint8)
+        colors = rgb_u8[valid]          # (N, 3)
+
+    N = len(pts)
+
+    # Write binary-little-endian PLY
+    with open(path, "wb") as f:
+        # Header
+        header = (
+            "ply\n"
+            "format binary_little_endian 1.0\n"
+            f"element vertex {N}\n"
+            "property float x\n"
+            "property float y\n"
+            "property float z\n"
+        )
+        if has_color:
+            header += (
+                "property uchar red\n"
+                "property uchar green\n"
+                "property uchar blue\n"
+            )
+        header += "end_header\n"
+        f.write(header.encode("ascii"))
+
+        # Data – interleave xyz + optional rgb into a structured array
+        if has_color:
+            dt = np.dtype([
+                ("x", "<f4"), ("y", "<f4"), ("z", "<f4"),
+                ("r", "u1"),  ("g", "u1"),  ("b", "u1"),
+            ])
+            data = np.empty(N, dtype=dt)
+            data["x"], data["y"], data["z"] = pts[:, 0], pts[:, 1], pts[:, 2]
+            data["r"], data["g"], data["b"] = colors[:, 0], colors[:, 1], colors[:, 2]
+        else:
+            dt = np.dtype([("x", "<f4"), ("y", "<f4"), ("z", "<f4")])
+            data = np.empty(N, dtype=dt)
+            data["x"], data["y"], data["z"] = pts[:, 0], pts[:, 1], pts[:, 2]
+
+        f.write(data.tobytes())
+
+    print(f"  Saved: {path}  ({N:,} points)")
+
+
 def save_visualization(depth, path, vmin=0.0, vmax=None):
     """Save depth as colorized PNG."""
     import matplotlib
@@ -301,12 +377,22 @@ def main(args):
     save_visualization(conf1, os.path.join(args.output_dir, "confidence1_vis.png"), vmin=0.0, vmax=1.0)
     save_visualization(conf2, os.path.join(args.output_dir, "confidence2_vis.png"), vmin=0.0, vmax=1.0)
 
+    # Save aligned depth point clouds
+    save_point_cloud_ply(pred1_full, K_np, os.path.join(args.output_dir, "depth1_aligned.ply"),
+                         rgb=img1_np)
+    save_point_cloud_ply(pred2_full, K_np, os.path.join(args.output_dir, "depth2_aligned.ply"),
+                         rgb=img2_np)
+
     # Save monocular (input) depth heatmaps/npy
     try:
         save_depth(pred_depth1_np, os.path.join(args.output_dir, "depth1_mono.npy"))
         save_depth(pred_depth2_np, os.path.join(args.output_dir, "depth2_mono.npy"))
         save_visualization(pred_depth1_np, os.path.join(args.output_dir, "depth1_mono_vis.png"))
         save_visualization(pred_depth2_np, os.path.join(args.output_dir, "depth2_mono_vis.png"))
+        save_point_cloud_ply(pred_depth1_np, K_np, os.path.join(args.output_dir, "depth1_mono.ply"),
+                             rgb=img1_np)
+        save_point_cloud_ply(pred_depth2_np, K_np, os.path.join(args.output_dir, "depth2_mono.ply"),
+                             rgb=img2_np)
     except Exception:
         print("[eval] Warning: failed to save monocular depth visualizations")
 
@@ -327,6 +413,10 @@ def main(args):
             save_depth(gt_depth2_np, os.path.join(args.output_dir, "depth2_gt.npy"))
             save_visualization(gt_depth1_np, os.path.join(args.output_dir, "depth1_gt_vis.png"))
             save_visualization(gt_depth2_np, os.path.join(args.output_dir, "depth2_gt_vis.png"))
+            save_point_cloud_ply(gt_depth1_np, K_np, os.path.join(args.output_dir, "depth1_gt.ply"),
+                                 rgb=img1_np)
+            save_point_cloud_ply(gt_depth2_np, K_np, os.path.join(args.output_dir, "depth2_gt.ply"),
+                                 rgb=img2_np)
         except Exception:
             print("[eval] Warning: failed to save GT depth visualizations")
 
