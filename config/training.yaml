@@ -41,6 +41,7 @@ scheduler:
 # ---------------------------------------------------------------------------
 loss:
   depth:            0.0    # scale-invariant log loss (supervised)
+  depth_mse:        0.0    # mean-squared-error depth loss (supervised)
   smooth:           0.0   # edge-aware smoothness
   iter_supervision: 0.0    # deep supervision over refinement iterations
   camera:           0.5    # was 0.1 — pose needs stronger signal vs depth (1.0)

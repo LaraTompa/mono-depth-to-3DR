@@ -91,6 +91,27 @@ def si_log_loss(
 
 
 # ---------------------------------------------------------------------------
+# 1b. Mean-squared-error depth loss
+# ---------------------------------------------------------------------------
+
+def mse_depth_loss(
+    pred: torch.Tensor,
+    gt:   torch.Tensor,
+    min_depth: float = 1e-3,
+    max_depth: float = 80.0,
+) -> torch.Tensor:
+    """
+    Mean squared error on valid depth pixels.
+
+    pred, gt : (B, 1, H, W)
+    """
+    mask = (gt > min_depth) & (gt < max_depth) & torch.isfinite(gt) & (pred > EPS)
+    if mask.sum() == 0:
+        return pred.new_tensor(0.0, requires_grad=True)
+    return ((pred[mask] - gt[mask]) ** 2).mean()
+
+
+# ---------------------------------------------------------------------------
 # 4. Edge-aware smoothness
 # ---------------------------------------------------------------------------
 
@@ -739,6 +760,11 @@ def total_loss(
         si_log_loss(pred2, gt2_s)
     ) * 0.5
 
+    l_depth_mse = (
+        mse_depth_loss(pred1, gt1_s) +
+        mse_depth_loss(pred2, gt2_s)
+    ) * 0.5
+
     # --- Smoothness (RGB edge-weighted) — skipped when images are absent ---
     l_smooth = pred1.new_tensor(0.0)
     if has_images:
@@ -761,14 +787,16 @@ def total_loss(
 
     total = (
         float(w.get("depth",            1.0)) * l_depth  +
+        float(w.get("depth_mse",        0.1)) * l_depth_mse +
         float(w.get("smooth",           0.05)) * l_smooth +
         float(w.get("iter_supervision", 0.5)) * l_iters
     )
 
     parts = {
-        "depth":  float(l_depth.detach()),
-        "smooth": float(l_smooth.detach()),
-        "iters":  float(l_iters.detach()),
+        "depth":     float(l_depth.detach()),
+        "depth_mse": float(l_depth_mse.detach()),
+        "smooth":    float(l_smooth.detach()),
+        "iters":     float(l_iters.detach()),
     }
 
     # --- Pixel consistency (multiview reprojection) ---
