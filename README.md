@@ -212,199 +212,80 @@ python3 scripts/batch_eval.py \
   --max_batches 10
 ```
 
-**Arguments:**
-
-| Argument | Description | Default |
-|---|---|---|
-| `--sampled_data_dir` | Root directory containing `batch*/sample*/scene*/` folders | `datasets/sampled_data` |
-| `--output_dir` | Directory to save CSV results and visualizations | `results/batch_eval` |
-| `--model` | Depth prediction model (`depth-pro` or `zoe-depth`) | `depth-pro` |
-| `--rgb_ext` | RGB image extension | `jpg` |
-| `--depth_ext` | Depth file extension (`npz`, `png`, `npy`) | `npz` |
-| `--pose_ext` | Pose file extension | `txt` |
-| `--depth_scale` | Scale factor for depth values (e.g., 1000 for mm→m) | `1.0` |
-| `--cam_to_world` | Flag: poses are camera-to-world (default for ScanNet) | `False` |
-| `--window` | Temporal window for photometric pairs (1 = adjacent frames only) | `1` |
-| `--max_batches` | Limit number of batches to evaluate (None = all) | `None` |
-| `--debug` | Print verbose subprocess output when parsing fails | `False` |
-
-**Output:**
-
-| File | Contents |
-|---|---|
-| `photometric_pairs_detailed.csv` | Per-pair SSIM and L2 metrics for all photometric consistency checks |
-| `scene_metrics_summary.csv` | Per-scene aggregated metrics: depth consistency (RMSE, MAE, δ¹, etc.) and photometric statistics (mean SSIM, L2) |
-| `photometric_boxplots.png` | Box plots of SSIM and L2 distributions across all pairs |
-| `depth_consistency_boxplots.png` | Box plots of depth metrics (RMSE, MAE, AbsRel, δ¹) across all scenes |
-| `overall_statistics.txt` | Summary statistics (mean, std, median, min, max) for all metrics |
-
-**Example with ZoeDepth predictions (16-bit PNG in millimetres):**
-
-```bash
-python3 scripts/batch_eval.py \
-  --sampled_data_dir datasets/sampled_data \
-  --output_dir results/batch_eval_zoe \
-  --model zoe-depth \
-  --rgb_ext png \
-  --depth_ext png \
-  --pose_ext txt \
-  --depth_scale 1000.0 \
-  --cam_to_world \
-  --window 1 \
-  --max_batches 50 \
-```
-## DepthAlignNet
-
-A lightweight network that takes monocular depth predictions and stereo RGB pairs and produces **multiview-consistent aligned depths** together with **predicted camera intrinsics and relative pose** — no GT camera parameters required at test time.
-
-### Architecture
-
-```
-RGB + mono-depth (×2 views)
-        │
-        ▼
-SharedEncoder  (ConvNeXt-Tiny, weight-tied across views)
-  → s4  (H/4,  W/4,  C)
-  → s8  (H/8,  W/8,  C)
-  → s16 (H/16, W/16, C)
-        │
-        ▼  (called twice: v1→v2 and v2→v1)
-Cross-Attention  (single shared MultiheadAttention)
-  s16: [camera_token | s16_flat] attends to other view's [camera_token | s16_flat]
-       ├─ token at pos 0  →  CameraHead  (K, T_c2w, log-confidence)
-       └─ tokens at pos 1: →  s16 spatial features  (decoder path)
-  s8:  s8_flat attends to other view's s8_flat  (same shared weights)
-        │
-        ▼
-DepthDecoder  (FPN-style, s4 + s8 + s16 → H/2, W/2)
-  → aligned depth  (B, 1, H/2, W/2)
-  → confidence     (B, 1, H/2, W/2)
-```
-
-**Camera token** a single learnable token is prepended to each view's s16 feature sequence before cross-attention. After attending to the other view's full sequence, the token at position 0 is decoded by the shared `CameraHead` into intrinsics K and camera-to-world pose T_c2w. Both views share the token parameter and the head weights — differentiation comes entirely from the attended context.
-
-**Iterative camera initialisation** (training): K is initialised from a focal-length prior and T_12 to identity. The network runs for `num_pose_iters` iterations, feeding its own predictions back as the next iteration's pose prior.
-
-**Heteroscedastic confidence:** the camera head outputs log-confidence scalars for intrinsics and pose. Losses are weighted by `exp(-s)·L + s` (Kendall & Gal 2017), letting the network learn its own uncertainty.
-
-### Configuration
-
-`config/arch.yaml` controls all architecture hyper-parameters:
-
-```yaml
-encoder:
-  backbone: "convnext_tiny"
-  pretrained: true
-  freeze_backbone: true
-  out_channels: 64          # feat_dim C
-
-attention:
-  num_heads: 4
-
-refinement:
-  enabled: false            # set true to add IterativeRefinement at s16
-  num_iters: 4
-  hidden_dim: 64
-
-decoder:
-  hidden_dim: 32
-```
-
 ### Training
 
 ```bash
 python training/train.py
-python training/train.py --config config/training.yaml
-python training/train.py --config config/training.yaml --resume checkpoints/last.pt
+python training/train.py --config config/training.yaml --arch config/arch/depth_only.yaml
+python training/train.py --config config/training.yaml --arch config/arch/depth_only.yaml --resume checkpoints/last.pt
 ```
 
 Training hyper-parameters live in `config/training.yaml`. Checkpoints are saved to `checkpoints/` (`best.pt` and `last.pt`).
 
-### Smoke test
 
-Verifies all module shapes and that gradients flow end-to-end (CPU, no data required):
+## Architectures
 
-```bash
-python scripts/smoke_test.py
-```
+- `models/model_image_depth` : main DepthAlignNet (image + monocular depth inputs, cross-attention, camera head, iterative refinement optional).
+- `models/model_depth_only`  : depth-only variant (no RGB, lighter, useful when only monocular depths are available).
+- `models/model_vista`       : ViSTA-style variant (DINO backbone / alternative decoder; experimental).
 
-## DepthAlignNet
+Select variant via the saved checkpoint `arch` field or architecture configs in `config/arch/`.
 
-A lightweight network that takes monocular depth predictions and stereo RGB pairs and produces **multiview-consistent aligned depths** together with **predicted camera intrinsics and relative pose** — no GT camera parameters required at test time.
+## Losses (training/losses.py)
 
-### Architecture
+Key active losses used during training:
 
-```
-RGB + mono-depth (×2 views)
-        │
-        ▼
-SharedEncoder  (ConvNeXt-Tiny, weight-tied across views)
-  → s4  (H/4,  W/4,  C)
-  → s8  (H/8,  W/8,  C)
-  → s16 (H/16, W/16, C)
-        │
-        ▼  (called twice: v1→v2 and v2→v1)
-Cross-Attention  (single shared MultiheadAttention)
-  s16: [camera_token | s16_flat] attends to other view's [camera_token | s16_flat]
-       ├─ token at pos 0  →  CameraHead  (K, T_c2w, log-confidence)
-       └─ tokens at pos 1: →  s16 spatial features  (decoder path)
-  s8:  s8_flat attends to other view's s8_flat  (same shared weights)
-        │
-        ▼
-DepthDecoder  (FPN-style, s4 + s8 + s16 → H/2, W/2)
-  → aligned depth  (B, 1, H/2, W/2)
-  → confidence     (B, 1, H/2, W/2)
-```
+- `si_log_loss`: scale-invariant log depth supervision (supervised depth term).
+- `smooth_loss`: edge-aware depth smoothness (uses RGB edges to weight smoothing).
+- `iter_supervision_loss`: deep supervision over refinement iterations.
+- `camera_pose_loss`: composite pose + intrinsics loss with optional heteroscedastic confidence (Kendall & Gal 2017).
+- `pose_identity_loss`: round-trip consistency penalty for predicted poses.
+- `pixel_consistency_loss`: multiview 2D reprojection (pixel) consistency.
+- `geometric_consistency_loss`: 3-D geometric consistency (ViSTA-SLAM Lgc), enabled after warmup epochs.
+- `total_loss`: weighted sum that composes the above (see `training/losses.py` for weight names and schedule).
 
-**Camera token (ViSTA-SLAM style):** a single learnable token is prepended to each view's s16 feature sequence before cross-attention. After attending to the other view's full sequence, the token at position 0 is decoded by the shared `CameraHead` into intrinsics K and camera-to-world pose T_c2w. Both views share the token parameter and the head weights — differentiation comes entirely from the attended context.
+Note: `photometric_loss` and `depth_consistency` implementations exist but are commented out (re-enable when network depths are stable).
 
-**Iterative camera initialisation** (training): K is initialised from a focal-length prior and T_12 to identity. The network runs for `num_pose_iters` iterations, feeding its own predictions back as the next iteration's pose prior.
+## Evaluation: scripts/model_eval.py
 
-**Heteroscedastic confidence:** the camera head outputs log-confidence scalars for intrinsics and pose. Losses are weighted by `exp(-s)·L + s` (Kendall & Gal 2017), letting the network learn its own uncertainty.
-
-### Configuration
-
-`config/arch.yaml` controls all architecture hyper-parameters:
-
-```yaml
-encoder:
-  backbone: "convnext_tiny"
-  pretrained: true
-  freeze_backbone: true
-  out_channels: 64          # feat_dim C
-
-attention:
-  num_heads: 4
-
-refinement:
-  enabled: false            # set true to add IterativeRefinement at s16
-  num_iters: 4
-  hidden_dim: 64
-
-decoder:
-  hidden_dim: 32
-```
-
-### Training
+Quick usage (from repository root). Minimal run (no GT):
 
 ```bash
-python training/train.py
-python training/train.py --config config/training.yaml
-python training/train.py --config config/training.yaml --resume checkpoints/last.pt
+python scripts/model_eval.py \
+  --pred_depth1 /path/to/pred1.npz \
+  --pred_depth2 /path/to/pred2.npz \
+  --checkpoint checkpoints/best.pt \
+  --output_dir results/eval_minimal
 ```
 
-Training hyper-parameters live in `config/training.yaml`. Checkpoints are saved to `checkpoints/` (`best.pt` and `last.pt`).
-
-### Smoke test
-
-Verifies all module shapes and that gradients flow end-to-end (CPU, no data required):
+Full evaluation (with GT depths, intrinsics and poses):
 
 ```bash
-python scripts/smoke_test.py
+python scripts/model_eval.py \
+  --img1 /path/to/img1.jpg \
+  --img2 /path/to/img2.jpg \
+  --pred_depth1 /path/to/pred1.npz \
+  --pred_depth2 /path/to/pred2.npz \
+  --gt_depth1 /path/to/gt1.png \
+  --gt_depth2 /path/to/gt2.png \
+  --intrinsics /path/to/intrinsic.txt \
+  --pose1 /path/to/pose1.txt \
+  --pose2 /path/to/pose2.txt \
+  --checkpoint checkpoints/best.pt \
+  --output_dir results/eval_full \
+  --depth_scale_gt 1000.0
 ```
+
+Defaults: `--depth_scale_pred` is `1.0` (metres); use `--depth_scale_gt 1000.0` for ScanNet PNGs in millimetres.
+
+
+
 
 ## References
 
 1. ScanNet: Angela Dai, Angel X. Chang, Manolis Savva, Maciej Halber, Thomas Funkhouser, Matthias Nießner, "ScanNet: Richly-annotated 3D Reconstructions of Indoor Scenes", arXiv, 2017, url: https://arxiv.org/abs/1702.04405
 2. DepthPro: Aleksei Bochkovskii, Amael Delaunoy, Hugo Germain, Marcel Santos, Yichao Zhou, Stephan R. Richter, Vladlen Koltun, "Depth Pro: Sharp Monocular Metric Depth in Less Than a Second", International Conference on Learning Representations, 2025, url: https://arxiv.org/abs/2410.02073
 3. ZoeDepth: Bhat, Shariq Farooq and Birkl, Reiner and Wofk, Diana and Wonka, Peter and Müller, Matthias, "ZoeDepth: Zero-shot Transfer by Combining Relative and Metric Depth", arXiv, 2023, url: https://arxiv.org/abs/2302.12288
+4. MASt3R: Vincent Leroy, Yohann Cabon, Jérôme Revaud, "Grounding Image Matching in 3D with MASt3R", arXiv, 2024, url: https://arxiv.org/abs/2406.09756
+5. ViSTA-SLAM: Ganlin Zhang, Shenhan Qian, Xi Wang, Daniel Cremers, "ViSTA-SLAM: Visual SLAM with Symmetric Two-view Association", 3DV, 2026, arXiv: https://arxiv.org/abs/2509.01584
+6. ConvNeXt: Zhuang Liu, Hanzi Mao, Chao-Yuan Wu, Christoph Feichtenhofer, Trevor Darrell, Saining Xie, "A ConvNet for the 2020s", CVPR, 2022, arXiv: https://arxiv.org/abs/2201.03545
