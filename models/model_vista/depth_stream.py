@@ -111,7 +111,13 @@ class DepthStream(nn.Module):
         -------
         {"s4": (B, C, H/4, W/4), "s8": (B, C, H/8, W/8), "s16": (B, C, H/16, W/16)}
         """
-        x = torch.cat([rgb, depth], dim=1)   # (B, 4, H, W)
+        # Normalize depth to [0, 1] per sample so the depth channel enters the
+        # ConvNeXt backbone at the same scale as RGB (also ~[0, 1]).  Metric
+        # values are only needed for the decoder's scale+residual formula, which
+        # receives `depth_mono` as a separate argument and is NOT affected here.
+        d_max = depth.flatten(1).max(dim=1).values.view(-1, 1, 1, 1).clamp(min=1e-3)
+        depth_enc = depth / d_max
+        x = torch.cat([rgb, depth_enc], dim=1)   # (B, 4, H, W)
 
         f = self.stem(x)
         f = self.stage1(f)

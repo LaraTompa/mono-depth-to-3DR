@@ -7,7 +7,22 @@ from PIL import Image
 import random
 
 from graph_based_sampling import ScanNetGraphDataset
-from scene import ScanNetScene, find_scene_paths
+
+
+
+def load_pose(path):
+    return np.loadtxt(path)
+
+
+def collate_temporal_batch(batch):
+    """Keep per-sample tensors separate so scenes may keep native resolution."""
+    return {
+        "images": [sample["images"] for sample in batch],
+        "depths": [sample["depths"] for sample in batch],
+        "poses": [sample["poses"] for sample in batch],
+        "scene": [sample["scene"] for sample in batch],
+        "frame_ids": [sample["frame_ids"] for sample in batch],
+    }
 
 
 class ScanNetTemporalDataset(Dataset):
@@ -19,12 +34,10 @@ class ScanNetTemporalDataset(Dataset):
         min_stride=2,
         max_stride=10,
         transform=None,
-        max_scenes=None,
-        scene_paths=None,   # pre-split list of scene dirs; overrides find_scene_paths
+        max_scenes=None
     ):
         self.root_dir = root_dir
         self.num_frames = num_frames
-        self.num_samples = num_samples
         self.min_stride = min_stride
         self.max_stride = max_stride
         self.transform = transform
@@ -32,40 +45,46 @@ class ScanNetTemporalDataset(Dataset):
         # fixed seq_len per epoch; call resample_seq_len() to change between epochs
         self.seq_len = num_frames
 
-        self.scene_data = []
+        # Load every available scene
+        raw_scenes = []
+        for scene in sorted(os.listdir(root_dir)):
+            scene_path = os.path.join(root_dir, scene)
 
-        if scene_paths is None:
-            scene_paths = find_scene_paths(root_dir)
-        if max_scenes:
-            scene_paths = scene_paths[:max_scenes]
+            color_dir = os.path.join(scene_path, "color")
+            depth_dir = os.path.join(scene_path, "depth")
+            pose_dir = os.path.join(scene_path, "pose")
 
-        for scene_path in scene_paths:
-            scene = ScanNetScene(scene_path)
-            scene_name = os.path.relpath(scene_path, root_dir)
-
-            if not scene.is_valid() or not scene.frame_ids:
+            if not (os.path.isdir(color_dir) and os.path.isdir(depth_dir) and os.path.isdir(pose_dir)):
                 continue
 
-            valid_fids = scene.valid_fids_fast()  # O(listdir) — no file reads
-            if not valid_fids:
-                continue
+            frame_ids = sorted([
+                f.split(".")[0] for f in os.listdir(color_dir)
+            ], key=lambda x: int(x))
 
-            self.scene_data.append({
-                "scene":         scene_name,
-                "color_dir":     scene.color_dir,
-                "depth_dir":     scene.depth_dir,
-                "pose_dir":      scene.pose_dir,      # lazy: load per-frame on demand
-                "mde_depth_dir": scene.mde_depth_dir,
-                "intrinsics":    scene.intrinsics,    # (3,3) float32
-                "frame_ids":     valid_fids,
+            raw_scenes.append({
+                "scene":     scene,
+                "color_dir": color_dir,
+                "depth_dir": depth_dir,
+                "pose_dir":  pose_dir,   # lazy: load per-frame on demand
+                "frame_ids": frame_ids,
             })
+
+        # Build scene_data: cycle raw_scenes if max_scenes exceeds available count,
+        # otherwise truncate to max_scenes (or use all if max_scenes is None).
+        n_raw = len(raw_scenes)
+        if max_scenes is None:
+            self.scene_data = raw_scenes
+        elif max_scenes <= n_raw:
+            self.scene_data = raw_scenes[:max_scenes]
+        else:
+            self.scene_data = [raw_scenes[i % n_raw] for i in range(max_scenes)]
 
     def resample_seq_len(self):
         """No-op when num_frames is fixed; kept for API compatibility."""
         pass
 
     def __len__(self):
-        return self.num_samples
+        return len(self.scene_data)
 
     def _sample_sequence(self, scene_info):
         frame_ids = scene_info["frame_ids"]
@@ -93,7 +112,9 @@ class ScanNetTemporalDataset(Dataset):
             indices = np.linspace(0, n_frames - 1, seq_len, dtype=int).tolist()
             return [frame_ids[i] for i in indices]
 
-        center_idx = random.randint(max_offset, n_frames - max_offset - 1)
+        # anchor the sequence at the middle of the scene
+        center_idx = n_frames // 2
+        center_idx = max(max_offset, min(n_frames - max_offset - 1, center_idx))
 
         indices = [
             center_idx + (i - half) * stride
@@ -112,59 +133,45 @@ class ScanNetTemporalDataset(Dataset):
         if self.transform:
             img = self.transform(img)
         else:
-            # np.array(..., copy=True) ensures a writable buffer so the tensor
-            # has resizable storage — required by the DataLoader collator.
-            img = torch.from_numpy(np.array(img, copy=True)).permute(2, 0, 1).float() / 255.0
+            # torch.tensor() copies data into PyTorch-owned storage (resizable).
+            # torch.from_numpy() is NOT safe here: all numpy-backed storages are
+            # marked non-resizable by PyTorch, causing DataLoader collation to crash
+            # with "Trying to resize storage that is not resizable" (num_workers > 0).
+            img = torch.tensor(np.array(img), dtype=torch.float32).permute(2, 0, 1) / 255.0
         return img
 
     def _load_depth(self, path):
-        arr = np.load(path).astype(np.float32, copy=True)  # copy=True → resizable storage
-        t = torch.from_numpy(arr)
-        return t if t.ndim == 3 else t.unsqueeze(0)  # ensure (1, H, W)
-
-    def _load_mde_depth(self, path):
-        """Load a ZoeDepth prediction (uint16 PNG, stored in mm → convert to metres)."""
-        arr = np.array(Image.open(path), copy=True).astype(np.float32) / 1000.0
-        t = torch.from_numpy(arr)
-        return t if t.ndim == 3 else t.unsqueeze(0)  # ensure (1, H, W)
+        # torch.tensor() copies into PyTorch-owned resizable storage (see _load_image).
+        depth = np.array(Image.open(path)).astype(np.float32) / 1000.0
+        return torch.tensor(depth).unsqueeze(0)
 
     def __getitem__(self, idx):
-        scene_info = random.choice(self.scene_data)
+        scene_info = self.scene_data[idx]
+
         seq_ids = self._sample_sequence(scene_info)
 
         images = []
         depths = []
-        mde_depths = []
         poses = []
 
-        color_ext = ScanNetScene.COLOR_EXT
-        depth_ext = ScanNetScene.DEPTH_EXT
-        mde_ext   = ScanNetScene.MDE_DEPTH_EXT
-
         for fid in seq_ids:
-            img_path   = os.path.join(scene_info["color_dir"],     f"{fid}{color_ext}")
-            depth_path = os.path.join(scene_info["depth_dir"],     f"{fid}{depth_ext}")
-            mde_path   = os.path.join(scene_info["mde_depth_dir"], f"{fid}{mde_ext}")
-            pose_path  = os.path.join(scene_info["pose_dir"],      f"{fid}{ScanNetScene.POSE_EXT}")
+            img_path = os.path.join(scene_info["color_dir"], f"{fid}.jpg")
+            depth_path = os.path.join(scene_info["depth_dir"], f"{fid}.png")
 
-            pose_np = np.loadtxt(pose_path).astype(np.float32)
+            pose_np = np.loadtxt(os.path.join(scene_info["pose_dir"], f"{fid}.txt")).astype(np.float32)
             if not np.all(np.isfinite(pose_np)):
-                # ScanNet marks failed tracking with inf; replace with identity
-                pose_np = np.eye(4, dtype=np.float32)
+                pose_np = np.eye(4, dtype=np.float32)  # ScanNet marks failed tracking with inf
 
             images.append(self._load_image(img_path))
             depths.append(self._load_depth(depth_path))
-            mde_depths.append(self._load_mde_depth(mde_path))
-            poses.append(torch.from_numpy(pose_np))
+            poses.append(torch.tensor(pose_np))  # torch.tensor() → resizable storage
 
         return {
-            "images":     torch.stack(images),                            # (N, 3, H, W)
-            "depths":     torch.stack(depths),                            # (N, 1, H, W)  GT
-            "mde_depths": torch.stack(mde_depths),                        # (N, 1, H, W)  MDE prior
-            "poses":      torch.stack(poses),                             # (N, 4, 4)
-            "intrinsics": torch.from_numpy(scene_info["intrinsics"]),     # (3, 3)
+            "images": torch.stack(images),   # (N, 3, H, W)
+            "depths": torch.stack(depths),   # (N, 1, H, W)
+            "poses": torch.stack(poses),     # (N, 4, 4)
             "scene": scene_info["scene"],
-            "frame_ids": seq_ids
+            "frame_ids": seq_ids             # original frame names e.g. ["0", "15", "30"]
         }
 
 
@@ -172,6 +179,7 @@ if __name__ == "__main__":
     import yaml
     import torchvision
     from torch.utils.data import DataLoader
+    from tqdm import tqdm
 
     CONFIG_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config", "dataset.yaml")
     with open(CONFIG_PATH) as f:
@@ -221,7 +229,7 @@ if __name__ == "__main__":
     print(f"Saving visualisations to: {OUT_DIR}/")
     print(f"Saving sampled frames to: {SAMPLE_DIR}/\n")
 
-    # ── Resume: detect the highest already-completed batch ────────────────
+    # -- Resume: detect the highest already-completed batch ------------------
     start_batch = 0
     if os.path.isdir(SAMPLE_DIR):
         done = [
@@ -233,29 +241,38 @@ if __name__ == "__main__":
             print(f"[resume] Found batch dirs up to batch {start_batch} — "
                   f"resuming from batch {start_batch + 1}.\n")
 
-    total_batches = len(loader)
-    milestone = max(1, total_batches // 4)
-    print(f"Sampling {total_batches} batches — progress reported every {milestone} batches.\n")
+    loader = DataLoader(
+        dataset,
+        batch_size=out_cfg["batch_size"],
+        num_workers=out_cfg["num_workers"],
+        shuffle=False,
+        collate_fn=collate_temporal_batch,
+    )
 
-    for i, batch in enumerate(loader):
+    total_batches = len(loader)
+    print(f"Sampling {total_batches} batches...\n")
+
+    for i, batch in enumerate(tqdm(loader, desc="Processing batches", unit="batch")):
 
         if i < start_batch:
             continue  # skip already-saved batches (fast: no disk I/O)
 
-        images   = batch["images"]    # (B, N, 3, H, W)
-        depths   = batch["depths"]    # (B, N, 1, H, W)
-        poses    = batch["poses"]     # (B, N, 4, 4)
+        images   = batch["images"]    # list[(N, 3, H, W)]
+        depths   = batch["depths"]    # list[(N, 1, H, W)]
+        poses    = batch["poses"]     # list[(N, 4, 4)]
         scenes   = batch["scene"]
         all_fids = batch["frame_ids"] # list of N-length lists, one per sample
 
-        print(f"\nBatch {i + 1}:")
+        print(f"\nBatch {i + 1}/{total_batches}:")
         print(f"  scenes : {list(scenes)}")
 
         # save each sample in the batch
-        for b, scene_name in enumerate(scenes):
-            N = images.shape[1]
-            # frame_ids is collated as a list of N lists (one per position), so transpose
-            fids = [all_fids[f][b] for f in range(N)]
+        for b, scene_name in enumerate(tqdm(scenes, desc=f"  Saving samples", leave=False, unit="sample")):
+            sample_images = images[b]
+            sample_depths = depths[b]
+            sample_poses = poses[b]
+            N = sample_images.shape[0]
+            fids = all_fids[b]
 
             # --- sampled_data: individual frames per sequence ---
             seq_dir = os.path.join(SAMPLE_DIR, f"batch{i+1}", f"sample{b+1}", scene_name)
@@ -279,19 +296,19 @@ if __name__ == "__main__":
                 else:
                     print(f"  warning: could not find {intr_filename} for scene {scene_name}")
 
-            for f in range(N):
+            for f in tqdm(range(N), desc=f"    Saving frames", leave=False, unit="frame"):
                 fid = fids[f]
-                torchvision.utils.save_image(images[b, f], os.path.join(rgb_raw_dir, f"{fid}.png"))
-                np.save(os.path.join(dep_raw_dir, f"{fid}.npy"), depths[b, f].numpy())
-                np.savetxt(os.path.join(pose_dir, f"{fid}.txt"), poses[b, f].numpy())
+                torchvision.utils.save_image(sample_images[f], os.path.join(rgb_raw_dir, f"{fid}.png"))
+                np.save(os.path.join(dep_raw_dir, f"{fid}.npy"), sample_depths[f].numpy())
+                np.savetxt(os.path.join(pose_dir, f"{fid}.txt"), sample_poses[f].numpy())
 
             # --- sample_output: visualisation grids ---
-            rgb_frames = images[b]          # (N, 3, H, W)
+            rgb_frames = sample_images      # (N, 3, H, W)
             rgb_grid = torchvision.utils.make_grid(rgb_frames, nrow=N, padding=4)
             rgb_path = os.path.join(OUT_DIR, f"batch{i+1}_sample{b+1}_{scene_name}_rgb.png")
             torchvision.utils.save_image(rgb_grid, rgb_path)
 
-            dep_frames = depths[b]          # (N, 1, H, W)
+            dep_frames = sample_depths      # (N, 1, H, W)
             dep_min, dep_max = dep_frames.min(), dep_frames.max()
             dep_norm = (dep_frames - dep_min) / (dep_max - dep_min + 1e-6)
             dep_rgb  = dep_norm.repeat(1, 3, 1, 1)
@@ -299,11 +316,8 @@ if __name__ == "__main__":
             dep_path = os.path.join(OUT_DIR, f"batch{i+1}_sample{b+1}_{scene_name}_depth.png")
             torchvision.utils.save_image(dep_grid, dep_path)
 
-            print(f"  saved frames : {seq_dir}/")
-            print(f"  saved rgb grid  : {rgb_path}")
-            print(f"  saved depth grid: {dep_path}")
-
-        if (i + 1) % milestone == 0 or (i + 1) == total_batches:
-            print(f"\nProgress: {i + 1}/{total_batches} batches complete ({(i + 1) * 100 // total_batches}%)")
+            print(f"    saved frames : {seq_dir}/")
+            print(f"    saved rgb grid  : {rgb_path}")
+            print(f"    saved depth grid: {dep_path}")
 
     print("\nDone.")

@@ -6,8 +6,10 @@
 # Dataset / scene root
 # ---------------------------------------------------------------------------
 dataset:
-  root_dir:   "datasets/sampled_data"
+  root_dir:      "datasets/sampled_data"       # train + val scenes (80 / 20 split)
+  test_root_dir: "datasets_test/sampled_data"  # held-out test scenes (separate root)
   mde_source: "zoedepth"   # "zoedepth" | "depthpro"
+  image_size: [480, 640]   # (W, H) for MDE input and model output; see max_encode_hw in arch config
 
 # ---------------------------------------------------------------------------
 # DataLoader
@@ -23,7 +25,7 @@ loader:
 # ---------------------------------------------------------------------------
 optimizer:
   type:         adamw
-  lr:           1.0e-4
+  lr:           5.0e-5
   weight_decay: 1.0e-4
   betas:        [0.9, 0.999]
 
@@ -32,24 +34,53 @@ optimizer:
 # ---------------------------------------------------------------------------
 scheduler:
   type:          cosine
-  eta_min:       1.0e-5
+  eta_min:       3.0e-5   # scaled proportionally with lr (same 10× decay ratio)
 
 # ---------------------------------------------------------------------------
 # Loss weights
 # ---------------------------------------------------------------------------
 loss:
-  depth:            0.5    # scale-invariant log loss (supervised)
-  smooth:           0.005   # edge-aware smoothness
+  depth:            0.0    # scale-invariant log loss (supervised)
+  smooth:           0.0   # edge-aware smoothness
   iter_supervision: 0.0    # deep supervision over refinement iterations
   camera:           0.5    # was 0.1 — pose needs stronger signal vs depth (1.0)
-  camera_warmup_epochs: 15  # was 20 — 20 epochs wasted 40% of training with near-zero camera weight
+  camera_warmup_epochs: 5   # pose was learning faster after epoch 15 (confidence weighting); front-load it
   pixel_consistency: 0.0  # multiview reprojection consistency
-  identity:         0.05   # pose round-trip regulariser weight
+  identity:         0.0  # pose round-trip regulariser weight
   K_reg: 0.0             # was 0.0 — intrinsics supervision helps anchor pose
-  rot: 1.5               # was implicit 1.0 — boost rotation signal
-  trans: 0.5             # was implicit 1.0 — down-weight translation (harder)
-  pose_warmup_epochs: 15    # disable pose loss weighting for first N epochs
+  rot: 0.5               # was implicit 1.0 — boost rotation signal
+  trans: 0.5             # raised from 0.5 — translation stalling; more supervision signal
+  pose_warmup_epochs: 5     # disable confidence weighting for first N epochs; match camera_warmup_epochs
+  # -- Geometric consistency (Lgc, ViSTA-SLAM) ----------------------------
+  geometric:              0.5   # weight for Lgc; set 0 to disable
+  geometric_warmup_epochs: 0   # start Lgc after this epoch
+  geometric_switch_epochs: 25   # epoch to switch from GT → predicted pose for Lgc
 
+
+# ---------------------------------------------------------------------------
+# Data augmentation  (training split only; val/test are never augmented)
+# Set any value to 0.0 to disable that transform.
+# ---------------------------------------------------------------------------
+augment: False
+augmentation:
+  # Geometric — applied to images, depths, mde_depths, poses, and intrinsics.
+  # Both views of a pair are flipped together so the relative pose stays valid.
+  #
+  # WARNING: horizontal flip requires the cross-attention encoder to be
+  # equivariant to reflections.  With freeze_cross_attn: true the frozen
+  # DINOv2 + MASt3R features do NOT encode orientation changes, so flipped
+  # images produce nearly identical embeddings while the GT relative pose
+  # changes sign in R and tx.  This creates contradictory rotation training
+  # signal → rotation stall.  Re-enable only when freeze_cross_attn: false.
+  p_hflip:    0.0    # disabled while cross-attention is frozen
+
+  # Photometric — applied to RGB images only, independently per view.
+  # Factor is sampled uniformly from [1-x, 1+x] (brightness/contrast/saturation)
+  # or [-x, x] (hue).
+  brightness: 0.2
+  contrast:   0.2
+  saturation: 0.2
+  hue:        0.05   # fraction of 0.5 (TF.adjust_hue convention)
 
 # ---------------------------------------------------------------------------
 # Training
@@ -58,11 +89,11 @@ train:
   epochs: 50
   grad_clip: 1.0                 # max gradient norm; null → disabled
   val_every: 1                   # validate every N epochs
-  log_every: 50                  # log every N batches
+  log_every: 500                  # log every N batches
   seed: 0
   loss_spike_threshold: 50.0     # skip batch if loss exceeds this value
   patience: 50
-  num_pose_iters: 1              # number of pose-refinement iterations per batch
+  num_pose_iters: 1             # number of pose-refinement iterations per batch
   gradient_accumulation_steps: 2 # accumulate grads over N batches (effective batch = batch_size * N)
 
 # ---------------------------------------------------------------------------

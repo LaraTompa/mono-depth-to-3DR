@@ -1,0 +1,42 @@
+# config/arch/v1.yaml
+#
+# V1 — ConvNeXt-Tiny FPN baseline (models/model_image_depth)
+# Usage: python training/train.py --arch config/arch/v1.yaml
+
+model: "v1"
+
+# ---------------------------------------------------------------------------
+# Encoder
+# ---------------------------------------------------------------------------
+encoder:
+  backbone: "convnext_tiny"     # future: "convnext_small" | "resnet50" | ...
+  pretrained: true
+  freeze_backbone: true
+  out_channels: 64              # feat_dim
+
+# ---------------------------------------------------------------------------
+# Attention
+# ---------------------------------------------------------------------------
+attention:
+  num_heads: 4
+  window_size: 7
+
+# ---------------------------------------------------------------------------
+# Refinement
+# ---------------------------------------------------------------------------
+refinement:
+  enabled: false                # false → skip IterativeRefinement entirely
+  num_iters: 4
+  hidden_dim: 64
+
+# ---------------------------------------------------------------------------
+# Decoder
+# ---------------------------------------------------------------------------
+decoder:
+  hidden_dim: 48
+
+# ---------------------------------------------------------------------------
+# Camera head
+# ---------------------------------------------------------------------------
+camera_head:
+  hidden_dim: 128

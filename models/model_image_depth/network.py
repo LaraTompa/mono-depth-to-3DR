@@ -116,26 +116,29 @@ class RelativePoseHead(nn.Module):
     Initialised so the prior pose is the identity transform and confidence = 1.
     """
 
-    def __init__(self, in_dim: int, hidden: int = 256):
+    def __init__(self, in_dim: int, hidden: int = 256, dropout: float = 0.0):
         super().__init__()
         self.mlp = nn.Sequential(
             nn.Linear(in_dim, hidden),
             nn.GELU(),
+            nn.Dropout(dropout),
             nn.Linear(hidden, hidden),
             nn.GELU(),
+            nn.Dropout(dropout),
         )
         self.to_pose          = nn.Linear(hidden, 9)   # 6D rotation + 3D translation
         self.to_log_conf_pose = nn.Linear(hidden, 1)
 
-        # Bias → identity rotation in 6-D repr + small non-zero translation.
-        # Initializing translation strictly to 0 makes its norm 0, meaning
-        # normalized_translation_loss produces a math domain error or exactly
-        # 1.5708 (pi/2) because dot([0,0,0], GT) = 0. We shift it slightly.
+        # Bias → identity rotation in 6-D repr + non-trivial initial translation.
+        # 1e-4 was below EPS_NORM (0.01), so the norm was always clamped to the
+        # floor, causing ~100× gradient amplification through the normalization
+        # chain-rule.  0.1 (10 cm forward) keeps norm >> EPS_NORM → at most 10×
+        # amplification, and the direction is definite from step 0.
         nn.init.zeros_(self.to_pose.weight)
         with torch.no_grad():
             self.to_pose.bias.copy_(
                 torch.tensor([1., 0., 0., 0., 1., 0.,   # identity in 6D
-                               0., 0., 1e-4])             # non-zero translation
+                               0., 0., 0.1])              # 10 cm forward; norm >> EPS_NORM
             )
         nn.init.zeros_(self.to_log_conf_pose.weight)
         nn.init.zeros_(self.to_log_conf_pose.bias)
@@ -314,8 +317,14 @@ class DepthAlignNet(nn.Module):
         T_21 = se3_inv(T_12)
 
         # ── Encode both views once (weight-tied encoder) ─────────────────
-        x1 = torch.cat([rgb1, depth_mono1], dim=1)   # (B, 4, H, W)
-        x2 = torch.cat([rgb2, depth_mono2], dim=1)
+        # Normalize depth to [0, 1] per sample for the encoder input so the
+        # depth channel is at the same scale as RGB.  The original metric
+        # depth_mono1/2 are kept unchanged for geometric warping (_cross_attend)
+        # and the decoder's scale+residual formula.
+        d1_max = depth_mono1.flatten(1).max(dim=1).values.view(-1, 1, 1, 1).clamp(min=1e-3)
+        d2_max = depth_mono2.flatten(1).max(dim=1).values.view(-1, 1, 1, 1).clamp(min=1e-3)
+        x1 = torch.cat([rgb1, depth_mono1 / d1_max], dim=1)   # (B, 4, H, W)
+        x2 = torch.cat([rgb2, depth_mono2 / d2_max], dim=1)
         feats1_raw = self.encoder(x1)                  # {"s4", "s8", "s16"}
         feats2_raw = self.encoder(x2)
 
@@ -340,8 +349,12 @@ class DepthAlignNet(nn.Module):
         # underconstrained absolute-pose regression with no world reference.
         # Swapping the concatenation order gives T_21 from the same shared
         # weights, so the head learns a consistent notion of direction.
-        rel_embed_12  = torch.cat([cam_embed_1, cam_embed_2], dim=-1)  # (B, 2C)
-        rel_embed_21  = torch.cat([cam_embed_2, cam_embed_1], dim=-1)  # (B, 2C)
+        # .detach() stops pose-head gradients from flowing back into the shared
+        # encoder (change A): the encoder features are used by the depth decoder
+        # and the large initial translation gradient (~10-100× amplified through
+        # norm chain-rule) would otherwise corrupt depth representations.
+        rel_embed_12  = torch.cat([cam_embed_1.detach(), cam_embed_2.detach()], dim=-1)  # (B, 2C)
+        rel_embed_21  = torch.cat([cam_embed_2.detach(), cam_embed_1.detach()], dim=-1)  # (B, 2C)
         rel_pose_12   = self.relative_pose_head(rel_embed_12)
         rel_pose_21   = self.relative_pose_head(rel_embed_21)
         T_12_pred     = rel_pose_12["T_12"]                            # (B, 4, 4)

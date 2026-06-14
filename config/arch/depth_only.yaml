@@ -1,0 +1,75 @@
+# config/arch/depth_only.yaml
+#
+# depth-only — ConvNeXt-Tiny depth encoder + MASt3R BaseDecoder cross-attention,
+#              no RGB stream (models/model_depth_only)
+# Usage: python training/train.py --arch config/arch/depth_only.yaml
+
+model: "depth_only"
+
+# ---------------------------------------------------------------------------
+# depth-only model config
+# ---------------------------------------------------------------------------
+depth_only:
+  # ConvNeXt-Tiny depth encoder
+  feature_dim: 128              # 1×1-projected encoder output channels
+
+  # Cross-attention decoder
+  # MUST be 768 to load MASt3R BaseDecoder weights.
+  # The enc_to_dec linear (128 → 768) bridges encoder ↔ decoder automatically.
+  token_dim: 768
+  num_blocks: 4                 # number of CrossBlocks to init from MASt3R
+  num_heads: 12                 # 12 heads × 64 head_dim = 768
+  mlp_ratio: 4.0
+
+  # Fusion decoder (trained from scratch)
+  decoder_hidden: 128
+
+  # Pose conditioning
+  use_pose_token: false          # encode T_12/T_21 as prepended token
+
+  # Encoder training
+  freeze_encoder: false         # true: keep ConvNeXt frozen (useful early)
+
+  # MASt3R checkpoint for cross-attention weight initialisation.
+  # Download from:
+  #   https://download.europe.naverlabs.com/ComputerVision/MASt3R/
+  #       MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth
+  # Set to null to use default (MASt3R-style trunc_normal) initialisation.
+  mast3r_ckpt: null
+  # mast3r_ckpt: checkpoint_mast3r/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth
+
+  # Cap the encoder input resolution to bound s16 token count.
+  # For 1296×968 MDE predictions: s16 = 81×60 = 4860 tokens — ~25× more than
+  # MASt3R's 1024 design point, causing O(N²) OOM in cross-attention.
+  # [640, 480] → s16 = 40×30 = 1200 tokens: 4× faster, fits comfortably.
+  # Aspect ratio is preserved; depth_input for the residual head is unaffected.
+  # Set to null to encode at full resolution (only safe for ≤512×512 inputs).
+  max_encode_hw: [480, 640]
+
+  # Freeze cross-attention blocks after MASt3R init.
+  # true  → blocks act as a fixed feature extractor; only enc_to_dec,
+  #          pose_enc, decoder, and heads are trained.
+  # false → fine-tune everything end-to-end (recommended after warm-up).
+  freeze_cross_attn: false
+
+  # Pose prediction mode.
+  # false (default): GT T_12 is encoded via PoseEncoder and injected as a
+  #   conditioning token — the model only refines depth, not pose.
+  # true: a learnable camera token replaces the encoded pose token. A
+  #   PoseHead MLP reads the evolved tokens after cross-attention and
+  #   regresses T_12_pred / T_21_pred (B,4,4). This automatically enables
+  #   camera_pose_loss (geodesic rotation + normalised translation + identity
+  #   round-trip) in total_loss since "T_12_pred" appears in outputs.
+  #   K is not predicted; the K loss is suppressed.
+  predict_pose: true
+  pose_head_hidden: 128         # hidden width of the 2-layer PoseHead MLP
+
+  # Iterative GRU pose refinement (PoseRefinementModule).
+  # 0 (default): disabled — single-shot PoseHead only; pipeline is identical
+  #   to before; no extra parameters are created.
+  # N > 0: adds N GRU refinement steps after the coarse PoseHead estimate.
+  #   Requires K to be passed to forward(); if K is None, refinement is
+  #   silently skipped and the coarse estimate is used instead.
+  pose_refine_iters: 0
+  pose_refine_feat_dim: 128     # spatial token projection dim for the ConvGRU
+  pose_refine_hidden: 128       # ConvGRU hidden state channels

@@ -52,7 +52,8 @@ from .depth_stream    import DepthStream
 from .decoder         import FusionDecoder
 
 # Re-use heads from V1 — same interface, no duplication.
-from models.model_image_depth.network import CameraHead, RelativePoseHead
+from models.model_image_depth.network   import CameraHead, RelativePoseHead
+from models.model_image_depth.geometry  import se3_inv
 
 
 class DepthAlignNetV2(nn.Module):
@@ -83,7 +84,9 @@ class DepthAlignNetV2(nn.Module):
         depth_out_channels : int        = 128,
         decoder_hidden     : int        = 256,
         camera_head_hidden : int        = 256,
+        pose_dropout       : float      = 0.0,
         mast3r_ckpt        : str | None = None,
+        freeze_cross_attn  : bool       = False,
     ):
         super().__init__()
 
@@ -115,6 +118,14 @@ class DepthAlignNetV2(nn.Module):
         if mast3r_ckpt is not None:
             self.cross_attn.load_mast3r_weights(mast3r_ckpt)
 
+        # ── Optionally freeze cross-attention weights ─────────────────────
+        # When True, MASt3R-initialised weights are kept fixed; only enc_to_dec,
+        # camera_token, depth_stream, decoder, and camera heads are trained.
+        # Gradients still flow THROUGH the frozen ops to upstream trainable
+        # params (enc_to_dec, camera_token), so the pipeline is unchanged.
+        if freeze_cross_attn:
+            self.cross_attn.requires_grad_(False)
+
         # ── Trainable depth stream (late fusion — independent of DINOv2) ─
         self.depth_stream = DepthStream(
             backbone=depth_backbone, pretrained=True, out_channels=depth_out_channels
@@ -133,10 +144,11 @@ class DepthAlignNetV2(nn.Module):
         # ── Relative pose head (same design as V1) ───────────────────────
         # Takes cat([cam_embed1, cam_embed2]) → T_12, log_conf_pose.
         # Swapping input order gives T_21 from the same shared weights.
-        self.relative_pose_head = RelativePoseHead(2 * decoder_dim, hidden=camera_head_hidden)
+        self.relative_pose_head = RelativePoseHead(2 * decoder_dim, hidden=camera_head_hidden, dropout=pose_dropout)
 
-        # Store freeze flag to avoid iterating 307M params every forward.
-        self._dino_frozen = freeze_dino
+        # Store freeze flags.
+        self._dino_frozen        = freeze_dino
+        self._cross_attn_frozen  = freeze_cross_attn
 
     # ------------------------------------------------------------------
     # Forward
@@ -197,11 +209,18 @@ class DepthAlignNetV2(nn.Module):
         K_pred     = (cam1["K"] + cam2["K"]) * 0.5
         log_conf_K = (cam1["log_conf_K"] + cam2["log_conf_K"]) * 0.5
 
-        # Predict relative pose directly from both embeddings (same as V1).
-        rel_12 = self.relative_pose_head(torch.cat([cam_embed1, cam_embed2], dim=-1))
-        rel_21 = self.relative_pose_head(torch.cat([cam_embed2, cam_embed1], dim=-1))
+        # Predict T_12; derive T_21 analytically as the exact SE(3) inverse.
+        # Predicting T_21 independently lets the MLP violate the anti-parallel
+        # constraint as confidence weighting reshapes the loss landscape. Using
+        # se3_inv makes pose_identity_loss = 0 by construction and removes the
+        # need for the round-trip gradient signal entirely.
+        # .detach() (change A): stop pose-head gradients from entering the depth
+        # encoder/cross-attention features used by the depth decoder.
+        rel_12        = self.relative_pose_head(torch.cat([cam_embed1.detach(), cam_embed2.detach()], dim=-1))
+        # rel_21        = self.relative_pose_head(torch.cat([cam_embed2, cam_embed1], dim=-1))
         T_12_pred     = rel_12["T_12"]
-        T_21_pred     = rel_21["T_12"]
+        T_21_pred     = se3_inv(T_12_pred)   # exact: R^T, -R^T·t
+        # T_21_pred     = rel_21["T_12"]      # independent prediction (no anti-parallel constraint)
         log_conf_pose = rel_12["log_conf_pose"]
 
         # ── 7. Depth stream (independent of DINOv2) ──────────────────────
