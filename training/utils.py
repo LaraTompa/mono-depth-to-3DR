@@ -130,7 +130,25 @@ def save_checkpoint(state: dict, path: str) -> None:
 
 def load_checkpoint(path: str, model, optimizer, scheduler, device):
     ckpt = torch.load(path, map_location=device)
-    model.load_state_dict(ckpt["model"])
+    
+    # Load model with strict=False to allow missing optional heads (pose, encoding)
+    incompatible_keys = model.load_state_dict(ckpt["model"], strict=False)
+    
+    # Log information about missing/unexpected keys
+    if incompatible_keys.missing_keys:
+        # Check if missing keys are from optional heads (pose prediction, encoding)
+        optional_keys = {'pose_head', 'to_pose', 'to_log_conf_pose', 'pose_encoder', 'encoding_head'}
+        missing_optional = [k for k in incompatible_keys.missing_keys if any(opt in k for opt in optional_keys)]
+        missing_critical = [k for k in incompatible_keys.missing_keys if not any(opt in k for opt in optional_keys)]
+        
+        if missing_optional:
+            print(f"[ckpt] Missing optional heads (not in checkpoint): {missing_optional}")
+        if missing_critical:
+            print(f"[ckpt] WARNING: Missing critical layers: {missing_critical}")
+    
+    if incompatible_keys.unexpected_keys:
+        print(f"[ckpt] WARNING: Unexpected keys in checkpoint (likely from old version): {incompatible_keys.unexpected_keys}")
+    
     optimizer.load_state_dict(ckpt["optimizer"])
     if scheduler is not None and ckpt.get("scheduler"):
         scheduler.load_state_dict(ckpt["scheduler"])
