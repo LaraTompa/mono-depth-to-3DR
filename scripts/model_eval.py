@@ -552,11 +552,11 @@ def main(args):
         log(f"View 1: abs_rel={m1['abs_rel']:.4f}  rmse={m1['rmse']:.4f}  delta1={m1['delta1']:.4f}")
         log(f"View 2: abs_rel={m2['abs_rel']:.4f}  rmse={m2['rmse']:.4f}  delta1={m2['delta1']:.4f}")
         # depth_metrics also returns mae, delta2, delta3
-          log(f"Average: abs_rel={(m1['abs_rel']+m2['abs_rel'])/2:.4f}  "
-              f"rmse={(m1['rmse']+m2['rmse'])/2:.4f}  "
-              f"delta1={(m1['delta1']+m2['delta1'])/2:.4f}  "
-              f"delta2={(m1['delta2']+m2['delta2'])/2:.4f}  "
-              f"delta3={(m1['delta3']+m2['delta3'])/2:.4f}")
+        log(f"Average: abs_rel={(m1['abs_rel']+m2['abs_rel'])/2:.4f}  "
+            f"rmse={(m1['rmse']+m2['rmse'])/2:.4f}  "
+            f"delta1={(m1['delta1']+m2['delta1'])/2:.4f}  "
+            f"delta2={(m1['delta2']+m2['delta2'])/2:.4f}  "
+            f"delta3={(m1['delta3']+m2['delta3'])/2:.4f}")
 
         # ── Monocular (pre-alignment) depth metrics ───────────────────────
         log("\n=== Monocular (pre-align) Depth Metrics ===")
