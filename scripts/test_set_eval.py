@@ -202,7 +202,7 @@ def _safe_depth_metrics(pred, gt):
     if mask.sum() < 10:
         return {k: float("nan") for k in
                 ("abs_rel", "rmse", "mae", "delta1", "delta2", "delta3")}
-    return depth_metrics(pred, gt, mask)
+    return {k: float(v) for k, v in depth_metrics(pred, gt, mask).items()}
 
 
 def _safe_pixel_consistency(gt_src, pred_src, gt_tgt, K, pose_src, pose_tgt):
