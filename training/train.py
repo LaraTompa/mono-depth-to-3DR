@@ -67,6 +67,7 @@ def run_epoch(
     totals    = {
         "loss": 0.0,
         "depth": 0.0,
+        "depth_mse": 0.0,
         "smooth": 0.0,
         "iters": 0.0,
         "pixel_consistency": 0.0,
@@ -224,6 +225,7 @@ def run_epoch(
 
             totals["loss"]       += loss.item()
             totals["depth"]      += breakdown.get("depth",     0.0)
+            totals["depth_mse"]  += breakdown.get("depth_mse", 0.0)
             totals["smooth"]     += breakdown.get("smooth",    0.0)
             totals["iters"]      += breakdown.get("iters",     0.0)
             totals["cam_pose"]   += breakdown.get("cam_pose",  0.0)
@@ -249,6 +251,7 @@ def run_epoch(
                 n = n_batches
                 avg_loss  = totals["loss"] / n
                 avg_depth = totals["depth"] / n
+                avg_mse   = totals["depth_mse"] / n
                 avg_smooth= totals["smooth"]/ n
                 avg_iters = totals["iters"] / n
                 avg_pix   = totals.get("pixel_consistency", 0.0) / n
@@ -262,7 +265,7 @@ def run_epoch(
                 print(
                     f"  epoch {epoch:03d}  step {step+1:04d}/{len(loader):04d}"
                     f"  loss={avg_loss:.4f}"
-                    f"  depth={avg_depth:.4f} smooth={avg_smooth:.4f} iters={avg_iters:.4f}"
+                    f"  depth={avg_depth:.4f} mse={avg_mse:.4f} smooth={avg_smooth:.4f} iters={avg_iters:.4f}"
                     f"  pix={avg_pix:.6f}  gc={avg_gc:.6f}"
                     f"  cam={avg_cam:.4f} (rot={avg_rot:.3f} trans={avg_trans:.3f} K={avg_camK:.3f} id={avg_cid:.3f})"
                     f"  lr={lr:.2e}  {elapsed:.1f}s"
@@ -471,9 +474,11 @@ def train(cfg: dict, arch_cfg: dict, resume: str | None = None) -> None:
             val_break = (
                 f"  val_loss={val_metrics.get('loss', float('nan')):.4f} "
                 f"depth={val_metrics.get('depth', 0.0):.4f} "
+                f"mse={val_metrics.get('depth_mse', 0.0):.4f} "
                 f"smooth={val_metrics.get('smooth', 0.0):.4f} "
                 f"iters={val_metrics.get('iters', 0.0):.4f} "
                 f"pix={val_metrics.get('pixel_consistency', 0.0):.6f} "
+                f"gc={val_metrics.get('geometric', 0.0):.6f} "
                 f"cam={val_metrics.get('cam_pose', 0.0):.4f} "
                 f"cam_rot={val_metrics.get('cam_rot', 0.0):.4f} "
                 f"cam_trans={val_metrics.get('cam_trans', 0.0):.4f}"
@@ -503,6 +508,7 @@ def train(cfg: dict, arch_cfg: dict, resume: str | None = None) -> None:
         train_break = (
             f"train_loss={train_metrics.get('loss', float('nan')):.4f} "
             f"depth={train_metrics.get('depth', 0.0):.4f} "
+            f"mse={train_metrics.get('depth_mse', 0.0):.4f} "
             f"smooth={train_metrics.get('smooth', 0.0):.4f} "
             f"iters={train_metrics.get('iters', 0.0):.4f} "
             f"pix={train_metrics.get('pixel_consistency', 0.0):.4f} "
