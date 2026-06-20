@@ -228,6 +228,7 @@ def run_epoch(
             totals["depth_mse"]  += breakdown.get("depth_mse", 0.0)
             totals["smooth"]     += breakdown.get("smooth",    0.0)
             totals["iters"]      += breakdown.get("iters",     0.0)
+            totals["pixel_consistency"] += breakdown.get("pixel_consistency", 0.0)
             totals["cam_pose"]   += breakdown.get("cam_pose",  0.0)
             totals["cam_rot"]    += breakdown.get("cam_rot",   0.0)
             totals["cam_trans"]  += breakdown.get("cam_trans", 0.0)
