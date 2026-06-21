@@ -414,11 +414,29 @@ def train(cfg: dict, arch_cfg: dict, resume: str | None = None) -> None:
     # AMP GradScaler — only meaningful on CUDA; None on CPU (disables AMP transparently).
     scaler = torch.amp.GradScaler("cuda") if torch.cuda.is_available() else None
 
+    def _override_lr_from_config(opt, sch, cfg_lr: float) -> None:
+        # Keep current run config authoritative when resuming from checkpoints.
+        loaded_lrs = [float(pg.get("lr", 0.0)) for pg in opt.param_groups]
+        for pg in opt.param_groups:
+            pg["lr"] = cfg_lr
+            if "initial_lr" in pg:
+                pg["initial_lr"] = cfg_lr
+
+        if sch is not None:
+            if hasattr(sch, "base_lrs") and isinstance(sch.base_lrs, list):
+                sch.base_lrs = [cfg_lr for _ in sch.base_lrs]
+            if hasattr(sch, "_last_lr") and isinstance(sch._last_lr, list):
+                sch._last_lr = [cfg_lr for _ in sch._last_lr]
+
+        loaded_unique = sorted({round(v, 12) for v in loaded_lrs})
+        print(f"[ckpt] Overrode resumed lr {loaded_unique} -> {cfg_lr:.6g} (from config)")
+
     # --- resume ---
     start_epoch = 1
     best_metric = float("inf") if ckpt_cfg.get("mode", "min") == "min" else -float("inf")
     if resume and os.path.isfile(resume):
         start_epoch, best_metric = load_checkpoint(resume, model, optimizer, scheduler, device)
+        _override_lr_from_config(optimizer, scheduler, float(cfg["optimizer"]["lr"]))
 
     save_dir  = ckpt_cfg.get("save_dir", "checkpoints/")
     top_k     = int(ckpt_cfg.get("save_top_k", 3))
