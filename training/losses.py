@@ -800,8 +800,11 @@ def total_loss(
     }
 
     # --- Pixel consistency (multiview reprojection) ---
+    # Activated only after pixel_consistency_warmup_epochs so early training
+    # can stabilise depth/pose before reprojection coupling.
     l_pixel = pred1.new_tensor(0.0)
-    if "poses" in batch:
+    pix_warmup = int(w.get("pixel_consistency_warmup_epochs", 0))
+    if "poses" in batch and epoch >= pix_warmup:
         poses_pc = batch["poses"]                           # (B, N, 4, 4)
         T_12_pc  = se3_inv(poses_pc[:, 1]) @ poses_pc[:, 0]
         # Prefer GT intrinsics for accurate reprojection; fall back to K_iter.
