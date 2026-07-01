@@ -390,11 +390,20 @@ def main(args):
 
     with torch.no_grad():
         if model_variant == "depth_only":
+            arch_do = arch_cfg.get("depth_only", {})
+            _use_img_enc = arch_do.get("use_image_encoder", False)
+            if _use_img_enc and (rgb1 is None or rgb2 is None):
+                raise ValueError(
+                    "This checkpoint uses use_image_encoder=True. "
+                    "Please provide --img1 and --img2."
+                )
             outputs = model(
                 depth1=depth_mono1,
                 depth2=depth_mono2,
                 T_12=T_12_iter,
-                K=K,  # passed for optional GRU refinement; ignored when pose_refine_iters=0
+                K=K,
+                rgb1=rgb1 if _use_img_enc else None,
+                rgb2=rgb2 if _use_img_enc else None,
             )
         else:
             num_pose_iters = int(train_cfg.get("num_pose_iters", 1))

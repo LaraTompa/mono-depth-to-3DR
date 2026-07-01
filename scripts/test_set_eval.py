@@ -159,11 +159,15 @@ def run_inference(model, model_variant, cfg, rgb1_t, rgb2_t,
     """Run one forward pass. Returns the raw outputs dict."""
     train_cfg = cfg.get("train", {})
     if model_variant == "depth_only":
+        arch_do = cfg.get("arch", {}).get("depth_only", {})
+        _use_img_enc = arch_do.get("use_image_encoder", False)
         return model(
             depth1=depth_mono1_t,
             depth2=depth_mono2_t,
             T_12=T_12_init_t,
             K=K_t,
+            rgb1=rgb1_t if _use_img_enc else None,
+            rgb2=rgb2_t if _use_img_enc else None,
         )
 
     num_pose_iters = int(train_cfg.get("num_pose_iters", 1))

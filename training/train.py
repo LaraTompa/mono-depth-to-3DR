@@ -140,15 +140,21 @@ def run_epoch(
             num_pose_iters = train_cfg.get("num_pose_iters", 2)
             with torch.amp.autocast("cuda", enabled=(scaler is not None)):
                 if model_variant == "depth_only":
-                    # depth_only: no RGB, no camera head, no iterative pose loop.
+                    # depth_only: no camera head, no iterative pose loop.
                     # Use GT relative pose directly as conditioning.
                     # K is passed for optional GRU pose refinement; it is ignored
                     # when pose_refine_iters=0 (the default), so this is harmless.
+                    # rgb1/rgb2 are passed when use_image_encoder=True; the model
+                    # raises an informative error if they are required but absent.
+                    arch_do = cfg.get("arch", {}).get("depth_only", {})
+                    _use_img_enc = arch_do.get("use_image_encoder", False)
                     outputs = model(
                         depth1=depth_mono1,
                         depth2=depth_mono2,
                         T_12=T_12_gt,
                         K=K_gt,
+                        rgb1=rgb1 if _use_img_enc else None,
+                        rgb2=rgb2 if _use_img_enc else None,
                     )
                     # Expose K/T for loss compatibility (no camera supervision).
                     K_iter = K_gt

@@ -35,7 +35,7 @@ depth_only:
   #   https://download.europe.naverlabs.com/ComputerVision/MASt3R/
   #       MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth
   # Set to null to use default (MASt3R-style trunc_normal) initialisation.
-  mast3r_ckpt: null
+  mast3r_ckpt: checkpoint_mast3r/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth
   # mast3r_ckpt: checkpoint_mast3r/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth
 
   # Cap the encoder input resolution to bound s16 token count.
@@ -50,7 +50,7 @@ depth_only:
   # true  → blocks act as a fixed feature extractor; only enc_to_dec,
   #          pose_enc, decoder, and heads are trained.
   # false → fine-tune everything end-to-end (recommended after warm-up).
-  freeze_cross_attn: false
+  freeze_cross_attn: true
 
   # Pose prediction mode.
   # false (default): GT T_12 is encoded via PoseEncoder and injected as a
@@ -61,7 +61,7 @@ depth_only:
   #   camera_pose_loss (geodesic rotation + normalised translation + identity
   #   round-trip) in total_loss since "T_12_pred" appears in outputs.
   #   K is not predicted; the K loss is suppressed.
-  predict_pose: true
+  predict_pose: false
   pose_head_hidden: 128         # hidden width of the 2-layer PoseHead MLP
 
   # Iterative GRU pose refinement (PoseRefinementModule).
@@ -73,3 +73,39 @@ depth_only:
   pose_refine_iters: 0
   pose_refine_feat_dim: 128     # spatial token projection dim for the ConvGRU
   pose_refine_hidden: 128       # ConvGRU hidden state channels
+
+  # ── RGB image encoder (MASt3R ViT-Large, frozen) ────────────────────────
+  # When use_image_encoder: true, a frozen MASt3R ViT-Large encodes each RGB
+  # frame into patch tokens (B, h*w, token_dim) which are *summed* onto the
+  # depth encoder s16 tokens before the cross-attention blocks.
+  #
+  # Fusion strategy — sum vs concatenation
+  # ----------------------------------------
+  # Sum was chosen over concatenation for three reasons:
+  #   1. Token count unchanged → cross-attention cost and sequence length are
+  #      identical to the depth-only model.
+  #   2. The output projection (1024 → token_dim) is zero-initialised, so at
+  #      t=0 the image stream contributes nothing and the model is numerically
+  #      identical to the depth-only baseline — stable warm-up guaranteed.
+  #   3. Simpler: no extra dimension-reduction layer needed.
+  #
+  # The ViT backbone is always frozen.  Only the lightweight output projection
+  # (Linear 1024 → token_dim) is trained, letting the model learn to extract
+  # the relevant visual cues gradually.
+  #
+  # Spatial alignment: with max_encode_hw=[480,640] both the depth encoder s16
+  # grid (30×40) and the ViT patch grid (patch_size=16 → 30×40) have 1200
+  # tokens — perfectly aligned without any resampling.
+  #
+  # Set use_image_encoder: false (default) to reproduce the original depth-only
+  # model exactly.
+  use_image_encoder: true
+
+  # Path to the MASt3R .pth checkpoint used to initialise the ViT encoder
+  # weights.  The same file used for mast3r_ckpt (cross-attention init) works.
+  # Set to null to use random initialisation (for testing / ablation).
+  # Download from:
+  #   https://download.europe.naverlabs.com/ComputerVision/MASt3R/
+  #       MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth
+  image_encoder_ckpt: checkpoint_mast3r/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth
+  # image_encoder_ckpt: checkpoint_mast3r/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth

@@ -25,7 +25,7 @@ loader:
 # ---------------------------------------------------------------------------
 optimizer:
   type:         adamw
-  lr:           5.0e-5
+  lr:           1.0e-5
   weight_decay: 1.0e-4
   betas:        [0.9, 0.999]
 
@@ -34,19 +34,19 @@ optimizer:
 # ---------------------------------------------------------------------------
 scheduler:
   type:          cosine
-  eta_min:       3.0e-5   # scaled proportionally with lr (same 10× decay ratio)
+  eta_min:       1.0e-5   # scaled proportionally with lr (same 10× decay ratio)
 
 # ---------------------------------------------------------------------------
 # Loss weights
 # ---------------------------------------------------------------------------
 loss:
-  depth:            0.0    # scale-invariant log loss (supervised)
-  depth_mse:        0.0    # mean-squared-error depth loss (supervised)
+  depth:            0.1    # scale-invariant log loss (supervised)
+  depth_mse:        0.4    # mean-squared-error depth loss (supervised)
   smooth:           0.0   # edge-aware smoothness
   iter_supervision: 0.0    # deep supervision over refinement iterations
-  camera:           0.5    # was 0.1 — pose needs stronger signal vs depth (1.0)
+  camera:           0.0    # was 0.1 — pose needs stronger signal vs depth (1.0)
   camera_warmup_epochs: 5   # pose was learning faster after epoch 15 (confidence weighting); front-load it
-  pixel_consistency: 0.0  # multiview reprojection consistency
+  pixel_consistency: 0.2  # multiview reprojection consistency
   pixel_consistency_warmup_epochs: 5  # start reprojection consistency after this epoch
   identity:         0.0  # pose round-trip regulariser weight
   K_reg: 0.0             # was 0.0 — intrinsics supervision helps anchor pose
@@ -54,7 +54,7 @@ loss:
   trans: 0.5             # raised from 0.5 — translation stalling; more supervision signal
   pose_warmup_epochs: 5     # disable confidence weighting for first N epochs; match camera_warmup_epochs
   # -- Geometric consistency (Lgc, ViSTA-SLAM) ----------------------------
-  geometric:              0.5   # weight for Lgc; set 0 to disable
+  geometric:              0.3   # weight for Lgc; set 0 to disable
   geometric_warmup_epochs: 0   # start Lgc after this epoch
   geometric_switch_epochs: 25   # epoch to switch from GT → predicted pose for Lgc
 
@@ -88,7 +88,7 @@ augmentation:
 # Training
 # ---------------------------------------------------------------------------
 train:
-  epochs: 50
+  epochs: 60
   grad_clip: 1.0                 # max gradient norm; null → disabled
   val_every: 1                   # validate every N epochs
   log_every: 500                  # log every N batches
