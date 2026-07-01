@@ -146,8 +146,11 @@ def run_epoch(
                     # when pose_refine_iters=0 (the default), so this is harmless.
                     # rgb1/rgb2 are passed when use_image_encoder=True; the model
                     # raises an informative error if they are required but absent.
-                    arch_do = cfg.get("arch", {}).get("depth_only", {})
-                    _use_img_enc = arch_do.get("use_image_encoder", False)
+                    _use_img_enc = bool(getattr(model, "use_image_encoder", False))
+                    if _use_img_enc and (rgb1 is None or rgb2 is None):
+                        raise ValueError(
+                            "This checkpoint uses use_image_encoder=True, but rgb1/rgb2 were not provided."
+                        )
                     outputs = model(
                         depth1=depth_mono1,
                         depth2=depth_mono2,
