@@ -12,6 +12,23 @@ dataset:
   image_size: [480, 640]   # (W, H) for MDE input and model output; see max_encode_hw in arch config
 
 # ---------------------------------------------------------------------------
+# Optional depth normalisation during training/evaluation
+# ---------------------------------------------------------------------------
+depth_normalization:
+  enabled: false
+  max_samples: 2000000  # valid pixels sampled from train split for median/std estimation
+  mde:
+    median: 1.0
+    std: 1.0
+    scale: 1.0
+    offset: 0.0
+  gt:
+    median: 1.0
+    std: 1.0
+    scale: 1.0
+    offset: 0.0
+
+# ---------------------------------------------------------------------------
 # DataLoader
 # ---------------------------------------------------------------------------
 loader:

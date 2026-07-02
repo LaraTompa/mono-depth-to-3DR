@@ -727,6 +727,7 @@ def total_loss(
     parts : dict of scalar floats for logging
     """
     depths = batch["depths"]    # (B, N, 1, H, W)
+    depths_metric = batch.get("depths_metric", depths)
 
     # Images are optional — depth_only models do not use RGB.
     # H, W are derived from depths so pH/pW scaling is always correct
@@ -742,15 +743,21 @@ def total_loss(
 
     gt1  = depths[:, 0]         # (B, 1, H, W)
     gt2  = depths[:, 1]
+    gt1_metric = depths_metric[:, 0]
+    gt2_metric = depths_metric[:, 1]
 
     pred1 = outputs["depth1"]   # (B, 1, pH, pW)  e.g. (B, 1, 480, 640)
     pred2 = outputs["depth2"]
+    pred1_metric = outputs.get("depth1_metric", pred1)
+    pred2_metric = outputs.get("depth2_metric", pred2)
 
     # Scale GT to predicted resolution for supervised loss
     # pred1.shape[-2:] = (480, 640) → pH=480 (height), pW=640 (width)
     pH, pW = pred1.shape[-2:]
     gt1_s = F.interpolate(gt1, size=(pH, pW), mode="nearest")
     gt2_s = F.interpolate(gt2, size=(pH, pW), mode="nearest")
+    gt1_s_metric = F.interpolate(gt1_metric, size=(pH, pW), mode="nearest")
+    gt2_s_metric = F.interpolate(gt2_metric, size=(pH, pW), mode="nearest")
 
     w = weights
 
@@ -818,7 +825,7 @@ def total_loss(
         K_s[:, 0, 2] = K_for_pix[:, 0, 2] * scale_w
         K_s[:, 1, 2] = K_for_pix[:, 1, 2] * scale_h
         l_pixel = pixel_consistency_loss(
-            pred1, pred2, gt1_s, gt2_s, T_12_pc, K_s
+            pred1_metric, pred2_metric, gt1_s_metric, gt2_s_metric, T_12_pc, K_s
         )
         total = total + float(w.get("pixel_consistency", 0.05)) * l_pixel
         parts["pixel_consistency"] = float(l_pixel.detach())
@@ -853,7 +860,9 @@ def total_loss(
         K_gc[:, 1, 1] = K_gc[:, 1, 1] * scale_h_gc
         K_gc[:, 0, 2] = K_gc[:, 0, 2] * scale_w_gc
         K_gc[:, 1, 2] = K_gc[:, 1, 2] * scale_h_gc
-        l_gc = geometric_consistency_loss(pred1, pred2, gt1_s, gt2_s, T_gc, K_gc)
+        l_gc = geometric_consistency_loss(
+            pred1_metric, pred2_metric, gt1_s_metric, gt2_s_metric, T_gc, K_gc
+        )
         total = total + geo_w * l_gc
         parts["geometric"] = float(l_gc.detach())
 

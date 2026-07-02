@@ -15,6 +15,7 @@ import os
 import random
 import sys
 import time
+import math
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _REPO_ROOT)
@@ -44,6 +45,71 @@ from training.utils import (
 # One epoch
 # ---------------------------------------------------------------------------
 
+def normalize_depth_map(depth: torch.Tensor, params: dict | None) -> torch.Tensor:
+    """Apply optional affine depth normalisation while preserving invalid zeros."""
+    if not params:
+        return depth
+    scale = float(params.get("scale", 1.0))
+    offset = float(params.get("offset", 0.0))
+    if scale == 0.0:
+        raise ValueError("depth_normalization scale must be non-zero")
+    valid = depth > 0
+    depth_n = (depth - offset) / scale
+    return torch.where(valid, depth_n.clamp(min=0.0), depth)
+
+
+def denormalize_depth_map(depth: torch.Tensor, params: dict | None) -> torch.Tensor:
+    """Invert normalize_depth_map for positive predicted depths."""
+    if not params:
+        return depth
+    scale = float(params.get("scale", 1.0))
+    offset = float(params.get("offset", 0.0))
+    return depth * scale + offset
+
+
+def compute_depth_normalization_stats(loader: DataLoader, max_samples: int = 2_000_000) -> dict:
+    """Estimate train-set median/std for MDE and GT valid depth pixels."""
+    samples = {"mde": [], "gt": []}
+    counts = {"mde": 0, "gt": 0}
+    sums = {"mde": 0.0, "gt": 0.0}
+    sq_sums = {"mde": 0.0, "gt": 0.0}
+
+    def _accumulate(name: str, values: torch.Tensor) -> None:
+        values = values[(values > 0) & torch.isfinite(values)].detach().cpu().float().flatten()
+        n = values.numel()
+        if n == 0:
+            return
+        counts[name] += n
+        sums[name] += float(values.sum())
+        sq_sums[name] += float((values * values).sum())
+
+        remaining = max_samples - sum(x.numel() for x in samples[name])
+        if remaining <= 0:
+            return
+        if n > remaining:
+            idx = torch.linspace(0, n - 1, remaining, dtype=torch.long)
+            values = values[idx]
+        samples[name].append(values)
+
+    for batch in loader:
+        _accumulate("mde", batch["mde_depths"])
+        _accumulate("gt", batch["depths"])
+
+    stats = {}
+    for name in ("mde", "gt"):
+        if counts[name] == 0 or not samples[name]:
+            raise RuntimeError(f"No valid {name} depth pixels found for depth normalization")
+        mean = sums[name] / counts[name]
+        var = max(sq_sums[name] / counts[name] - mean * mean, 0.0)
+        std = max(math.sqrt(var), 1e-6)
+        median = float(torch.cat(samples[name]).median())
+        # Keep depth values positive for the current decoders/losses, which
+        # model depth as a positive distance. The std is still recorded as a
+        # train-set statistic, but the active affine transform is depth/median.
+        stats[name] = {"median": median, "std": std, "offset": 0.0, "scale": max(median, 1e-6)}
+    return stats
+
+
 def run_epoch(
     model,
     loader: DataLoader,
@@ -63,6 +129,8 @@ def run_epoch(
     log_every        = int(train_cfg.get("log_every", 50))
     grad_clip        = train_cfg.get("grad_clip")
     grad_accum_steps = int(train_cfg.get("gradient_accumulation_steps", 1))
+    depth_norm_cfg   = cfg.get("depth_normalization", {})
+    normalize_depths = bool(depth_norm_cfg.get("enabled", False))
 
     totals    = {
         "loss": 0.0,
@@ -107,6 +175,14 @@ def run_epoch(
                     "Dataset must supply ZoeDepth predictions separately from GT depths."
                 )
             mde_depths = batch["mde_depths"]   # (B, N, 1, H, W)
+
+            if normalize_depths:
+                batch = dict(batch)
+                batch["depths_metric"] = depths
+                batch["depths"] = normalize_depth_map(depths, depth_norm_cfg.get("gt"))
+                batch["mde_depths"] = normalize_depth_map(mde_depths, depth_norm_cfg.get("mde"))
+                depths = batch["depths"]
+                mde_depths = batch["mde_depths"]
 
             rgb1        = imgs[:, 0]
             rgb2        = imgs[:, 1]
@@ -196,6 +272,11 @@ def run_epoch(
                     for k, v in outputs.items()
                 }
 
+            if normalize_depths:
+                outputs = dict(outputs)
+                outputs["depth1_metric"] = denormalize_depth_map(outputs["depth1"], depth_norm_cfg.get("gt"))
+                outputs["depth2_metric"] = denormalize_depth_map(outputs["depth2"], depth_norm_cfg.get("gt"))
+
             # Compute loss in fp32 (outside autocast) to avoid numerical instability
             loss, breakdown = compute_total_loss(
                 outputs, batch, cfg.get("loss", {}), K_iter,
@@ -246,8 +327,9 @@ def run_epoch(
             totals["geometric"]  += breakdown.get("geometric",  0.0)
 
             if not train:
-                pred1 = outputs["depth1"]                         # (B,1,pH,pW)
-                gt1   = depths[:, 0]                              # (B,1,H,W)
+                pred1 = outputs.get("depth1_metric", outputs["depth1"])  # (B,1,pH,pW)
+                gt_depths_for_metrics = batch.get("depths_metric", depths)
+                gt1   = gt_depths_for_metrics[:, 0]                       # (B,1,H,W)
                 gt1_s = F.interpolate(gt1, size=pred1.shape[-2:], mode="nearest")
                 m = compute_depth_metrics(pred1.detach(), gt1_s)
                 if not any(v != v for v in m.values()):           # skip NaN batches
@@ -362,6 +444,23 @@ def train(cfg: dict, arch_cfg: dict, resume: str | None = None) -> None:
     train_ds = build_dataset(cfg, root_dir=root_dir,      scene_paths=train_paths, augment=augment)
     val_ds   = build_dataset(cfg, root_dir=root_dir,      scene_paths=val_paths)
     test_ds  = build_dataset(cfg, root_dir=test_root_dir, scene_paths=test_paths)
+
+    depth_norm_cfg = cfg.get("depth_normalization", {})
+    if depth_norm_cfg.get("enabled", False):
+        stats_loader = DataLoader(
+            train_ds,
+            batch_size=cfg["loader"]["batch_size"],
+            num_workers=cfg["loader"].get("num_workers", 0),
+            pin_memory=cfg["loader"].get("pin_memory", True),
+            drop_last=False,
+            shuffle=False,
+        )
+        max_samples = int(depth_norm_cfg.get("max_samples", 2_000_000))
+        stats = compute_depth_normalization_stats(stats_loader, max_samples=max_samples)
+        cfg["depth_normalization"] = {**depth_norm_cfg, **stats}
+        print("[train] Depth normalization from train split: "
+              f"MDE median={stats['mde']['median']:.4f} std={stats['mde']['std']:.4f}; "
+              f"GT median={stats['gt']['median']:.4f} std={stats['gt']['std']:.4f}")
 
     train_loader = build_loader(cfg, train_ds, shuffle=True)
     val_loader   = build_loader(cfg, val_ds,   shuffle=False)
