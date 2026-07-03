@@ -28,25 +28,41 @@ The MASt3R ViT was pre-trained on images normalised with ImageNet mean/std.
 Normalisation is applied **inside** ``forward`` so callers can pass raw
 [0, 1]-range RGB tensors (the format already used by the training loop).
 
-Positional embeddings
----------------------
-MASt3R is trained on 512 × 512 images (32 × 32 = 1024 patches).  For other
-resolutions the stored positional embeddings are bicubically interpolated,
-following DINOv2 / MASt3R practice.
+Positional embeddings — RoPE2D, not additive / not learned
+------------------------------------------------------------
+MASt3R / CroCo v2 do **not** use a learned additive positional embedding or
+a CLS token.  Position is injected purely inside attention via axial 2D
+Rotary Position Embedding (``pos_embed='RoPE100'`` in the original CroCo
+config, i.e. rotary base frequency θ=100).  Each attention head's feature
+dimension is split in half: one half is rotated according to the patch's
+row index, the other half according to its column index (see CroCo v2,
+§3.2, "Positional embeddings").  Because RoPE encodes *relative* position
+directly in attention rather than adding an absolute positional tensor to
+the input, it generalises to any input resolution with **no interpolation
+needed** — unlike a learned/interpolated absolute pos_embed.
+
+The ``_RoPE2D`` class below is a direct port of CroCo's own pure-PyTorch
+fallback implementation (``croco/models/pos_embed.py``, used automatically
+when the optional CUDA ``curope`` kernels aren't compiled), so that loaded
+attention weights see the same positional treatment they were trained with.
 
 Checkpoint key structure (MASt3R / CroCo)
 ------------------------------------------
-The weight loader expects:
-  encoder.patch_embed.proj.weight / bias
-  encoder.cls_token
-  encoder.pos_embed
-  encoder.blocks.{i}.norm1.weight / bias
-  encoder.blocks.{i}.attn.qkv.weight / bias
-  encoder.blocks.{i}.attn.proj.weight / bias
-  encoder.blocks.{i}.norm2.weight / bias
-  encoder.blocks.{i}.mlp.fc1.weight / bias
-  encoder.blocks.{i}.mlp.fc2.weight / bias
-  enc_norm.weight / bias          ← stored at the checkpoint root, not under encoder.*
+The weight loader expects the *actual* CroCo/MASt3R checkpoint layout
+(verified against a real MASt3R_ViTLarge_BaseDecoder checkpoint):
+  patch_embed.proj.weight / bias
+  enc_blocks.{i}.norm1.weight / bias
+  enc_blocks.{i}.attn.qkv.weight / bias
+  enc_blocks.{i}.attn.proj.weight / bias
+  enc_blocks.{i}.norm2.weight / bias
+  enc_blocks.{i}.mlp.fc1.weight / bias
+  enc_blocks.{i}.mlp.fc2.weight / bias
+  enc_norm.weight / bias          ← stored at the checkpoint root
+
+Note: there is no ``encoder.`` prefix, no ``cls_token``, and no
+``pos_embed`` tensor in these checkpoints — those were incorrect
+assumptions in an earlier version of this loader based on generic ViT
+checkpoint conventions rather than the actual CroCo/MASt3R format.
 """
 
 import math
@@ -61,14 +77,70 @@ _IMAGENET_STD  = torch.tensor([0.229, 0.224, 0.225])
 
 
 # ---------------------------------------------------------------------------
+# RoPE2D — axial 2D rotary position embedding.
+#
+# Direct port of CroCo's pure-PyTorch fallback (croco/models/pos_embed.py,
+# class RoPE2D, the branch used when the optional CUDA curope kernels are
+# not compiled). Kept numerically identical to that reference so weights
+# trained with it behave the same way here.
+# ---------------------------------------------------------------------------
+
+class _RoPE2D(nn.Module):
+    """Axial 2D RoPE, base frequency `freq` (100.0 for MASt3R's RoPE100)."""
+
+    def __init__(self, freq: float = 100.0, F0: float = 1.0):
+        super().__init__()
+        self.base = freq
+        self.F0 = F0
+        self.cache = {}
+
+    def get_cos_sin(self, D: int, seq_len: int, device, dtype):
+        if (D, seq_len, device, dtype) not in self.cache:
+            inv_freq = 1.0 / (self.base ** (torch.arange(0, D, 2, device=device).float() / D))
+            t = torch.arange(seq_len, device=device, dtype=inv_freq.dtype)
+            freqs = torch.einsum("i,j->ij", t, inv_freq).to(dtype)
+            freqs = torch.cat((freqs, freqs), dim=-1)
+            cos = freqs.cos()  # (Seq, D)
+            sin = freqs.sin()
+            self.cache[D, seq_len, device, dtype] = (cos, sin)
+        return self.cache[D, seq_len, device, dtype]
+
+    @staticmethod
+    def rotate_half(x: torch.Tensor) -> torch.Tensor:
+        x1, x2 = x[..., : x.shape[-1] // 2], x[..., x.shape[-1] // 2:]
+        return torch.cat((-x2, x1), dim=-1)
+
+    def apply_rope1d(self, tokens: torch.Tensor, pos1d: torch.Tensor, cos, sin) -> torch.Tensor:
+        assert pos1d.ndim == 2
+        cos = F.embedding(pos1d, cos)[:, None, :, :]
+        sin = F.embedding(pos1d, sin)[:, None, :, :]
+        return (tokens * cos) + (self.rotate_half(tokens) * sin)
+
+    def forward(self, tokens: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
+        """
+        tokens    : (B, nheads, ntokens, head_dim)
+        positions : (B, ntokens, 2)   — (row, col) grid position per token
+        """
+        assert tokens.size(3) % 2 == 0, "head_dim must be even for RoPE2D"
+        D = tokens.size(3) // 2
+        assert positions.ndim == 3 and positions.shape[-1] == 2
+        cos, sin = self.get_cos_sin(D, int(positions.max()) + 1, tokens.device, tokens.dtype)
+        # Split the head dim in half: rotate one half by row, the other by column.
+        y, x = tokens.chunk(2, dim=-1)
+        y = self.apply_rope1d(y, positions[:, :, 0], cos, sin)
+        x = self.apply_rope1d(x, positions[:, :, 1], cos, sin)
+        return torch.cat((y, x), dim=-1)
+
+
+# ---------------------------------------------------------------------------
 # ViT building blocks  (key names match MASt3R / CroCo checkpoint exactly)
 # ---------------------------------------------------------------------------
 
 class _ViTAttention(nn.Module):
-    """Standard multi-head self-attention.
+    """Multi-head self-attention with RoPE2D applied to q/k.
     Checkpoint keys: attn.qkv.{weight,bias}, attn.proj.{weight,bias}"""
 
-    def __init__(self, dim: int, num_heads: int):
+    def __init__(self, dim: int, num_heads: int, rope: _RoPE2D):
         super().__init__()
         assert dim % num_heads == 0
         self.num_heads = num_heads
@@ -76,12 +148,15 @@ class _ViTAttention(nn.Module):
         self.scale     = self.head_dim ** -0.5
         self.qkv  = nn.Linear(dim, dim * 3, bias=True)
         self.proj = nn.Linear(dim, dim,     bias=True)
+        self.rope = rope
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
         B, N, C = x.shape
         qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, self.head_dim)
         qkv = qkv.permute(2, 0, 3, 1, 4)
-        q, k, v = qkv.unbind(0)
+        q, k, v = qkv.unbind(0)               # each (B, num_heads, N, head_dim)
+        q = self.rope(q, positions)
+        k = self.rope(k, positions)
         out = F.scaled_dot_product_attention(q, k, v, scale=self.scale)
         return self.proj(out.transpose(1, 2).reshape(B, N, C))
 
@@ -101,24 +176,24 @@ class _ViTMlp(nn.Module):
 
 
 class _ViTBlock(nn.Module):
-    """Standard pre-norm ViT block: self-attn + MLP with residuals.
+    """Pre-norm ViT block: RoPE self-attn + MLP with residuals.
     Checkpoint keys: norm1.*, attn.*, norm2.*, mlp.*"""
 
-    def __init__(self, dim: int, num_heads: int, mlp_ratio: float = 4.0):
+    def __init__(self, dim: int, num_heads: int, rope: _RoPE2D, mlp_ratio: float = 4.0):
         super().__init__()
         self.norm1 = nn.LayerNorm(dim)
-        self.attn  = _ViTAttention(dim, num_heads)
+        self.attn  = _ViTAttention(dim, num_heads, rope)
         self.norm2 = nn.LayerNorm(dim)
         self.mlp   = _ViTMlp(dim, mlp_ratio)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = x + self.attn(self.norm1(x))
+    def forward(self, x: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
+        x = x + self.attn(self.norm1(x), positions)
         x = x + self.mlp(self.norm2(x))
         return x
 
 
 # ---------------------------------------------------------------------------
-# Patch embedding  (matches MASt3R key: encoder.patch_embed.proj.*)
+# Patch embedding  (matches MASt3R key: patch_embed.proj.*)
 # ---------------------------------------------------------------------------
 
 class _PatchEmbed(nn.Module):
@@ -154,14 +229,11 @@ class MASt3RImageEncoder(nn.Module):
     num_heads    : int    Attention heads (16 for ViT-Large).
     mlp_ratio    : float  MLP width ratio.
     max_hw       : tuple  (H, W) resolution cap — must match depth encoder cap.
+    rope_freq    : float  RoPE base frequency (100.0 for MASt3R's 'RoPE100').
     mast3r_ckpt  : str|None  Path to MASt3R .pth checkpoint (None → random init).
     freeze       : bool   Freeze backbone after loading (default True).
                           The output projection (proj) is always trainable.
     """
-
-    # MASt3R default training resolution for stored positional embeddings.
-    _TRAIN_H: int = 512
-    _TRAIN_W: int = 512
 
     def __init__(
         self,
@@ -172,6 +244,7 @@ class MASt3RImageEncoder(nn.Module):
         num_heads:   int        = 16,
         mlp_ratio:   float      = 4.0,
         max_hw:      tuple | None = (480, 640),
+        rope_freq:   float      = 100.0,
         mast3r_ckpt: str | None = None,
         freeze:      bool       = True,
     ):
@@ -182,22 +255,16 @@ class MASt3RImageEncoder(nn.Module):
         self.max_hw     = max_hw
 
         # ── Patch embedding ───────────────────────────────────────────────
-        # Checkpoint key prefix: encoder.patch_embed.*
+        # Checkpoint key prefix: patch_embed.*  (no "encoder." prefix)
         self.patch_embed = _PatchEmbed(3, embed_dim, patch_size)
 
-        # ── CLS token ─────────────────────────────────────────────────────
-        # Checkpoint key: encoder.cls_token
-        self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
-
-        # ── Positional embedding (train resolution: 512×512 = 32×32 patches) ──
-        # Checkpoint key: encoder.pos_embed  shape (1, 1 + 1024, 1024)
-        n_train = (self._TRAIN_H // patch_size) * (self._TRAIN_W // patch_size)
-        self.pos_embed = nn.Parameter(torch.zeros(1, 1 + n_train, embed_dim))
+        # ── RoPE2D (no learnable parameters; shared across all blocks) ────
+        self.rope = _RoPE2D(freq=rope_freq)
 
         # ── Transformer blocks ────────────────────────────────────────────
-        # Checkpoint keys: encoder.blocks.{i}.*
+        # Checkpoint keys: enc_blocks.{i}.*  → remapped to blocks.{i}.*
         self.blocks = nn.ModuleList([
-            _ViTBlock(embed_dim, num_heads, mlp_ratio)
+            _ViTBlock(embed_dim, num_heads, self.rope, mlp_ratio)
             for _ in range(depth)
         ])
 
@@ -235,12 +302,15 @@ class MASt3RImageEncoder(nn.Module):
         """
         Load encoder weights from a MASt3R or CroCo checkpoint.
 
-        Expected key layout in the checkpoint's 'model' dict:
-          encoder.patch_embed.proj.*
-          encoder.cls_token
-          encoder.pos_embed
-          encoder.blocks.{i}.*
-          enc_norm.*   ← mapped to self.norm.*
+        Expected key layout in the checkpoint's 'model' dict (verified
+        against an actual MASt3R_ViTLarge_BaseDecoder checkpoint):
+          patch_embed.proj.*
+          enc_blocks.{i}.*     → mapped to self.blocks.{i}.*
+          enc_norm.*           → mapped to self.norm.*
+
+        There is no cls_token / pos_embed in these checkpoints (position
+        is handled by RoPE2D, which has no learnable parameters), and no
+        "encoder." prefix on any key.
 
         The output projection (self.proj) is NOT present in the checkpoint;
         it stays at zero-init after loading.
@@ -252,13 +322,18 @@ class MASt3RImageEncoder(nn.Module):
         # Build a remapped state-dict matching our module's parameter names.
         remapped: dict = {}
         for k, v in state.items():
-            if k.startswith("encoder."):
-                remapped[k[len("encoder."):]] = v       # strip "encoder." prefix
+            if k.startswith("enc_blocks."):
+                remapped["blocks." + k[len("enc_blocks."):]] = v
             elif k.startswith("enc_norm."):
-                remapped["norm." + k[len("enc_norm."):]] = v   # enc_norm → norm
+                remapped["norm." + k[len("enc_norm."):]] = v
+            elif k.startswith("patch_embed."):
+                remapped[k] = v
+            # Everything else (dec_blocks.*, decoder_embed.*, dec_norm.*,
+            # downstream_head*.*, mask_token, ...) belongs to the decoder /
+            # prediction heads and is intentionally not loaded here.
 
         if not remapped:
-            print("  [warn] No encoder.* / enc_norm.* keys found — skipping.")
+            print("  [warn] No matching encoder keys found — skipping.")
             return
 
         result = self.load_state_dict(remapped, strict=False)
@@ -271,7 +346,7 @@ class MASt3RImageEncoder(nn.Module):
         if result.unexpected_keys:
             print(f"  [warn] Unexpected keys: {sorted(result.unexpected_keys)[:10]}")
 
-        loaded = len(remapped) - len(result.missing_keys) - len(result.unexpected_keys)
+        loaded = len(remapped) - len(other_missing) - len(result.unexpected_keys)
         print(f"[MASt3RImageEncoder] Loaded {loaded} parameter tensors.")
 
     # ------------------------------------------------------------------
@@ -291,38 +366,12 @@ class MASt3RImageEncoder(nn.Module):
         nw = int(W * scale)
         return F.interpolate(img, size=(nh, nw), mode="bilinear", align_corners=False)
 
-    def _interpolate_pos_embed(self, h: int, w: int) -> torch.Tensor:
-        """
-        Bicubically interpolate positional embeddings to patch grid (h, w).
-
-        The stored pos_embed was created for the MASt3R training resolution
-        (512×512 → 32×32 patches).  For other resolutions we follow the
-        DINOv2 / MASt3R practice of bicubic interpolation on the spatial
-        grid, keeping the CLS token position fixed.
-        """
-        pos      = self.pos_embed                        # (1, 1+N_train, D)
-        cls_pos  = pos[:, :1]                            # (1, 1, D)
-        grid_pos = pos[:, 1:]                            # (1, N_train, D)
-
-        h_train = self._TRAIN_H // self.patch_size       # 32
-        w_train = self._TRAIN_W // self.patch_size       # 32
-
-        if h == h_train and w == w_train:
-            return pos                                   # fast-path: no interpolation
-
-        D = grid_pos.shape[-1]
-        grid_pos = (
-            grid_pos
-            .reshape(1, h_train, w_train, D)
-            .permute(0, 3, 1, 2)                         # (1, D, h_train, w_train)
-            .float()
-        )
-        grid_pos = F.interpolate(
-            grid_pos, size=(h, w), mode="bicubic", align_corners=False
-        ).to(pos.dtype)
-        grid_pos = grid_pos.permute(0, 2, 3, 1).reshape(1, h * w, D)
-
-        return torch.cat([cls_pos, grid_pos], dim=1)     # (1, 1+h*w, D)
+    def _grid_positions(self, h: int, w: int, device) -> torch.Tensor:
+        """(row, col) grid position for each of the h*w patch tokens, in the
+        same row-major order produced by _PatchEmbed (flatten of H,W)."""
+        rows = torch.arange(h, device=device).repeat_interleave(w)
+        cols = torch.arange(w, device=device).repeat(h)
+        return torch.stack([rows, cols], dim=1)  # (h*w, 2)
 
     # ------------------------------------------------------------------
     # Forward
@@ -338,8 +387,8 @@ class MASt3RImageEncoder(nn.Module):
         -------
         tokens : (B, h*w, token_dim)
                  h = H_capped // patch_size,  w = W_capped // patch_size.
-                 CLS token is discarded.  Projected to token_dim via the
-                 zero-initialised self.proj layer.
+                 No CLS token (CroCo/MASt3R encoders don't have one).
+                 Projected to token_dim via the zero-initialised self.proj.
         """
         img = self._cap_resolution(img)
 
@@ -350,18 +399,16 @@ class MASt3RImageEncoder(nn.Module):
         h = H // self.patch_size
         w = W // self.patch_size
 
-        # Patch embed + CLS prepend + positional encoding
-        x   = self.patch_embed(img)                       # (B, h*w, embed_dim)
-        B   = x.shape[0]
-        cls = self.cls_token.expand(B, -1, -1)            # (B, 1, embed_dim)
-        x   = torch.cat([cls, x], dim=1)                  # (B, 1+h*w, embed_dim)
-        x   = x + self._interpolate_pos_embed(h, w)
+        # Patch embed — no CLS token, no additive positional embedding.
+        x = self.patch_embed(img)                          # (B, h*w, embed_dim)
+        B = x.shape[0]
+        positions = self._grid_positions(h, w, x.device)   # (h*w, 2)
+        positions = positions.unsqueeze(0).expand(B, -1, -1)  # (B, h*w, 2)
 
-        # Transformer blocks (frozen backbone)
+        # Transformer blocks (frozen backbone), position injected via RoPE2D.
         for block in self.blocks:
-            x = block(x)
+            x = block(x, positions)
         x = self.norm(x)
 
-        # Drop CLS token, project to token_dim
-        x = x[:, 1:]          # (B, h*w, embed_dim)
+        # Project to token_dim (no CLS token to drop — all h*w tokens are real).
         return self.proj(x)   # (B, h*w, token_dim)
