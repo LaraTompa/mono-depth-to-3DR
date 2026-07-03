@@ -47,6 +47,28 @@ from metrics.depth_consistency import depth_metrics
 from metrics.photometric_consistency import compute_photometric
 
 
+def normalize_depth_map(depth: torch.Tensor, params: dict | None) -> torch.Tensor:
+    """Apply affine depth normalization while preserving invalid zeros."""
+    if not params:
+        return depth
+    scale = float(params.get("scale", 1.0))
+    offset = float(params.get("offset", 0.0))
+    if scale == 0.0:
+        raise ValueError("depth_normalization scale must be non-zero")
+    valid = depth > 0
+    depth_n = (depth - offset) / scale
+    return torch.where(valid, depth_n.clamp(min=0.0), depth)
+
+
+def denormalize_depth_map(depth: torch.Tensor, params: dict | None) -> torch.Tensor:
+    """Invert normalize_depth_map for positive predicted depths."""
+    if not params:
+        return depth
+    scale = float(params.get("scale", 1.0))
+    offset = float(params.get("offset", 0.0))
+    return depth * scale + offset
+
+
 # ─── Save outputs ───────────────────────────────────────────────────────────
 
 def save_depth(depth, path):
@@ -248,7 +270,16 @@ def main(args):
     # This prevents OOM when the saved state dict is large.
     ckpt = torch.load(args.checkpoint, map_location="cpu")  
     cfg = ckpt.get("cfg", {})
+    depth_norm_cfg = cfg.get("depth_normalization", {})
+    normalize_depths = bool(depth_norm_cfg.get("enabled", False))
     print(f"[eval] Loaded checkpoint from epoch {ckpt.get('epoch', '?')}")
+    print(f"[eval] depth_normalization.enabled={normalize_depths}")
+    if normalize_depths:
+        mde_cfg = depth_norm_cfg.get("mde", {})
+        gt_cfg = depth_norm_cfg.get("gt", {})
+        print("[eval] depth normalization params: "
+              f"mde(scale={float(mde_cfg.get('scale', 1.0)):.6f}, offset={float(mde_cfg.get('offset', 0.0)):.6f}), "
+              f"gt(scale={float(gt_cfg.get('scale', 1.0)):.6f}, offset={float(gt_cfg.get('offset', 0.0)):.6f})")
 
     # ── Build model ──────────────────────────────────────────────────────────
     # Extract config with fallbacks for new vs old checkpoint formats
@@ -347,11 +378,13 @@ def main(args):
     if pred_depth2_np.shape != (H, W):
         pred_depth2_np = cv2.resize(pred_depth2_np, (W, H), interpolation=cv2.INTER_NEAREST)
 
-    # MDE sources (DepthPro / ZoeDepth) are metric estimators — pass raw metric
-    # depths directly.  No normalisation needed; the decoder uses them as a
-    # metric prior and geometric consistency operates in metric space.
+    # Keep metric monocular priors for monocular baseline metrics/outputs.
+    # For model input, optionally apply the same normalization used in training.
     depth_mono1 = torch.from_numpy(pred_depth1_np).unsqueeze(0).unsqueeze(0).to(device)  # (1,1,H,W) metres
     depth_mono2 = torch.from_numpy(pred_depth2_np).unsqueeze(0).unsqueeze(0).to(device)
+    if normalize_depths:
+        depth_mono1 = normalize_depth_map(depth_mono1, depth_norm_cfg.get("mde"))
+        depth_mono2 = normalize_depth_map(depth_mono2, depth_norm_cfg.get("mde"))
 
     # ── Intrinsics and poses ─────────────────────────────────────────────────
     if args.intrinsics:
@@ -428,8 +461,13 @@ def main(args):
                     else:
                         print(f"[eval] iter {pose_it}: non-finite K/T pred, keeping previous.")
 
-    pred1_out = outputs["depth1"].squeeze().cpu().numpy()   # (pH, pW) metres
-    pred2_out = outputs["depth2"].squeeze().cpu().numpy()
+    pred1_out_t = outputs["depth1"]
+    pred2_out_t = outputs["depth2"]
+    if normalize_depths:
+        pred1_out_t = denormalize_depth_map(pred1_out_t, depth_norm_cfg.get("gt"))
+        pred2_out_t = denormalize_depth_map(pred2_out_t, depth_norm_cfg.get("gt"))
+    pred1_out = pred1_out_t.squeeze().cpu().numpy()   # (pH, pW) metres
+    pred2_out = pred2_out_t.squeeze().cpu().numpy()
     print(f"[eval] Output depth range view1: "
           f"{pred1_out[pred1_out > 0].min():.3f} – {pred1_out.max():.3f} m")
     print(f"[eval] Output depth range view2: "

@@ -56,6 +56,28 @@ from metrics.photometric_consistency import compute_photometric
 
 EPS = 1e-6
 
+
+def normalize_depth_map(depth: torch.Tensor, params: dict | None) -> torch.Tensor:
+    """Apply affine depth normalization while preserving invalid zeros."""
+    if not params:
+        return depth
+    scale = float(params.get("scale", 1.0))
+    offset = float(params.get("offset", 0.0))
+    if scale == 0.0:
+        raise ValueError("depth_normalization scale must be non-zero")
+    valid = depth > 0
+    depth_n = (depth - offset) / scale
+    return torch.where(valid, depth_n.clamp(min=0.0), depth)
+
+
+def denormalize_depth_map(depth: torch.Tensor, params: dict | None) -> torch.Tensor:
+    """Invert normalize_depth_map for positive predicted depths."""
+    if not params:
+        return depth
+    scale = float(params.get("scale", 1.0))
+    offset = float(params.get("offset", 0.0))
+    return depth * scale + offset
+
 # ─── Dataset helpers ─────────────────────────────────────────────────────────
 
 def find_scenes(data_dir, max_batches=None):
@@ -341,6 +363,15 @@ def main(args):
     ckpt = torch.load(args.checkpoint, map_location="cpu")
     print(f"[eval] Loaded checkpoint (epoch {ckpt.get('epoch', '?')})")
     cfg = ckpt.get("cfg", {})
+    depth_norm_cfg = cfg.get("depth_normalization", {})
+    normalize_depths = bool(depth_norm_cfg.get("enabled", False))
+    print(f"[eval] depth_normalization.enabled={normalize_depths}")
+    if normalize_depths:
+        mde_cfg = depth_norm_cfg.get("mde", {})
+        gt_cfg = depth_norm_cfg.get("gt", {})
+        print("[eval] depth normalization params: "
+              f"mde(scale={float(mde_cfg.get('scale', 1.0)):.6f}, offset={float(mde_cfg.get('offset', 0.0)):.6f}), "
+              f"gt(scale={float(gt_cfg.get('scale', 1.0)):.6f}, offset={float(gt_cfg.get('offset', 0.0)):.6f})")
     model, model_variant, arch_cfg = build_model(ckpt, device)
     print(f"[eval] Model variant: {model_variant}")
 
@@ -471,6 +502,9 @@ def main(args):
                             .unsqueeze(0).unsqueeze(0).to(device))
                 depth2_t = (torch.from_numpy(pred_mono2)
                             .unsqueeze(0).unsqueeze(0).to(device))
+                if normalize_depths:
+                    depth1_t = normalize_depth_map(depth1_t, depth_norm_cfg.get("mde"))
+                    depth2_t = normalize_depth_map(depth2_t, depth_norm_cfg.get("mde"))
                 K_t = torch.from_numpy(K_np).unsqueeze(0).to(device)
                 T_12_t = torch.from_numpy(T_12_init_np.astype(np.float32)).unsqueeze(0).to(device)
 
@@ -481,8 +515,13 @@ def main(args):
                     K_t, T_12_t, device,
                 )
 
-                pred1_out = outputs["depth1"].squeeze().cpu().numpy()
-                pred2_out = outputs["depth2"].squeeze().cpu().numpy()
+                pred1_out_t = outputs["depth1"]
+                pred2_out_t = outputs["depth2"]
+                if normalize_depths:
+                    pred1_out_t = denormalize_depth_map(pred1_out_t, depth_norm_cfg.get("gt"))
+                    pred2_out_t = denormalize_depth_map(pred2_out_t, depth_norm_cfg.get("gt"))
+                pred1_out = pred1_out_t.squeeze().cpu().numpy()
+                pred2_out = pred2_out_t.squeeze().cpu().numpy()
 
                 # Resize to image resolution
                 pred1_full = cv2.resize(pred1_out, (W, H), interpolation=cv2.INTER_LINEAR)
