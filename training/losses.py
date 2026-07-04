@@ -708,6 +708,7 @@ def total_loss(
     use_confidence: bool = True,      # False during warmup — disables heteroscedastic weighting
     camera_weight:  float | None = None,  # override cfg camera weight (for ramp)
     epoch:          int = 0,          # current epoch — controls Lgc activation
+    depth_norm_scale: float | None = None,  # GT depth scale when training on normalized depths
 ) -> tuple[torch.Tensor, dict]:
     """
     Compute the weighted total training loss.
@@ -760,16 +761,27 @@ def total_loss(
     gt2_s_metric = F.interpolate(gt2_metric, size=(pH, pW), mode="nearest")
 
     w = weights
+    depth_min = 1e-3
+    depth_max = 80.0
+    if depth_norm_scale is not None:
+        if depth_norm_scale <= 0.0:
+            raise ValueError("depth_norm_scale must be positive when provided")
+        depth_min = depth_min / depth_norm_scale
+        depth_max = depth_max / depth_norm_scale
+    depth_w = float(w.get("depth", 1.0))
+    depth_mse_w = float(w.get("depth_mse", 0.1))
+    smooth_w = float(w.get("smooth", 0.05))
+    iter_w = float(w.get("iter_supervision", 0.5))
 
     # --- Supervised depth ---
     l_depth = (
-        si_log_loss(pred1, gt1_s) +
-        si_log_loss(pred2, gt2_s)
+        si_log_loss(pred1, gt1_s, min_depth=depth_min, max_depth=depth_max) +
+        si_log_loss(pred2, gt2_s, min_depth=depth_min, max_depth=depth_max)
     ) * 0.5
 
     l_depth_mse = (
-        mse_depth_loss(pred1, gt1_s) +
-        mse_depth_loss(pred2, gt2_s)
+        mse_depth_loss(pred1, gt1_s, min_depth=depth_min, max_depth=depth_max) +
+        mse_depth_loss(pred2, gt2_s, min_depth=depth_min, max_depth=depth_max)
     ) * 0.5
 
     # --- Smoothness (RGB edge-weighted) — skipped when images are absent ---
@@ -788,15 +800,15 @@ def total_loss(
     l_iters = pred1.new_tensor(0.0)
     if "depth1_iters" in outputs and "depth2_iters" in outputs:
         l_iters = (
-            iter_supervision_loss(outputs["depth1_iters"], gt1) +
-            iter_supervision_loss(outputs["depth2_iters"], gt2)
+            iter_supervision_loss(outputs["depth1_iters"], gt1, min_depth=depth_min, max_depth=depth_max) +
+            iter_supervision_loss(outputs["depth2_iters"], gt2, min_depth=depth_min, max_depth=depth_max)
         ) * 0.5
 
     total = (
-        float(w.get("depth",            1.0)) * l_depth  +
-        float(w.get("depth_mse",        0.1)) * l_depth_mse +
-        float(w.get("smooth",           0.05)) * l_smooth +
-        float(w.get("iter_supervision", 0.5)) * l_iters
+        depth_w * l_depth  +
+        depth_mse_w * l_depth_mse +
+        smooth_w * l_smooth +
+        iter_w * l_iters
     )
 
     parts = {
@@ -804,6 +816,9 @@ def total_loss(
         "depth_mse": float(l_depth_mse.detach()),
         "smooth":    float(l_smooth.detach()),
         "iters":     float(l_iters.detach()),
+        "depth_weighted": float((depth_w * l_depth).detach()),
+        "depth_mse_weighted": float((depth_mse_w * l_depth_mse).detach()),
+        "depth_effective": float((depth_w * l_depth + depth_mse_w * l_depth_mse).detach()),
     }
 
     # --- Pixel consistency (multiview reprojection) ---
@@ -827,8 +842,10 @@ def total_loss(
         l_pixel = pixel_consistency_loss(
             pred1_metric, pred2_metric, gt1_s_metric, gt2_s_metric, T_12_pc, K_s
         )
-        total = total + float(w.get("pixel_consistency", 0.05)) * l_pixel
+        pixel_w = float(w.get("pixel_consistency", 0.05))
+        total = total + pixel_w * l_pixel
         parts["pixel_consistency"] = float(l_pixel.detach())
+        parts["pixel_consistency_weighted"] = float((pixel_w * l_pixel).detach())
 
     # --- Geometric consistency loss  Lgc  (ViSTA-SLAM) ---
     # Activated only after geometric_warmup_epochs (default 30) so that
@@ -865,6 +882,7 @@ def total_loss(
         )
         total = total + geo_w * l_gc
         parts["geometric"] = float(l_gc.detach())
+        parts["geometric_weighted"] = float((geo_w * l_gc).detach())
 
     # --- Camera pose / intrinsics losses ---
     if "poses" in batch and "T_12_pred" in outputs:

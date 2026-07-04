@@ -53,9 +53,14 @@ def normalize_depth_map(depth: torch.Tensor, params: dict | None) -> torch.Tenso
     offset = float(params.get("offset", 0.0))
     if scale == 0.0:
         raise ValueError("depth_normalization scale must be non-zero")
+    if offset != 0.0:
+        raise ValueError(
+            "depth_normalization offset must stay at 0.0: valid depths below a positive offset "
+            "would otherwise collide with the invalid-zero sentinel"
+        )
     valid = depth > 0
     depth_n = (depth - offset) / scale
-    return torch.where(valid, depth_n.clamp(min=0.0), depth)
+    return torch.where(valid, depth_n, depth)
 
 
 def denormalize_depth_map(depth: torch.Tensor, params: dict | None) -> torch.Tensor:
@@ -106,6 +111,9 @@ def compute_depth_normalization_stats(loader: DataLoader, max_samples: int = 2_0
         # Keep depth values positive for the current decoders/losses, which
         # model depth as a positive distance. The std is still recorded as a
         # train-set statistic, but the active affine transform is depth/median.
+        # Re-tune depth loss weights after enabling this: SI-log changes modestly,
+        # but MSE scales as 1 / scale^2 while pixel/geometric losses still run on
+        # metric depths via depth1_metric/depth2_metric.
         stats[name] = {"median": median, "std": std, "offset": 0.0, "scale": max(median, 1e-6)}
     return stats
 
@@ -278,12 +286,26 @@ def run_epoch(
                 outputs["depth2_metric"] = denormalize_depth_map(outputs["depth2"], depth_norm_cfg.get("gt"))
 
             # Compute loss in fp32 (outside autocast) to avoid numerical instability
+            depth_norm_scale = None
+            if normalize_depths:
+                depth_norm_scale = float(depth_norm_cfg.get("gt", {}).get("scale", 1.0))
+
             loss, breakdown = compute_total_loss(
                 outputs, batch, cfg.get("loss", {}), K_iter,
                 use_confidence=use_confidence,
                 camera_weight=camera_weight,
                 epoch=epoch,
+                depth_norm_scale=depth_norm_scale,
             )
+
+            if train and step < int(train_cfg.get("depth_loss_debug_steps", 3)):
+                print(
+                    f"[loss-scale] epoch={epoch:03d} step={step+1:04d} "
+                    f"depth_eff={breakdown.get('depth_effective', 0.0):.6f} "
+                    f"(si={breakdown.get('depth_weighted', 0.0):.6f} mse={breakdown.get('depth_mse_weighted', 0.0):.6f}) "
+                    f"pix_eff={breakdown.get('pixel_consistency_weighted', 0.0):.6f} "
+                    f"gc_eff={breakdown.get('geometric_weighted', 0.0):.6f}"
+                )
 
             # ── Loss spike / NaN guard ────────────────────────────────────
             spike_thresh = float(train_cfg.get("loss_spike_threshold", 50.0))
