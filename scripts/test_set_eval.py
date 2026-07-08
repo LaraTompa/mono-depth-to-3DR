@@ -514,11 +514,16 @@ def main(args):
                     K_t, T_12_t, device,
                 )
 
-                pred1_out_t = outputs["depth1"]
-                pred2_out_t = outputs["depth2"]
-                if normalize_depths:
-                    pred1_out_t = denormalize_depth_map(pred1_out_t, depth_norm_cfg.get("gt"))
-                    pred2_out_t = denormalize_depth_map(pred2_out_t, depth_norm_cfg.get("gt"))
+                # depth_only outputs point1/point2 (XYZ maps); derive depth from Z-channel.
+                if "point1" in outputs:
+                    pred1_out_t = outputs["point1"][:, 2:3].clamp(min=0)  # (B,1,pH,pW)
+                    pred2_out_t = outputs["point2"][:, 2:3].clamp(min=0)
+                else:
+                    pred1_out_t = outputs["depth1"]
+                    pred2_out_t = outputs["depth2"]
+                    if normalize_depths:
+                        pred1_out_t = denormalize_depth_map(pred1_out_t, depth_norm_cfg.get("gt"))
+                        pred2_out_t = denormalize_depth_map(pred2_out_t, depth_norm_cfg.get("gt"))
                 pred1_out = pred1_out_t.squeeze().cpu().numpy()
                 pred2_out = pred2_out_t.squeeze().cpu().numpy()
 

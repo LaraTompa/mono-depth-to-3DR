@@ -66,13 +66,17 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from models.model_image_depth.geometry import se3_inv
+from models.model_image_depth.geometry import se3_inv, transform_pts
 
 from .encoder          import DepthEncoder
 from .image_encoder    import MASt3RImageEncoder
 from .cross_attention  import CrossAttentionDecoder, _mast3r_init, _vec9_to_se3, _se3_inv
 from .decoder          import DepthDecoder
 from .pose_refinement  import PoseRefinementModule
+
+# Reuse k_inv + se3_inv from losses.py so the unprojection convention
+# here and in point_map_loss() can never drift out of sync.
+from training.losses import k_inv as _k_inv
 
 
 
@@ -277,6 +281,36 @@ class DepthOnlyNet(nn.Module):
     # Internal helpers
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _unproject(depth: torch.Tensor, K: torch.Tensor) -> torch.Tensor:
+        """
+        Unproject depth map to a 3D point map in the camera frame.
+
+        Uses the same k_inv() helper as training/losses.py so that the
+        point-prior construction here and the GT point-map construction
+        in point_map_loss() share an identical convention.
+
+        depth : (B, 1, H, W)  depth in metres
+        K     : (B, 3, 3)     camera intrinsics (at depth resolution)
+        Returns (B, 3, H, W)  metric XYZ point map
+        """
+        B, _, H, W = depth.shape
+        K_inv = _k_inv(K)  # (B, 3, 3)  analytical, same as losses.k_inv
+
+        ys = torch.arange(H, device=depth.device, dtype=depth.dtype)
+        xs = torch.arange(W, device=depth.device, dtype=depth.dtype)
+        gy, gx = torch.meshgrid(ys, xs, indexing="ij")   # (H, W)
+        N = H * W
+        xy1 = torch.stack(
+            [gx.flatten(), gy.flatten(),
+             torch.ones(N, device=depth.device, dtype=depth.dtype)], dim=0
+        )                                                  # (3, N)
+        xy1 = xy1.unsqueeze(0).expand(B, -1, -1)          # (B, 3, N)
+
+        d_flat = depth.reshape(B, 1, N)
+        xyz = torch.bmm(K_inv, xy1) * d_flat              # (B, 3, N)
+        return xyz.reshape(B, 3, H, W)
+
     def _cap_resolution(self, d: torch.Tensor) -> torch.Tensor:
         """Resize d to at most max_encode_hw (preserving aspect ratio) if set."""
         if self.max_encode_hw is None:
@@ -322,19 +356,18 @@ class DepthOnlyNet(nn.Module):
                          640×480).
         T_12           : (B, 4, 4)  Relative pose.  Required when
                          use_pose_token=True.
-        K              : (B, 3, 3)  Intrinsics.  Required for pose refinement.
+        K              : (B, 3, 3)  Intrinsics.  Required for point-prior
+                         construction and for pose refinement.
         rgb1, rgb2     : (B, 3, H, W)  RGB images in [0, 1] range.  Required
                          when use_image_encoder=True; ignored otherwise.
 
         Returns
         -------
         {
-          "depth1"      : (B, 1, 480, 640),
-          "depth2"      : (B, 1, 480, 640),
+          "point1"      : (B, 3, 480, 640),  # XYZ in view-1 camera frame
+          "point2"      : (B, 3, 480, 640),  # XYZ in view-1 camera frame
           "confidence1" : (B, 1, 480, 640),
           "confidence2" : (B, 1, 480, 640),
-          "log_scale1"  : (B, 1, 480, 640),
-          "log_scale2"  : (B, 1, 480, 640),
         }
         """
         # ── 1. Cap input resolution to bound s16 token count ─────────────────
@@ -413,11 +446,35 @@ class DepthOnlyNet(nn.Module):
         t1_out, t2_out, cam_tok1, cam_tok2 = self.cross_attn(t1, t2, T_12=T_12)
         # t1_out, t2_out : (B, N, token_dim)
 
-        # ── 5. Decode both views ─────────────────────────────────────────
-        # depth_input is the *original* (un-capped, un-normalised) depth so
-        # the residual head corrects in metric-metres space.
-        out1 = self.decoder(t1_out, feats1, depth_input=depth1, input_hw=(H1, W1))
-        out2 = self.decoder(t2_out, feats2, depth_input=depth2, input_hw=(H2, W2))
+        # ── 5. Build point priors + decode both views ────────────────────────
+        # K is required to build the geometric prior; if not provided, fall
+        # back to a unit approximation (X=Y=0, Z=depth) which is also safe
+        # since the residual head is zero-initialised.
+        if K is not None:
+            # Point prior for view 1: unproject depth1 in view-1 frame.
+            point_prior1 = self._unproject(depth1, K)          # (B, 3, H1, W1)
+
+            # Point prior for view 2: unproject depth2 in view-2 frame, then
+            # warp into view-1 frame via T_21 = se3_inv(T_12).
+            if T_12 is not None:
+                T_21 = se3_inv(T_12)                           # cam2 → cam1
+                pp2_cam2 = self._unproject(depth2, K)          # (B, 3, H2, W2)
+                point_prior2 = transform_pts(pp2_cam2, T_21)  # (B, 3, H2, W2)
+            else:
+                # No pose: view-2 prior stays in view-2 frame (best we can do)
+                point_prior2 = self._unproject(depth2, K)
+        else:
+            # Fallback: trivial prior [0, 0, depth] — residual head corrects.
+            zeros = torch.zeros_like(depth1)
+            point_prior1 = torch.cat([zeros, zeros, depth1], dim=1)
+            zeros2 = torch.zeros_like(depth2)
+            point_prior2 = torch.cat([zeros2, zeros2, depth2], dim=1)
+
+        # depth_input passed to decoder is the *original* (un-capped,
+        # un-normalised) point prior so the residual head corrects in
+        # metric-metres space.
+        out1 = self.decoder(t1_out, feats1, point_prior=point_prior1, input_hw=(H1, W1))
+        out2 = self.decoder(t2_out, feats2, point_prior=point_prior2, input_hw=(H2, W2))
 
         # ── 6. Pose prediction + optional iterative GRU refinement ────────────
         # PoseHead uses encoder global features (view-specific, before cross-attn).
@@ -455,12 +512,10 @@ class DepthOnlyNet(nn.Module):
                 }
 
         return {
-            "depth1":      out1["depth"],
-            "depth2":      out2["depth"],
+            "point1":      out1["point"],
+            "point2":      out2["point"],
             "confidence1": out1["confidence"],
             "confidence2": out2["confidence"],
-            "log_scale1":  out1["log_scale"],
-            "log_scale2":  out2["log_scale"],
             **pose_preds,
         }
 

@@ -57,14 +57,35 @@ def build_optimizer(cfg: dict, model: torch.nn.Module) -> torch.optim.Optimizer:
     lr      = float(opt_cfg["lr"])
     wd      = float(opt_cfg.get("weight_decay", 0.0))
 
+    # Per-module LR scaling: cross_attn block gets a lower rate so that
+    # pretrained MASt3R weights are fine-tuned more conservatively.
+    # Controlled by optimizer.cross_attn_lr_scale in the config (default 0.1).
+    cross_attn_scale = float(opt_cfg.get("cross_attn_lr_scale", 0.1))
+    cross_attn_mod   = getattr(model, "cross_attn", None)
+
+    if cross_attn_mod is not None and cross_attn_scale != 1.0:
+        cross_attn_ids  = {id(p) for p in cross_attn_mod.parameters()}
+        main_params     = [p for p in model.parameters() if id(p) not in cross_attn_ids]
+        cross_attn_params = list(cross_attn_mod.parameters())
+        # Group 0 = everything except cross_attn  (lr unchanged)
+        # Group 1 = cross_attn                    (lr * scale)
+        param_groups = [
+            {"params": main_params},
+            {"params": cross_attn_params, "lr": lr * cross_attn_scale},
+        ]
+        print(f"[optimizer] cross_attn lr scale={cross_attn_scale}  "
+              f"(main lr={lr:.2e}, cross_attn lr={lr * cross_attn_scale:.2e})")
+    else:
+        param_groups = model.parameters()
+
     if kind == "adamw":
         betas = tuple(opt_cfg.get("betas", [0.9, 0.999]))
-        return torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=wd, betas=betas)
+        return torch.optim.AdamW(param_groups, lr=lr, weight_decay=wd, betas=betas)
     elif kind == "adam":
         betas = tuple(opt_cfg.get("betas", [0.9, 0.999]))
-        return torch.optim.Adam(model.parameters(), lr=lr, weight_decay=wd, betas=betas)
+        return torch.optim.Adam(param_groups, lr=lr, weight_decay=wd, betas=betas)
     elif kind == "sgd":
-        return torch.optim.SGD(model.parameters(), lr=lr, weight_decay=wd, momentum=0.9)
+        return torch.optim.SGD(param_groups, lr=lr, weight_decay=wd, momentum=0.9)
     else:
         raise ValueError(f"Unknown optimizer type: '{kind}'")
     

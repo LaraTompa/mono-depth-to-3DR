@@ -697,6 +697,105 @@ def geometric_consistency_loss(
 
 
 # ---------------------------------------------------------------------------
+# 12. Geometric unprojection helpers  (shared with network.py)
+# ---------------------------------------------------------------------------
+
+def unproject_depth(depth: torch.Tensor, K: torch.Tensor) -> torch.Tensor:
+    """
+    Unproject a depth map to a 3D point map in the local camera frame.
+
+    Uses k_inv() so the convention here matches geometric_consistency_loss
+    and pixel_consistency_loss exactly.
+
+    depth : (B, 1, H, W)  depth in metres
+    K     : (B, 3, 3)     camera intrinsics (at depth resolution)
+
+    Returns (B, 3, H, W)  metric XYZ point map.
+    """
+    B, _, H, W = depth.shape
+    K_inv = k_inv(K)   # (B, 3, 3)
+
+    ys  = torch.arange(H, device=depth.device, dtype=depth.dtype)
+    xs  = torch.arange(W, device=depth.device, dtype=depth.dtype)
+    gy, gx = torch.meshgrid(ys, xs, indexing="ij")   # (H, W)
+    N   = H * W
+    xy1 = torch.stack(
+        [gx.flatten(), gy.flatten(),
+         torch.ones(N, device=depth.device, dtype=depth.dtype)], dim=0
+    )                                                  # (3, N)
+    xy1 = xy1.unsqueeze(0).expand(B, -1, -1)           # (B, 3, N)
+
+    d_flat = depth.reshape(B, 1, N)
+    xyz = torch.bmm(K_inv, xy1) * d_flat               # (B, 3, N)
+    return xyz.reshape(B, 3, H, W)
+
+
+def transform_point_map(pts: torch.Tensor, T: torch.Tensor) -> torch.Tensor:
+    """
+    Apply SE(3) rigid transform T to a spatial point map.
+
+    pts : (B, 3, H, W)
+    T   : (B, 4, 4)
+
+    Returns (B, 3, H, W)  transformed points.
+    """
+    B, _, H, W = pts.shape
+    R = T[:, :3, :3]   # (B, 3, 3)
+    t = T[:, :3,  3]   # (B, 3)
+    pts_flat = pts.reshape(B, 3, H * W)                     # (B, 3, N)
+    pts_out  = torch.bmm(R, pts_flat) + t.unsqueeze(-1)     # (B, 3, N)
+    return pts_out.reshape(B, 3, H, W)
+
+
+# ---------------------------------------------------------------------------
+# 13. Point-map loss  (for depth_only variant)
+# ---------------------------------------------------------------------------
+
+def point_map_loss(
+    pred_point:     torch.Tensor,              # (B, 3, H, W) predicted XYZ
+    gt_point:       torch.Tensor,              # (B, 3, H, W) GT XYZ
+    valid_mask:     torch.Tensor,              # (B, 1, H, W) boolean  (derived from gt_depth)
+    confidence:     torch.Tensor | None = None,  # (B, 1, H, W) sigmoid conf from decoder
+    use_confidence: bool = True,
+) -> tuple[torch.Tensor, dict]:
+    """
+    L1 point-map loss with optional Kendall & Gal confidence weighting.
+
+    valid_mask must be derived from (gt_depth > min_depth) & (gt_depth < max_depth)
+    & isfinite — do NOT use point == 0 as invalid sentinel, because (0,0,0) is a
+    plausible near-surface point once a residual is added to a geometric prior.
+
+    Confidence weighting follows the same Kendall & Gal (NeurIPS 2017) pattern
+    used in camera_pose_loss:
+        loss_per_pixel = exp(−s) · l1_per_pixel + s
+    where s = −log(confidence) is the log-scale uncertainty, clamped to
+    [LOG_CONF_MIN, LOG_CONF_MAX].
+
+    Returns
+    -------
+    loss  : scalar tensor
+    parts : dict of float scalars for logging
+    """
+    # Per-pixel mean L1 over XYZ channels  — (B, 1, H, W)
+    l1_per_pixel = (pred_point - gt_point).abs().mean(dim=1, keepdim=True)
+
+    n_valid = valid_mask.float().sum().clamp(min=1)
+
+    if use_confidence and confidence is not None:
+        # s = −log(conf + ε)  clamped to [LOG_CONF_MIN, LOG_CONF_MAX]
+        # High confidence → s ≈ 0 → exp(−s) ≈ 1 → full loss weight.
+        # Low confidence → s large → exp(−s) small → loss downweighted.
+        s = (-torch.log(confidence.clamp(min=EPS))).clamp(LOG_CONF_MIN, LOG_CONF_MAX)
+        loss_map = torch.exp(-s) * l1_per_pixel + s         # (B, 1, H, W)
+    else:
+        loss_map = l1_per_pixel                              # (B, 1, H, W)
+
+    loss = (loss_map * valid_mask.float()).sum() / n_valid
+
+    return loss, {"point_map": float(loss.detach())}
+
+
+# ---------------------------------------------------------------------------
 # 10. Total loss — called from train.py
 # ---------------------------------------------------------------------------
 
@@ -747,84 +846,168 @@ def total_loss(
     gt1_metric = depths_metric[:, 0]
     gt2_metric = depths_metric[:, 1]
 
-    pred1 = outputs["depth1"]   # (B, 1, pH, pW)  e.g. (B, 1, 480, 640)
-    pred2 = outputs["depth2"]
-    pred1_metric = outputs.get("depth1_metric", pred1)
-    pred2_metric = outputs.get("depth2_metric", pred2)
-
-    # Scale GT to predicted resolution for supervised loss
-    # pred1.shape[-2:] = (480, 640) → pH=480 (height), pW=640 (width)
-    pH, pW = pred1.shape[-2:]
-    gt1_s = F.interpolate(gt1, size=(pH, pW), mode="nearest")
-    gt2_s = F.interpolate(gt2, size=(pH, pW), mode="nearest")
-    gt1_s_metric = F.interpolate(gt1_metric, size=(pH, pW), mode="nearest")
-    gt2_s_metric = F.interpolate(gt2_metric, size=(pH, pW), mode="nearest")
-
     w = weights
-    depth_min = 1e-3
-    depth_max = 80.0
-    if depth_norm_scale is not None:
-        if depth_norm_scale <= 0.0:
-            raise ValueError("depth_norm_scale must be positive when provided")
-        depth_min = depth_min / depth_norm_scale
-        depth_max = depth_max / depth_norm_scale
-    depth_w = float(w.get("depth", 1.0))
-    depth_mse_w = float(w.get("depth_mse", 0.1))
-    smooth_w = float(w.get("smooth", 0.05))
-    iter_w = float(w.get("iter_supervision", 0.5))
 
-    # --- Supervised depth ---
-    l_depth = (
-        si_log_loss(pred1, gt1_s, min_depth=depth_min, max_depth=depth_max) +
-        si_log_loss(pred2, gt2_s, min_depth=depth_min, max_depth=depth_max)
-    ) * 0.5
+    # ── Detect model variant from output keys ────────────────────────────
+    # depth_only produces "point1"/"point2" (XYZ maps in view-1 frame);
+    # v1/vista produce "depth1"/"depth2" (scalar depth maps).
+    is_point_model = "point1" in outputs
 
-    l_depth_mse = (
-        mse_depth_loss(pred1, gt1_s, min_depth=depth_min, max_depth=depth_max) +
-        mse_depth_loss(pred2, gt2_s, min_depth=depth_min, max_depth=depth_max)
-    ) * 0.5
+    if is_point_model:
+        # ================================================================
+        # depth_only  —  point-map supervision (DUSt3R-style)
+        # ================================================================
+        pred_point1 = outputs["point1"]     # (B, 3, pH, pW)
+        pred_point2 = outputs["point2"]
+        conf1       = outputs["confidence1"]  # (B, 1, pH, pW) sigmoid
+        conf2       = outputs["confidence2"]
+        pH, pW = pred_point1.shape[-2:]
 
-    # --- Smoothness (RGB edge-weighted) — skipped when images are absent ---
-    l_smooth = pred1.new_tensor(0.0)
-    if has_images:
-        rgb1_s = F.interpolate(rgb1, size=(pH, pW), mode="bilinear", align_corners=True)
-        rgb2_s = F.interpolate(rgb2, size=(pH, pW), mode="bilinear", align_corners=True)
-        l_smooth = (
-            smooth_loss(pred1, rgb1_s) +
-            smooth_loss(pred2, rgb2_s)
+        # GT depths at predicted resolution (metric, no normalisation)
+        gt1_s        = F.interpolate(gt1,        size=(pH, pW), mode="nearest")
+        gt2_s        = F.interpolate(gt2,        size=(pH, pW), mode="nearest")
+        gt1_s_metric = F.interpolate(gt1_metric, size=(pH, pW), mode="nearest")
+        gt2_s_metric = F.interpolate(gt2_metric, size=(pH, pW), mode="nearest")
+
+        depth_min = 1e-3
+        depth_max = 80.0
+
+        # Build GT point maps using the same K_inv convention as
+        # k_inv() / geometric_consistency_loss() so conventions match.
+        K_for_pts = (batch["intrinsics"].to(pred_point1.device, dtype=pred_point1.dtype)
+                     if "intrinsics" in batch else K)
+        K_pts = K_for_pts.clone()
+        K_pts[:, 0, 0] = K_for_pts[:, 0, 0] * (pW / W)
+        K_pts[:, 1, 1] = K_for_pts[:, 1, 1] * (pH / H)
+        K_pts[:, 0, 2] = K_for_pts[:, 0, 2] * (pW / W)
+        K_pts[:, 1, 2] = K_for_pts[:, 1, 2] * (pH / H)
+
+        # Valid pixels: explicit boolean mask — do NOT use point == 0 as
+        # sentinel (zero is a plausible near-origin value with a residual).
+        valid1 = ((gt1_s_metric > depth_min) & (gt1_s_metric < depth_max)
+                  & torch.isfinite(gt1_s_metric))           # (B, 1, pH, pW)
+        valid2 = ((gt2_s_metric > depth_min) & (gt2_s_metric < depth_max)
+                  & torch.isfinite(gt2_s_metric))
+
+        # GT point map view 1: unproject GT depth1 directly (already in cam1).
+        gt_point1 = unproject_depth(gt1_s_metric, K_pts)   # (B, 3, pH, pW)
+
+        # GT point map view 2: unproject GT depth2, then warp into cam1 frame.
+        gt_point2_cam2 = unproject_depth(gt2_s_metric, K_pts)
+        if "poses" in batch:
+            poses_pts    = batch["poses"]                     # (B, N, 4, 4)
+            T_12_pts     = se3_inv(poses_pts[:, 1]) @ poses_pts[:, 0]
+            T_21_pts     = se3_inv(T_12_pts)
+            gt_point2    = transform_point_map(gt_point2_cam2, T_21_pts)
+        else:
+            gt_point2 = gt_point2_cam2   # no pose: supervise in cam2 frame only
+
+        # Point-map losses (L1 + Kendall & Gal confidence weighting)
+        l_point1, _ = point_map_loss(pred_point1, gt_point1, valid1, conf1, use_confidence)
+        l_point2, _ = point_map_loss(pred_point2, gt_point2, valid2, conf2, use_confidence)
+        l_point  = (l_point1 + l_point2) * 0.5
+
+        point_w = float(w.get("point_map", 1.0))
+        total = point_w * l_point
+
+        parts = {
+            "point_map":           float(l_point.detach()),
+            "point_map_v1":        float(l_point1.detach()),
+            "point_map_v2":        float(l_point2.detach()),
+            "point_map_weighted":  float((point_w * l_point).detach()),
+            # depth_effective alias keeps the log-scale debug print working
+            "depth_effective":     float((point_w * l_point).detach()),
+        }
+
+        # Approximate depths (Z-channel of view-1-frame point maps) for
+        # auxiliary pixel/geometric consistency losses below.
+        # View 1: Z in cam1 frame = correct depth.
+        # View 2: Z in cam1 frame is an approximation, but these aux terms
+        #         are low-weight and warmup-gated, so this is acceptable.
+        pred1_metric = pred_point1[:, 2:3].clamp(min=0)  # (B, 1, pH, pW)
+        pred2_metric = pred_point2[:, 2:3].clamp(min=0)
+
+    else:
+        # ================================================================
+        # v1 / vista  —  original scalar depth supervision
+        # ================================================================
+        pred1 = outputs["depth1"]   # (B, 1, pH, pW)
+        pred2 = outputs["depth2"]
+        pred1_metric = outputs.get("depth1_metric", pred1)
+        pred2_metric = outputs.get("depth2_metric", pred2)
+
+        pH, pW = pred1.shape[-2:]
+        gt1_s        = F.interpolate(gt1,        size=(pH, pW), mode="nearest")
+        gt2_s        = F.interpolate(gt2,        size=(pH, pW), mode="nearest")
+        gt1_s_metric = F.interpolate(gt1_metric, size=(pH, pW), mode="nearest")
+        gt2_s_metric = F.interpolate(gt2_metric, size=(pH, pW), mode="nearest")
+
+        depth_min = 1e-3
+        depth_max = 80.0
+        if depth_norm_scale is not None:
+            if depth_norm_scale <= 0.0:
+                raise ValueError("depth_norm_scale must be positive when provided")
+            depth_min = depth_min / depth_norm_scale
+            depth_max = depth_max / depth_norm_scale
+
+        depth_w     = float(w.get("depth",            1.0))
+        depth_mse_w = float(w.get("depth_mse",        0.1))
+        smooth_w    = float(w.get("smooth",           0.05))
+        iter_w      = float(w.get("iter_supervision", 0.5))
+
+        # --- Supervised depth ---
+        l_depth = (
+            si_log_loss(pred1, gt1_s, min_depth=depth_min, max_depth=depth_max) +
+            si_log_loss(pred2, gt2_s, min_depth=depth_min, max_depth=depth_max)
         ) * 0.5
 
-    # --- Deep supervision over refinement iters ---
-    # Only computed for models that expose intermediate depth estimates
-    # (e.g. v1 with RAFT-style refinement). depth_only has no iters.
-    l_iters = pred1.new_tensor(0.0)
-    if "depth1_iters" in outputs and "depth2_iters" in outputs:
-        l_iters = (
-            iter_supervision_loss(outputs["depth1_iters"], gt1, min_depth=depth_min, max_depth=depth_max) +
-            iter_supervision_loss(outputs["depth2_iters"], gt2, min_depth=depth_min, max_depth=depth_max)
+        l_depth_mse = (
+            mse_depth_loss(pred1, gt1_s, min_depth=depth_min, max_depth=depth_max) +
+            mse_depth_loss(pred2, gt2_s, min_depth=depth_min, max_depth=depth_max)
         ) * 0.5
 
-    total = (
-        depth_w * l_depth  +
-        depth_mse_w * l_depth_mse +
-        smooth_w * l_smooth +
-        iter_w * l_iters
-    )
+        # --- Smoothness (RGB edge-weighted) — skipped when images are absent ---
+        l_smooth = pred1.new_tensor(0.0)
+        if has_images:
+            rgb1_s = F.interpolate(rgb1, size=(pH, pW), mode="bilinear", align_corners=True)
+            rgb2_s = F.interpolate(rgb2, size=(pH, pW), mode="bilinear", align_corners=True)
+            l_smooth = (
+                smooth_loss(pred1, rgb1_s) +
+                smooth_loss(pred2, rgb2_s)
+            ) * 0.5
 
-    parts = {
-        "depth":     float(l_depth.detach()),
-        "depth_mse": float(l_depth_mse.detach()),
-        "smooth":    float(l_smooth.detach()),
-        "iters":     float(l_iters.detach()),
-        "depth_weighted": float((depth_w * l_depth).detach()),
-        "depth_mse_weighted": float((depth_mse_w * l_depth_mse).detach()),
-        "depth_effective": float((depth_w * l_depth + depth_mse_w * l_depth_mse).detach()),
-    }
+        # --- Deep supervision over refinement iters ---
+        l_iters = pred1.new_tensor(0.0)
+        if "depth1_iters" in outputs and "depth2_iters" in outputs:
+            l_iters = (
+                iter_supervision_loss(outputs["depth1_iters"], gt1,
+                                      min_depth=depth_min, max_depth=depth_max) +
+                iter_supervision_loss(outputs["depth2_iters"], gt2,
+                                      min_depth=depth_min, max_depth=depth_max)
+            ) * 0.5
+
+        total = (
+            depth_w * l_depth  +
+            depth_mse_w * l_depth_mse +
+            smooth_w * l_smooth +
+            iter_w * l_iters
+        )
+
+        parts = {
+            "depth":              float(l_depth.detach()),
+            "depth_mse":          float(l_depth_mse.detach()),
+            "smooth":             float(l_smooth.detach()),
+            "iters":              float(l_iters.detach()),
+            "depth_weighted":     float((depth_w * l_depth).detach()),
+            "depth_mse_weighted": float((depth_mse_w * l_depth_mse).detach()),
+            "depth_effective":    float((depth_w * l_depth + depth_mse_w * l_depth_mse).detach()),
+        }
 
     # --- Pixel consistency (multiview reprojection) ---
     # Activated only after pixel_consistency_warmup_epochs so early training
     # can stabilise depth/pose before reprojection coupling.
-    l_pixel = pred1.new_tensor(0.0)
+    # pred1_metric is always defined (Z-channel for point model, depth for others).
+    l_pixel = pred1_metric.new_tensor(0.0)
     pix_warmup = int(w.get("pixel_consistency_warmup_epochs", 0))
     if "poses" in batch and epoch >= pix_warmup:
         poses_pc = batch["poses"]                           # (B, N, 4, 4)
@@ -852,7 +1035,7 @@ def total_loss(
     # depths and pose are already reasonable before we couple them in 3-D.
     # Phase 1 (epoch < switch_epoch): use GT pose  → pure depth supervision.
     # Phase 2 (epoch >= switch_epoch): use predicted pose → joint supervision.
-    l_gc = pred1.new_tensor(0.0)
+    l_gc = pred1_metric.new_tensor(0.0)
     geo_warmup  = int(w.get("geometric_warmup_epochs", 30))
     geo_switch  = int(w.get("geometric_switch_epochs",  50))  # switch GT→pred pose
     geo_w       = float(w.get("geometric", 0.1))

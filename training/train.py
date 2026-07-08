@@ -280,7 +280,7 @@ def run_epoch(
                     for k, v in outputs.items()
                 }
 
-            if normalize_depths:
+            if normalize_depths and "depth1" in outputs:
                 outputs = dict(outputs)
                 outputs["depth1_metric"] = denormalize_depth_map(outputs["depth1"], depth_norm_cfg.get("gt"))
                 outputs["depth2_metric"] = denormalize_depth_map(outputs["depth2"], depth_norm_cfg.get("gt"))
@@ -349,7 +349,11 @@ def run_epoch(
             totals["geometric"]  += breakdown.get("geometric",  0.0)
 
             if not train:
-                pred1 = outputs.get("depth1_metric", outputs["depth1"])  # (B,1,pH,pW)
+                # For point models derive depth from the Z-channel of the cam-1-frame point map.
+                if "point1" in outputs:
+                    pred1 = outputs["point1"][:, 2:3].clamp(min=0)  # (B,1,pH,pW)
+                else:
+                    pred1 = outputs.get("depth1_metric", outputs["depth1"])  # (B,1,pH,pW)
                 gt_depths_for_metrics = batch.get("depths_metric", depths)
                 gt1   = gt_depths_for_metrics[:, 0]                       # (B,1,H,W)
                 gt1_s = F.interpolate(gt1, size=pred1.shape[-2:], mode="nearest")

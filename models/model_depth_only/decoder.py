@@ -1,5 +1,5 @@
 """
-decoder.py — Multi-scale decoder: depth tokens + encoder skips → depth at 640×480.
+decoder.py — Multi-scale decoder: depth tokens + encoder skips → point map at 640×480.
 
 Output resolution
 -----------------
@@ -15,14 +15,17 @@ to a spatial feature map at s16 resolution (H/16 × W/16) based on the
 encoder are fused at s8 and s4 via additive fusion convolutions, then the
 feature map is bilinearly upsampled to the fixed 640×480 output.
 
-Depth output
-------------
-The decoder predicts a scale factor and an additive residual on top of the
-input mono-depth prior (upsampled to 640×480).  This residual formulation
-ensures the network can start from a reasonable depth estimate at
-initialisation (when all heads are near-zero):
+Point-map output  (DUSt3R-style)
+---------------------------------
+The decoder predicts a 3-channel XYZ residual on top of a geometric point-map
+prior (unprojected from the MDE depth and, for view 2, warped into view-1's
+camera frame).  Zero-initialising the head weight + bias ensures the network
+starts as a passthrough (prior only) at t=0:
 
-    depth_out = softplus(scale) × depth_mono_480 + residual
+    point_out = point_prior_480 + residual_xyz
+
+Everything stays in metric (metres).  No per-axis or global scalar
+normalisation is applied to the point maps.
 
 Confidence
 ----------
@@ -53,7 +56,7 @@ class ConvBnGelu(nn.Module):
 
 class DepthDecoder(nn.Module):
     """
-    Multi-scale decoder producing depth + confidence at 640×480.
+    Multi-scale decoder producing a 3-channel XYZ point map + confidence at 640×480.
 
     Parameters
     ----------
@@ -87,12 +90,12 @@ class DepthDecoder(nn.Module):
         # Final conv before output heads
         self.final_conv = ConvBnGelu(hidden, hidden)
 
-        # Output heads — near-zero init so network starts as passthrough.
-        self.head_scale = nn.Conv2d(hidden, 1, 1)  # log-scale
-        self.head_resid = nn.Conv2d(hidden, 1, 1)  # additive residual
-        self.head_conf  = nn.Conv2d(hidden, 1, 1)  # confidence logit
+        # Output heads — zero-init residual head so the network starts as a
+        # passthrough at t=0 (output = point_prior + 0 = point_prior).
+        self.head_resid_xyz = nn.Conv2d(hidden, 3, 1)  # 3-ch XYZ residual (metres)
+        self.head_conf      = nn.Conv2d(hidden, 1, 1)  # confidence logit
 
-        for head in (self.head_scale, self.head_resid, self.head_conf):
+        for head in (self.head_resid_xyz, self.head_conf):
             nn.init.zeros_(head.weight)
             nn.init.zeros_(head.bias)
 
@@ -100,16 +103,15 @@ class DepthDecoder(nn.Module):
         self,
         tokens:      torch.Tensor,   # (B, N, token_dim)  cross-attended tokens
         skips:       dict,           # {"s4", "s8", "s16"} from DepthEncoder
-        depth_input: torch.Tensor,   # (B, 1, H, W) original input depth (before median norm)
-        input_hw:    tuple,          # (H, W) spatial size of the input depth
+        point_prior: torch.Tensor,   # (B, 3, H, W) geometric point-map prior (metric XYZ)
+        input_hw:    tuple,          # (H, W) spatial size of the point prior
     ) -> dict:
         """
         Returns
         -------
         {
-          "depth":      (B, 1, 480, 640),
+          "point":      (B, 3, 480, 640),  # XYZ in view-1 camera frame, metric
           "confidence": (B, 1, 480, 640),
-          "log_scale":  (B, 1, 480, 640),   # for auxiliary loss / inspection
         }
         """
         B = tokens.shape[0]
@@ -147,22 +149,20 @@ class DepthDecoder(nn.Module):
         x = F.interpolate(x, size=(OUT_H, OUT_W), mode="bilinear", align_corners=False)
         x = self.final_conv(x)                          # (B, hidden, 480, 640)
 
-        # ── Upsample input mono prior to output resolution ─────────────────
-        depth_480 = F.interpolate(
-            depth_input, size=(OUT_H, OUT_W), mode="bilinear", align_corners=False
-        )                                                # (B, 1, 480, 640)
+        # ── Upsample point prior to output resolution ───────────────────────
+        prior_480 = F.interpolate(
+            point_prior, size=(OUT_H, OUT_W), mode="bilinear", align_corners=False
+        )                                                # (B, 3, 480, 640)
 
         # ── Output heads ─────────────────────────────────────────────────
-        log_scale = self.head_scale(x)                   # (B, 1, 480, 640)
-        residual  = self.head_resid(x)                   # (B, 1, 480, 640)
-        conf_logit = self.head_conf(x)                   # (B, 1, 480, 640)
+        residual_xyz = self.head_resid_xyz(x)            # (B, 3, 480, 640)
+        conf_logit   = self.head_conf(x)                 # (B, 1, 480, 640)
 
-        scale = F.softplus(log_scale) + 1e-4             # positive, near 1 at init
-        depth = scale * depth_480 + residual             # (B, 1, 480, 640)
+        # point = prior + XYZ residual  (metric metres, no per-axis rescaling)
+        point = prior_480 + residual_xyz                 # (B, 3, 480, 640)
         conf  = torch.sigmoid(conf_logit)                # (B, 1, 480, 640)  ∈ (0,1)
 
         return {
-            "depth":      depth,
+            "point":      point,
             "confidence": conf,
-            "log_scale":  log_scale,
         }
