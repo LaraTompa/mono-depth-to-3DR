@@ -683,7 +683,7 @@ def geometric_consistency_loss(
 
         n_valid = valid.float().sum()
         if n_valid < 1:
-            return depth_i.new_tensor(0.0)
+            return depth_pred_i.new_tensor(0.0)
 
         # 9. Huber-like soft cap: clip at 5 m to down-weight outliers without
         #    zeroing gradients (same philosophy as the dist_sq.clamp in pixel loss)
