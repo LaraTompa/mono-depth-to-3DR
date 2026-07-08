@@ -1031,7 +1031,7 @@ def total_loss(
         poses_pc = batch["poses"]                           # (B, N, 4, 4)
         T_12_pc  = se3_inv(poses_pc[:, 1]) @ poses_pc[:, 0]
         # Prefer GT intrinsics for accurate reprojection; fall back to K_iter.
-        K_for_pix = batch["intrinsics"].to(pred1.device, dtype=pred1.dtype) \
+        K_for_pix = batch["intrinsics"].to(pred1_metric.device, dtype=pred1_metric.dtype) \
                     if "intrinsics" in batch else K
         # Scale K to predicted-depth resolution
         scale_w, scale_h = pW / W, pH / H
@@ -1073,7 +1073,7 @@ def total_loss(
         scale_h_gc = pH / H
         K_gc = K.clone()
         if "intrinsics" in batch:
-            K_gc = batch["intrinsics"].to(pred1.device, dtype=pred1.dtype).clone()
+            K_gc = batch["intrinsics"].to(pred1_metric.device, dtype=pred1_metric.dtype).clone()
         K_gc[:, 0, 0] = K_gc[:, 0, 0] * scale_w_gc
         K_gc[:, 1, 1] = K_gc[:, 1, 1] * scale_h_gc
         K_gc[:, 0, 2] = K_gc[:, 0, 2] * scale_w_gc

@@ -29,6 +29,28 @@ depth_normalization:
     offset: 0.0
 
 # ---------------------------------------------------------------------------
+# Optional point-map scale normalisation (depth_only model only)
+# ---------------------------------------------------------------------------
+# When enabled, a single global scalar (median Euclidean norm of all valid 3D
+# points in the training set, pooled over both views) is computed once before
+# training starts and used to divide the XYZ point-map priors fed to the
+# decoder.  Predicted and GT point maps are compared in these normalised units;
+# pixel_consistency / geometric_consistency losses receive metric inputs via
+# automatic de-normalisation.  Output point maps from the model are in
+# normalised units — multiply by scale to recover metres.
+#
+# Constraints (same as depth_normalization):
+#   - Single isotropic scalar, never per-axis.
+#   - No mean subtraction — scale only.
+#   - Default OFF; no effect on v1 / vista models.
+#
+# scale is populated automatically at runtime by compute_point_normalization_stats().
+point_normalization:
+  enabled: false
+  max_samples: 2000000  # 3D point norms sampled from train split
+  scale: 1.0            # filled in at runtime; do not set manually
+
+# ---------------------------------------------------------------------------
 # DataLoader
 # ---------------------------------------------------------------------------
 loader:
