@@ -1103,10 +1103,16 @@ def total_loss(
             _R_gc = T_gc[:, :3, :3]
             _t_gc = T_gc[:, :3, 3]
 
-            # ── Forward: cam1 pixels ────────────────────────────────────
-            _P1_cam2  = torch.bmm(_R_gc, _P1) + _t_gc.unsqueeze(-1)   # (B, 3, N) in cam2
-            _Z1_cam2  = _P1_cam2[:, 2, :]
-            _proj1    = torch.bmm(K_gc, _P1_cam2)
+            # ── Forward: cam1 pixels — GT depth for correspondence ──────
+            # Use GT point map to find the correspondence pixel in cam2 so that
+            # the sampling location is anchored to noise-free geometry, matching
+            # the anchor-projection strategy in geometric_consistency_loss().
+            _gt_P1 = (gt_point1.reshape(_B_gc, 3, _N_gc).to(dtype=_pts1.dtype) * point_norm_scale
+                      if point_norm_scale is not None
+                      else gt_point1.reshape(_B_gc, 3, _N_gc).to(dtype=_pts1.dtype))
+            _gt_P1_cam2 = torch.bmm(_R_gc, _gt_P1) + _t_gc.unsqueeze(-1)  # (B, 3, N) in cam2
+            _Z1_cam2    = _gt_P1_cam2[:, 2, :]
+            _proj1      = torch.bmm(K_gc, _gt_P1_cam2)
             _u1 = _proj1[:, 0, :] / (_Z1_cam2 + EPS)
             _v1 = _proj1[:, 1, :] / (_Z1_cam2 + EPS)
             _u1_n = 2.0 * _u1 / (_pW_gc - 1) - 1.0
@@ -1116,7 +1122,7 @@ def total_loss(
                 _pts2, _grid1, mode='bilinear', padding_mode='zeros', align_corners=True,
             ).reshape(_B_gc, 3, _N_gc)
             _dist1  = (_P1 - _P2_samp).pow(2).sum(1)                  # (B, N)
-            _Z1_cam1 = _P1[:, 2, :]
+            _Z1_cam1 = _gt_P1[:, 2, :]                                 # GT Z for validity
             _valid1  = (
                 (_Z1_cam2 > 0) &
                 (_u1 >= 0) & (_u1 < _pW_gc) & (_v1 >= 0) & (_v1 < _pH_gc) &
@@ -1129,13 +1135,16 @@ def total_loss(
             else:
                 _l_gc_fwd = (_dist1.clamp(max=5.0) * _valid1.float()).sum() / _n1
 
-            # ── Backward: cam2 pixels ───────────────────────────────────
-            # P2 is in cam1 frame — project directly with K into image 1.
-            # Validity uses depth in cam2 frame.
-            _P2_cam2  = torch.bmm(_R_gc, _P2) + _t_gc.unsqueeze(-1)   # for validity
-            _Z2_cam2  = _P2_cam2[:, 2, :]
-            _Z2_cam1  = _P2[:, 2, :]
-            _proj2    = torch.bmm(K_gc, _P2)                           # project into cam1
+            # ── Backward: cam2 pixels — GT depth for correspondence ──────
+            # P2 is in cam1 frame — use GT point map 2 to find the
+            # correspondence pixel in cam1 image, not the predicted P2.
+            _gt_P2 = (gt_point2.reshape(_B_gc, 3, _N_gc).to(dtype=_pts2.dtype) * point_norm_scale
+                      if point_norm_scale is not None
+                      else gt_point2.reshape(_B_gc, 3, _N_gc).to(dtype=_pts2.dtype))
+            _gt_P2_cam2 = torch.bmm(_R_gc, _gt_P2) + _t_gc.unsqueeze(-1)  # for validity
+            _Z2_cam2    = _gt_P2_cam2[:, 2, :]
+            _Z2_cam1    = _gt_P2[:, 2, :]                                   # GT Z in cam1
+            _proj2      = torch.bmm(K_gc, _gt_P2)                           # project GT into cam1
             _u2 = _proj2[:, 0, :] / (_Z2_cam1 + EPS)
             _v2 = _proj2[:, 1, :] / (_Z2_cam1 + EPS)
             _u2_n = 2.0 * _u2 / (_pW_gc - 1) - 1.0
