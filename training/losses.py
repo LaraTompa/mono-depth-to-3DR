@@ -1078,9 +1078,90 @@ def total_loss(
         K_gc[:, 1, 1] = K_gc[:, 1, 1] * scale_h_gc
         K_gc[:, 0, 2] = K_gc[:, 0, 2] * scale_w_gc
         K_gc[:, 1, 2] = K_gc[:, 1, 2] * scale_h_gc
-        l_gc = geometric_consistency_loss(
-            pred1_metric, pred2_metric, gt1_s_metric, gt2_s_metric, T_gc, K_gc
-        )
+        if is_point_model:
+            # For point-map outputs both point maps are already in cam1 frame.
+            # Instead of unprojecting depths, directly compare corresponding
+            # 3-D points in cam1 frame — no need for geometric_consistency_loss().
+            #
+            # Forward  (cam1 pixels → correspondence in cam2 image):
+            #   Transform P1 to cam2 to find the correspondence pixel, sample
+            #   pred_point2 there, then compare both in cam1 frame.
+            # Backward (cam2 pixels → correspondence in cam1 image):
+            #   P2 is already in cam1 frame, so project directly with K into
+            #   image 1 to find the correspondence; check validity via depth in
+            #   cam2 frame (T_12 @ P2).
+
+            # Metric point maps (undo normalisation if training used it)
+            _pts1 = pred_point1 * point_norm_scale if point_norm_scale is not None else pred_point1
+            _pts2 = pred_point2 * point_norm_scale if point_norm_scale is not None else pred_point2
+            _gc_min, _gc_max = 0.1, 80.0
+
+            _B_gc, _, _pH_gc, _pW_gc = _pts1.shape
+            _N_gc = _pH_gc * _pW_gc
+            _P1 = _pts1.reshape(_B_gc, 3, _N_gc)   # (B, 3, N) in cam1 frame
+            _P2 = _pts2.reshape(_B_gc, 3, _N_gc)   # (B, 3, N) in cam1 frame
+            _R_gc = T_gc[:, :3, :3]
+            _t_gc = T_gc[:, :3, 3]
+
+            # ── Forward: cam1 pixels ────────────────────────────────────
+            _P1_cam2  = torch.bmm(_R_gc, _P1) + _t_gc.unsqueeze(-1)   # (B, 3, N) in cam2
+            _Z1_cam2  = _P1_cam2[:, 2, :]
+            _proj1    = torch.bmm(K_gc, _P1_cam2)
+            _u1 = _proj1[:, 0, :] / (_Z1_cam2 + EPS)
+            _v1 = _proj1[:, 1, :] / (_Z1_cam2 + EPS)
+            _u1_n = 2.0 * _u1 / (_pW_gc - 1) - 1.0
+            _v1_n = 2.0 * _v1 / (_pH_gc - 1) - 1.0
+            _grid1 = torch.stack([_u1_n, _v1_n], dim=-1).reshape(_B_gc, 1, _N_gc, 2)
+            _P2_samp = F.grid_sample(
+                _pts2, _grid1, mode='bilinear', padding_mode='zeros', align_corners=True,
+            ).reshape(_B_gc, 3, _N_gc)
+            _dist1  = (_P1 - _P2_samp).pow(2).sum(1)                  # (B, N)
+            _Z1_cam1 = _P1[:, 2, :]
+            _valid1  = (
+                (_Z1_cam2 > 0) &
+                (_u1 >= 0) & (_u1 < _pW_gc) & (_v1 >= 0) & (_v1 < _pH_gc) &
+                (_Z1_cam1 > _gc_min) & (_Z1_cam1 < _gc_max) &
+                torch.isfinite(_dist1)
+            )
+            _n1 = _valid1.float().sum()
+            if _n1 < 1:
+                _l_gc_fwd = _pts1.new_tensor(0.0)
+            else:
+                _l_gc_fwd = (_dist1.clamp(max=5.0) * _valid1.float()).sum() / _n1
+
+            # ── Backward: cam2 pixels ───────────────────────────────────
+            # P2 is in cam1 frame — project directly with K into image 1.
+            # Validity uses depth in cam2 frame.
+            _P2_cam2  = torch.bmm(_R_gc, _P2) + _t_gc.unsqueeze(-1)   # for validity
+            _Z2_cam2  = _P2_cam2[:, 2, :]
+            _Z2_cam1  = _P2[:, 2, :]
+            _proj2    = torch.bmm(K_gc, _P2)                           # project into cam1
+            _u2 = _proj2[:, 0, :] / (_Z2_cam1 + EPS)
+            _v2 = _proj2[:, 1, :] / (_Z2_cam1 + EPS)
+            _u2_n = 2.0 * _u2 / (_pW_gc - 1) - 1.0
+            _v2_n = 2.0 * _v2 / (_pH_gc - 1) - 1.0
+            _grid2 = torch.stack([_u2_n, _v2_n], dim=-1).reshape(_B_gc, 1, _N_gc, 2)
+            _P1_samp = F.grid_sample(
+                _pts1, _grid2, mode='bilinear', padding_mode='zeros', align_corners=True,
+            ).reshape(_B_gc, 3, _N_gc)
+            _dist2  = (_P2 - _P1_samp).pow(2).sum(1)                  # (B, N)
+            _valid2  = (
+                (_Z2_cam2 > 0) &
+                (_u2 >= 0) & (_u2 < _pW_gc) & (_v2 >= 0) & (_v2 < _pH_gc) &
+                (_Z2_cam1 > _gc_min) & (_Z2_cam1 < _gc_max) &
+                torch.isfinite(_dist2)
+            )
+            _n2 = _valid2.float().sum()
+            if _n2 < 1:
+                _l_gc_bwd = _pts2.new_tensor(0.0)
+            else:
+                _l_gc_bwd = (_dist2.clamp(max=5.0) * _valid2.float()).sum() / _n2
+
+            l_gc = (_l_gc_fwd + _l_gc_bwd) * 0.5
+        else:
+            l_gc = geometric_consistency_loss(
+                pred1_metric, pred2_metric, gt1_s_metric, gt2_s_metric, T_gc, K_gc
+            )
         total = total + geo_w * l_gc
         parts["geometric"] = float(l_gc.detach())
         parts["geometric_weighted"] = float((geo_w * l_gc).detach())

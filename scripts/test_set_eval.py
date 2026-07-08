@@ -525,13 +525,23 @@ def main(args):
 
                 # depth_only outputs point1/point2 (XYZ maps); derive depth from Z-channel.
                 if "point1" in outputs:
+                    # depth1 = Z of point1 in cam1 frame (correct).
                     pred1_out_t = outputs["point1"][:, 2:3].clamp(min=0)  # (B,1,pH,pW)
-                    pred2_out_t = outputs["point2"][:, 2:3].clamp(min=0)
-                    # Convert from normalised units back to metric metres if training
-                    # used point normalisation.
                     if normalize_points and point_norm_scale_eval is not None:
                         pred1_out_t = pred1_out_t * point_norm_scale_eval
-                        pred2_out_t = pred2_out_t * point_norm_scale_eval
+
+                    # point2 is expressed in cam1 frame; get the real depth in cam2 frame
+                    # by transforming the 3-D points with T_12 (cam1 → cam2) and taking Z.
+                    _p2 = outputs["point2"]                          # (B, 3, pH, pW) in cam1
+                    if normalize_points and point_norm_scale_eval is not None:
+                        _p2 = _p2 * point_norm_scale_eval            # → metric units
+                    _B2, _, _pH2, _pW2 = _p2.shape
+                    _R12 = T_12_t[:, :3, :3].to(dtype=_p2.dtype)
+                    _t12 = T_12_t[:, :3,  3].to(dtype=_p2.dtype)
+                    _p2_cam2 = (
+                        torch.bmm(_R12, _p2.reshape(_B2, 3, -1)) + _t12.unsqueeze(-1)
+                    ).reshape(_B2, 3, _pH2, _pW2)
+                    pred2_out_t = _p2_cam2[:, 2:3].clamp(min=0)     # depth in cam2 frame
                 else:
                     pred1_out_t = outputs["depth1"]
                     pred2_out_t = outputs["depth2"]
