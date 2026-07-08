@@ -513,7 +513,7 @@ def main(args):
                 if normalize_depths:
                     depth1_t = normalize_depth_map(depth1_t, depth_norm_cfg.get("mde"))
                     depth2_t = normalize_depth_map(depth2_t, depth_norm_cfg.get("mde"))
-                K_t = torch.from_numpy(K_np).unsqueeze(0).to(device)
+                K_t = torch.from_numpy(K_np.astype(np.float32)).unsqueeze(0).to(device)
                 T_12_t = torch.from_numpy(T_12_init_np.astype(np.float32)).unsqueeze(0).to(device)
 
                 # ── Inference ────────────────────────────────────────────────
