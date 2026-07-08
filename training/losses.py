@@ -808,6 +808,7 @@ def total_loss(
     camera_weight:  float | None = None,  # override cfg camera weight (for ramp)
     epoch:          int = 0,          # current epoch — controls Lgc activation
     depth_norm_scale: float | None = None,  # GT depth scale when training on normalized depths
+    point_norm_scale: float | None = None,  # isotropic point-map scale (depth_only only)
 ) -> tuple[torch.Tensor, dict]:
     """
     Compute the weighted total training loss.
@@ -902,6 +903,17 @@ def total_loss(
         else:
             gt_point2 = gt_point2_cam2   # no pose: supervise in cam2 frame only
 
+        # Optional isotropic scale normalisation — brings GT point maps into the
+        # same units as predicted point maps (which were normalised before the decoder
+        # in DepthOnlyNet.forward()).  Single scalar applied identically to X, Y, Z.
+        if point_norm_scale is not None:
+            if point_norm_scale <= 0.0:
+                raise ValueError(
+                    f"point_norm_scale must be a positive float, got {point_norm_scale}"
+                )
+            gt_point1 = gt_point1 / point_norm_scale
+            gt_point2 = gt_point2 / point_norm_scale
+
         # Point-map losses (L1 + Kendall & Gal confidence weighting)
         l_point1, _ = point_map_loss(pred_point1, gt_point1, valid1, conf1, use_confidence)
         l_point2, _ = point_map_loss(pred_point2, gt_point2, valid2, conf2, use_confidence)
@@ -926,6 +938,12 @@ def total_loss(
         #         are low-weight and warmup-gated, so this is acceptable.
         pred1_metric = pred_point1[:, 2:3].clamp(min=0)  # (B, 1, pH, pW)
         pred2_metric = pred_point2[:, 2:3].clamp(min=0)
+
+        # pixel_consistency_loss and geometric_consistency_loss compare against
+        # GT depths in real metres using metric intrinsics — de-normalise first.
+        if point_norm_scale is not None:
+            pred1_metric = pred1_metric * point_norm_scale
+            pred2_metric = pred2_metric * point_norm_scale
 
     else:
         # ================================================================

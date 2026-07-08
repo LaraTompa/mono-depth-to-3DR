@@ -347,6 +347,7 @@ class DepthOnlyNet(nn.Module):
         K:      torch.Tensor | None = None,  # (B, 3, 3)  intrinsics — required for pose refinement
         rgb1:   torch.Tensor | None = None,  # (B, 3, H1, W1) RGB view 1  (required when use_image_encoder=True)
         rgb2:   torch.Tensor | None = None,  # (B, 3, H2, W2) RGB view 2  (required when use_image_encoder=True)
+        point_norm_scale: float | None = None,  # optional isotropic scale: priors /= scale, output in normalised units
     ) -> dict:
         """
         Parameters
@@ -470,6 +471,13 @@ class DepthOnlyNet(nn.Module):
             zeros2 = torch.zeros_like(depth2)
             point_prior2 = torch.cat([zeros2, zeros2, depth2], dim=1)
 
+        # Optional isotropic scale normalisation — applied identically to X, Y, Z
+        # of both priors so the decoder's residual head operates in ~O(1) units.
+        # Zero-initialised residual head is a no-op at t=0 regardless of scale.
+        if point_norm_scale is not None:
+            point_prior1 = point_prior1 / point_norm_scale
+            point_prior2 = point_prior2 / point_norm_scale
+
         # depth_input passed to decoder is the *original* (un-capped,
         # un-normalised) point prior so the residual head corrects in
         # metric-metres space.
@@ -512,10 +520,11 @@ class DepthOnlyNet(nn.Module):
                 }
 
         return {
-            "point1":      out1["point"],
-            "point2":      out2["point"],
-            "confidence1": out1["confidence"],
-            "confidence2": out2["confidence"],
+            "point1":           out1["point"],
+            "point2":           out2["point"],
+            "confidence1":      out1["confidence"],
+            "confidence2":      out2["confidence"],
+            "point_norm_scale": point_norm_scale,
             **pose_preds,
         }
 

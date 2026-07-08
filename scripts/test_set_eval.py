@@ -182,6 +182,8 @@ def run_inference(model, model_variant, cfg, rgb1_t, rgb2_t,
     train_cfg = cfg.get("train", {})
     if model_variant == "depth_only":
         _use_img_enc = bool(getattr(model, "use_image_encoder", False))
+        _pt_norm_cfg = cfg.get("point_normalization", {})
+        _pt_scale = float(_pt_norm_cfg.get("scale", 1.0)) if _pt_norm_cfg.get("enabled", False) else None
         return model(
             depth1=depth_mono1_t,
             depth2=depth_mono2_t,
@@ -189,6 +191,7 @@ def run_inference(model, model_variant, cfg, rgb1_t, rgb2_t,
             K=K_t,
             rgb1=rgb1_t if _use_img_enc else None,
             rgb2=rgb2_t if _use_img_enc else None,
+            point_norm_scale=_pt_scale,
         )
 
     num_pose_iters = int(train_cfg.get("num_pose_iters", 1))
@@ -371,6 +374,12 @@ def main(args):
         print("[eval] depth normalization params: "
               f"mde(scale={float(mde_cfg.get('scale', 1.0)):.6f}, offset={float(mde_cfg.get('offset', 0.0)):.6f}), "
               f"gt(scale={float(gt_cfg.get('scale', 1.0)):.6f}, offset={float(gt_cfg.get('offset', 0.0)):.6f})")
+    point_norm_cfg = cfg.get("point_normalization", {})
+    normalize_points = bool(point_norm_cfg.get("enabled", False))
+    point_norm_scale_eval = float(point_norm_cfg.get("scale", 1.0)) if normalize_points else None
+    print(f"[eval] point_normalization.enabled={normalize_points}")
+    if normalize_points:
+        print(f"[eval] point normalization scale={point_norm_scale_eval:.6f}")
     model, model_variant, arch_cfg = build_model(ckpt, device)
     print(f"[eval] Model variant: {model_variant}")
 
@@ -518,6 +527,11 @@ def main(args):
                 if "point1" in outputs:
                     pred1_out_t = outputs["point1"][:, 2:3].clamp(min=0)  # (B,1,pH,pW)
                     pred2_out_t = outputs["point2"][:, 2:3].clamp(min=0)
+                    # Convert from normalised units back to metric metres if training
+                    # used point normalisation.
+                    if normalize_points and point_norm_scale_eval is not None:
+                        pred1_out_t = pred1_out_t * point_norm_scale_eval
+                        pred2_out_t = pred2_out_t * point_norm_scale_eval
                 else:
                     pred1_out_t = outputs["depth1"]
                     pred2_out_t = outputs["depth2"]

@@ -32,7 +32,13 @@ except ImportError:   # tensorboard not installed — logging silently disabled
     _SummaryWriter = None
 
 from data.scene import find_scene_paths
-from training.losses import total_loss as compute_total_loss, compute_depth_metrics
+from training.losses import (
+    total_loss as compute_total_loss,
+    compute_depth_metrics,
+    unproject_depth,
+    transform_point_map,
+    se3_inv,
+)
 from training.utils import (
     seed_everything, build_dataset, build_loader,
     build_optimizer, build_scheduler,
@@ -118,6 +124,82 @@ def compute_depth_normalization_stats(loader: DataLoader, max_samples: int = 2_0
     return stats
 
 
+def compute_point_normalization_stats(
+    loader: DataLoader,
+    max_samples: int = 2_000_000,
+) -> dict:
+    """
+    Estimate the train-set median of 3D point Euclidean norms over both views.
+
+    Iterates the train loader, unprojects GT depth maps for both views into
+    the view-1 camera frame, and computes scale = median(||P||) over all
+    valid 3D points (single global scalar — same dataset-wide philosophy as
+    compute_depth_normalization_stats).
+
+    Uses training.losses.unproject_depth + se3_inv + transform_point_map so
+    the unprojection convention is identical to point_map_loss.
+
+    Returns {"scale": float} — stored as cfg["point_normalization"]["scale"].
+    """
+    samples: list[torch.Tensor] = []
+    depth_min = 1e-3
+    depth_max = 80.0
+
+    for batch in loader:
+        depths  = batch["depths"]          # (B, N, 1, H, W)
+        K_batch = batch.get("intrinsics")  # (B, 3, 3)
+        if K_batch is None:
+            continue
+
+        gt1 = depths[:, 0]   # (B, 1, H, W)
+        gt2 = depths[:, 1]
+
+        # Valid masks — same convention as point_map_loss / geometric_consistency.
+        valid1 = (gt1 > depth_min) & (gt1 < depth_max) & torch.isfinite(gt1)
+        valid2 = (gt2 > depth_min) & (gt2 < depth_max) & torch.isfinite(gt2)
+
+        # GT point map view 1: unproject directly (already in cam1 frame).
+        gt_point1 = unproject_depth(gt1, K_batch)   # (B, 3, H, W)
+
+        # GT point map view 2: unproject in cam2, warp into cam1 via T_21.
+        gt_point2_cam2 = unproject_depth(gt2, K_batch)
+        if "poses" in batch:
+            poses        = batch["poses"]               # (B, N, 4, 4)
+            T_12_pts     = se3_inv(poses[:, 1]) @ poses[:, 0]
+            T_21_pts     = se3_inv(T_12_pts)
+            gt_point2    = transform_point_map(gt_point2_cam2, T_21_pts)
+        else:
+            gt_point2 = gt_point2_cam2
+
+        def _accumulate(pts: torch.Tensor, valid: torch.Tensor) -> None:
+            norms = pts.norm(dim=1, keepdim=True)           # (B, 1, H, W)
+            vals  = norms[valid].detach().cpu().float().flatten()
+            n = vals.numel()
+            if n == 0:
+                return
+            n_have = sum(x.numel() for x in samples)
+            remaining = max_samples - n_have
+            if remaining <= 0:
+                return
+            if n > remaining:
+                idx = torch.linspace(0, n - 1, remaining, dtype=torch.long)
+                vals = vals[idx]
+            samples.append(vals)
+
+        _accumulate(gt_point1, valid1)
+        _accumulate(gt_point2, valid2)
+
+        if sum(x.numel() for x in samples) >= max_samples:
+            break
+
+    if not samples:
+        raise RuntimeError("No valid 3D points found for point normalization stats")
+
+    all_norms = torch.cat(samples)
+    scale = max(float(all_norms.median()), 1e-6)
+    return {"scale": scale}
+
+
 def run_epoch(
     model,
     loader: DataLoader,
@@ -139,6 +221,8 @@ def run_epoch(
     grad_accum_steps = int(train_cfg.get("gradient_accumulation_steps", 1))
     depth_norm_cfg   = cfg.get("depth_normalization", {})
     normalize_depths = bool(depth_norm_cfg.get("enabled", False))
+    _point_norm_cfg  = cfg.get("point_normalization", {})
+    point_norm_scale = float(_point_norm_cfg.get("scale", 1.0)) if _point_norm_cfg.get("enabled", False) else None
 
     totals    = {
         "loss": 0.0,
@@ -242,6 +326,7 @@ def run_epoch(
                         K=K_gt,
                         rgb1=rgb1 if _use_img_enc else None,
                         rgb2=rgb2 if _use_img_enc else None,
+                        point_norm_scale=point_norm_scale,
                     )
                     # Expose K/T for loss compatibility (no camera supervision).
                     K_iter = K_gt
@@ -290,12 +375,23 @@ def run_epoch(
             if normalize_depths:
                 depth_norm_scale = float(depth_norm_cfg.get("gt", {}).get("scale", 1.0))
 
+            # Point-map sanity print (first training step of first epoch, depth_only only)
+            if train and epoch == 1 and step == 0 and model_variant == "depth_only" and "point1" in outputs:
+                p1 = outputs["point1"].detach().float()
+                norms1 = p1.norm(dim=1)
+                print(
+                    f"[pt-sanity] epoch={epoch:03d} step={step+1:04d} "
+                    f"point1 norm: min={norms1.min():.3f} median={norms1.median():.3f} max={norms1.max():.3f}"
+                    + (f"  point_norm_scale={point_norm_scale:.4f}" if point_norm_scale is not None else "  (no point norm)")
+                )
+
             loss, breakdown = compute_total_loss(
                 outputs, batch, cfg.get("loss", {}), K_iter,
                 use_confidence=use_confidence,
                 camera_weight=camera_weight,
                 epoch=epoch,
                 depth_norm_scale=depth_norm_scale,
+                point_norm_scale=point_norm_scale,
             )
 
             if train and step < int(train_cfg.get("depth_loss_debug_steps", 3)):
@@ -352,6 +448,9 @@ def run_epoch(
                 # For point models derive depth from the Z-channel of the cam-1-frame point map.
                 if "point1" in outputs:
                     pred1 = outputs["point1"][:, 2:3].clamp(min=0)  # (B,1,pH,pW)
+                    # De-normalise from point-normalised units to real metres for metric computation.
+                    if point_norm_scale is not None:
+                        pred1 = pred1 * point_norm_scale
                 else:
                     pred1 = outputs.get("depth1_metric", outputs["depth1"])  # (B,1,pH,pW)
                 gt_depths_for_metrics = batch.get("depths_metric", depths)
@@ -487,6 +586,21 @@ def train(cfg: dict, arch_cfg: dict, resume: str | None = None) -> None:
         print("[train] Depth normalization from train split: "
               f"MDE median={stats['mde']['median']:.4f} std={stats['mde']['std']:.4f}; "
               f"GT median={stats['gt']['median']:.4f} std={stats['gt']['std']:.4f}")
+
+    point_norm_cfg = cfg.get("point_normalization", {})
+    if point_norm_cfg.get("enabled", False):
+        _pt_stats_loader = DataLoader(
+            train_ds,
+            batch_size=cfg["loader"]["batch_size"],
+            num_workers=cfg["loader"].get("num_workers", 0),
+            pin_memory=cfg["loader"].get("pin_memory", True),
+            drop_last=False,
+            shuffle=False,
+        )
+        max_samples_pt = int(point_norm_cfg.get("max_samples", 2_000_000))
+        pt_stats = compute_point_normalization_stats(_pt_stats_loader, max_samples=max_samples_pt)
+        cfg["point_normalization"] = {**point_norm_cfg, **pt_stats}
+        print(f"[train] Point normalization from train split: scale={pt_stats['scale']:.4f}")
 
     train_loader = build_loader(cfg, train_ds, shuffle=True)
     val_loader   = build_loader(cfg, val_ds,   shuffle=False)
