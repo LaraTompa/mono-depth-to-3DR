@@ -575,35 +575,49 @@ def train(cfg: dict, arch_cfg: dict, resume: str | None = None) -> None:
 
     depth_norm_cfg = cfg.get("depth_normalization", {})
     if depth_norm_cfg.get("enabled", False):
-        stats_loader = DataLoader(
-            train_ds,
-            batch_size=cfg["loader"]["batch_size"],
-            num_workers=cfg["loader"].get("num_workers", 0),
-            pin_memory=cfg["loader"].get("pin_memory", True),
-            drop_last=False,
-            shuffle=False,
+        _mde_cfg = depth_norm_cfg.get("mde", {})
+        _gt_cfg  = depth_norm_cfg.get("gt",  {})
+        _needs_depth_stats = (
+            _mde_cfg.get("median") is None or _mde_cfg.get("scale") is None
+            or _gt_cfg.get("median") is None or _gt_cfg.get("scale") is None
         )
-        max_samples = int(depth_norm_cfg.get("max_samples", 2_000_000))
-        stats = compute_depth_normalization_stats(stats_loader, max_samples=max_samples)
-        cfg["depth_normalization"] = {**depth_norm_cfg, **stats}
-        print("[train] Depth normalization from train split: "
-              f"MDE median={stats['mde']['median']:.4f} std={stats['mde']['std']:.4f}; "
-              f"GT median={stats['gt']['median']:.4f} std={stats['gt']['std']:.4f}")
+        if _needs_depth_stats:
+            stats_loader = DataLoader(
+                train_ds,
+                batch_size=cfg["loader"]["batch_size"],
+                num_workers=cfg["loader"].get("num_workers", 0),
+                pin_memory=cfg["loader"].get("pin_memory", True),
+                drop_last=False,
+                shuffle=False,
+            )
+            max_samples = int(depth_norm_cfg.get("max_samples", 2_000_000))
+            stats = compute_depth_normalization_stats(stats_loader, max_samples=max_samples)
+            cfg["depth_normalization"] = {**depth_norm_cfg, **stats}
+            print("[train] Depth normalization from train split: "
+                  f"MDE median={stats['mde']['median']:.4f} std={stats['mde']['std']:.4f}; "
+                  f"GT median={stats['gt']['median']:.4f} std={stats['gt']['std']:.4f}")
+        else:
+            print("[train] Depth normalization using config values: "
+                  f"MDE median={_mde_cfg['median']:.4f} std={_mde_cfg.get('std', float('nan')):.4f}; "
+                  f"GT median={_gt_cfg['median']:.4f} std={_gt_cfg.get('std', float('nan')):.4f}")
 
     point_norm_cfg = cfg.get("point_normalization", {})
     if point_norm_cfg.get("enabled", False):
-        _pt_stats_loader = DataLoader(
-            train_ds,
-            batch_size=cfg["loader"]["batch_size"],
-            num_workers=cfg["loader"].get("num_workers", 0),
-            pin_memory=cfg["loader"].get("pin_memory", True),
-            drop_last=False,
-            shuffle=False,
-        )
-        max_samples_pt = int(point_norm_cfg.get("max_samples", 2_000_000))
-        pt_stats = compute_point_normalization_stats(_pt_stats_loader, max_samples=max_samples_pt)
-        cfg["point_normalization"] = {**point_norm_cfg, **pt_stats}
-        print(f"[train] Point normalization from train split: scale={pt_stats['scale']:.4f}")
+        if point_norm_cfg.get("scale") is None:
+            _pt_stats_loader = DataLoader(
+                train_ds,
+                batch_size=cfg["loader"]["batch_size"],
+                num_workers=cfg["loader"].get("num_workers", 0),
+                pin_memory=cfg["loader"].get("pin_memory", True),
+                drop_last=False,
+                shuffle=False,
+            )
+            max_samples_pt = int(point_norm_cfg.get("max_samples", 2_000_000))
+            pt_stats = compute_point_normalization_stats(_pt_stats_loader, max_samples=max_samples_pt)
+            cfg["point_normalization"] = {**point_norm_cfg, **pt_stats}
+            print(f"[train] Point normalization from train split: scale={pt_stats['scale']:.4f}")
+        else:
+            print(f"[train] Point normalization using config value: scale={point_norm_cfg['scale']:.4f}")
 
     train_loader = build_loader(cfg, train_ds, shuffle=True)
     val_loader   = build_loader(cfg, val_ds,   shuffle=False)

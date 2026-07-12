@@ -15,17 +15,18 @@ dataset:
 # Optional depth normalisation during training/evaluation
 # ---------------------------------------------------------------------------
 depth_normalization:
-  enabled: false
+  enabled: true
   max_samples: 2000000  # valid pixels sampled from train split for median/std estimation
+  # Set any value to null to recompute it from the train split at startup.
   mde:
-    median: 1.0
-    std: 1.0
-    scale: 1.0
+    median: 0.4320
+    std: 0.2030
+    scale: 0.4320
     offset: 0.0
   gt:
-    median: 1.0
-    std: 1.0
-    scale: 1.0
+    median: 1.5890
+    std: 0.8017
+    scale: 1.5890
     offset: 0.0
 
 # ---------------------------------------------------------------------------
@@ -46,9 +47,9 @@ depth_normalization:
 #
 # scale is populated automatically at runtime by compute_point_normalization_stats().
 point_normalization:
-  enabled: false
+  enabled: true
   max_samples: 2000000  # 3D point norms sampled from train split
-  scale: 1.0            # filled in at runtime; do not set manually
+  scale: 1.7724         # set to null to recompute from the train split at startup
 
 # ---------------------------------------------------------------------------
 # DataLoader
