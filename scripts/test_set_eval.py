@@ -170,7 +170,31 @@ def build_model(ckpt, device):
         )
 
     model = model.to(device)
-    model.load_state_dict(ckpt["model"])
+
+    # ── Backward-compatible state-dict loading ────────────────────────────
+    # Old depth_only checkpoints used different decoder head names:
+    #   decoder.head_scale / decoder.head_resid  (depth-output style)
+    # The current decoder uses:
+    #   decoder.head_resid_xyz                   (XYZ point-map style)
+    # Strip the incompatible old keys and load the rest; the new head stays
+    # zero-initialised (passthrough: output = geometric prior + 0 = prior).
+    sd = ckpt["model"]
+    _old_depth_head_keys = {
+        "decoder.head_scale.weight", "decoder.head_scale.bias",
+        "decoder.head_resid.weight", "decoder.head_resid.bias",
+    }
+    _stale = _old_depth_head_keys & sd.keys()
+    if _stale:
+        print(
+            f"[build_model] WARNING: checkpoint has old-style depth head keys "
+            f"({sorted(_stale)}).  They will be ignored and the new "
+            f"head_resid_xyz will use its zero initialisation (output = prior)."
+        )
+        sd = {k: v for k, v in sd.items() if k not in _stale}
+        model.load_state_dict(sd, strict=False)
+    else:
+        model.load_state_dict(sd)
+
     model.eval()
     return model, model_variant, arch_cfg
 
@@ -826,7 +850,7 @@ if __name__ == "__main__":
                         help="Limit number of batch dirs (0 = all)")
     parser.add_argument("--max_pairs", type=int, default=0,
                         help="Stop after this many pairs total (0 = all)")
-    parser.add_argument("--window", type=int, default=1,
+    parser.add_argument("--window", type=int, default=0,
                         help="Max consecutive pairs per scene to evaluate (0 = all)")
     parser.add_argument("--pair_stride", type=int, default=1,
                         help="Step between evaluated pairs within a scene")
