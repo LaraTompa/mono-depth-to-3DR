@@ -185,3 +185,92 @@ class DepthDecoder(nn.Module):
             residual_xyz = self.head_resid_xyz(x)        # (B, 3, 480, 640)
             point = prior_480 + residual_xyz             # (B, 3, 480, 640)  metric metres
             return {"point": point, "confidence": conf}
+
+
+class LegacyDepthDecoder(nn.Module):
+    """
+    Backward-compatible decoder matching the architecture of checkpoints trained
+    before the XYZ point-map output was introduced.
+
+    Old output heads
+    ----------------
+    Instead of a 3-channel ``head_resid_xyz`` the old decoder had two 1-channel
+    heads that predicted a multiplicative scale and an additive residual on top
+    of the MDE depth prior:
+
+        scale = softplus(head_scale(x)) + 1e-4   # always positive, ≈1 at init
+        depth = scale * depth_prior + head_resid(x)
+
+    This class uses the **same call signature** as the current ``DepthDecoder``
+    (``point_prior`` / ``input_hw``) so it can be dropped into ``DepthOnlyNet``
+    transparently.  When ``predict_depth_map=True`` in ``DepthOnlyNet``,
+    ``point_prior`` is a 1-channel scalar depth map — exactly what this decoder
+    expects as ``depth_input``.
+
+    Returns ``{"depth": …, "confidence": …}`` — the same keys the network reads
+    back in depth-map mode.
+    """
+
+    def __init__(
+        self,
+        token_dim: int = 256,
+        skip_dim:  int = 256,
+        hidden:    int = 128,
+    ):
+        super().__init__()
+
+        self.token_proj = nn.Conv2d(token_dim, hidden, 1)
+        self.fuse16     = ConvBnGelu(hidden + skip_dim, hidden)
+        self.fuse8      = ConvBnGelu(hidden + skip_dim, hidden)
+        self.fuse4      = ConvBnGelu(hidden + skip_dim, hidden)
+        self.final_conv = ConvBnGelu(hidden, hidden)
+
+        # Old-style heads: scale + residual on 1-channel depth, plus confidence.
+        self.head_scale = nn.Conv2d(hidden, 1, 1)
+        self.head_resid = nn.Conv2d(hidden, 1, 1)
+        self.head_conf  = nn.Conv2d(hidden, 1, 1)
+
+        for head in (self.head_scale, self.head_resid, self.head_conf):
+            nn.init.zeros_(head.weight)
+            nn.init.zeros_(head.bias)
+
+    def forward(
+        self,
+        tokens:      torch.Tensor,   # (B, N, token_dim)
+        skips:       dict,           # {"s4", "s8", "s16"}
+        point_prior: torch.Tensor,   # (B, 1, H, W) depth prior (called point_prior for API compat)
+        input_hw:    tuple,          # (H, W) — unused here, kept for API compat
+    ) -> dict:
+        B = tokens.shape[0]
+        h16, w16 = skips["s16"].shape[-2:]
+
+        x = tokens.reshape(B, h16, w16, -1).permute(0, 3, 1, 2).contiguous()
+        x = self.token_proj(x)
+
+        s4  = skips["s4"]
+        s8  = skips["s8"]
+        s16 = skips["s16"]
+
+        x = F.interpolate(x, size=s16.shape[-2:], mode="bilinear", align_corners=False)
+        x = self.fuse16(torch.cat([x, s16], dim=1))
+
+        x = F.interpolate(x, size=s8.shape[-2:], mode="bilinear", align_corners=False)
+        x = self.fuse8(torch.cat([x, s8], dim=1))
+
+        x = F.interpolate(x, size=s4.shape[-2:], mode="bilinear", align_corners=False)
+        x = self.fuse4(torch.cat([x, s4], dim=1))
+
+        x = F.interpolate(x, size=(OUT_H, OUT_W), mode="bilinear", align_corners=False)
+        x = self.final_conv(x)
+
+        depth_480 = F.interpolate(
+            point_prior, size=(OUT_H, OUT_W), mode="bilinear", align_corners=False
+        )
+
+        log_scale = self.head_scale(x)
+        residual  = self.head_resid(x)
+        scale     = F.softplus(log_scale) + 1e-4
+        depth     = scale * depth_480 + residual
+        conf      = torch.sigmoid(self.head_conf(x))
+
+        return {"depth": depth, "confidence": conf}

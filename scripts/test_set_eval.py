@@ -172,28 +172,34 @@ def build_model(ckpt, device):
     model = model.to(device)
 
     # ── Backward-compatible state-dict loading ────────────────────────────
-    # Old depth_only checkpoints used different decoder head names:
-    #   decoder.head_scale / decoder.head_resid  (depth-output style)
-    # The current decoder uses:
-    #   decoder.head_resid_xyz                   (XYZ point-map style)
-    # Strip the incompatible old keys and load the rest; the new head stays
-    # zero-initialised (passthrough: output = geometric prior + 0 = prior).
+    # Old depth_only checkpoints used a different decoder output head:
+    #   head_scale + head_resid  (scale * depth_prior + residual)
+    # instead of the current:
+    #   head_resid_xyz           (XYZ point-map residual)
+    #
+    # When these old keys are detected we swap in LegacyDepthDecoder — which
+    # has the *exact* old architecture — and set predict_depth_map=True so the
+    # network's forward returns {"depth1", "depth2"} rather than point maps.
+    # All trained weights (encoder, cross-attention, decoder backbone) load
+    # with strict=True and nothing is discarded.
     sd = ckpt["model"]
-    _old_depth_head_keys = {
-        "decoder.head_scale.weight", "decoder.head_scale.bias",
-        "decoder.head_resid.weight", "decoder.head_resid.bias",
-    }
-    _stale = _old_depth_head_keys & sd.keys()
-    if _stale:
+    if "decoder.head_scale.weight" in sd:
+        from models.model_depth_only.decoder import LegacyDepthDecoder
+        c = arch_cfg.get("depth_only", arch_cfg)
+        legacy_dec = LegacyDepthDecoder(
+            token_dim = int(c.get("token_dim",      768)),
+            skip_dim  = int(c.get("feature_dim",    256)),
+            hidden    = int(c.get("decoder_hidden", 128)),
+        ).to(device)
+        model.decoder = legacy_dec
+        model.predict_depth_map = True
         print(
-            f"[build_model] WARNING: checkpoint has old-style depth head keys "
-            f"({sorted(_stale)}).  They will be ignored and the new "
-            f"head_resid_xyz will use its zero initialisation (output = prior)."
+            "[build_model] Old-style depth decoder detected "
+            "(head_scale / head_resid).  Using LegacyDepthDecoder — "
+            "all trained weights loaded with strict=True."
         )
-        sd = {k: v for k, v in sd.items() if k not in _stale}
-        model.load_state_dict(sd, strict=False)
-    else:
-        model.load_state_dict(sd)
+
+    model.load_state_dict(sd)
 
     model.eval()
     return model, model_variant, arch_cfg
