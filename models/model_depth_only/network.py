@@ -193,6 +193,7 @@ class DepthOnlyNet(nn.Module):
         pose_refine_hidden: int   = 128,
         use_image_encoder:  bool  = False,
         image_encoder_ckpt: str | None = None,
+        predict_depth_map:  bool  = False,
     ):
         super().__init__()
 
@@ -202,6 +203,7 @@ class DepthOnlyNet(nn.Module):
         self.max_encode_hw      = max_encode_hw
         self.pose_refine_iters  = pose_refine_iters
         self.use_image_encoder  = use_image_encoder
+        self.predict_depth_map  = predict_depth_map
 
         # ── Shared depth encoder ─────────────────────────────────────────
         self.encoder = DepthEncoder(
@@ -272,9 +274,10 @@ class DepthOnlyNet(nn.Module):
         # ── Depth decoders (one per view, weight-tied) ───────────────────
         # Both views share the same decoder weights.
         self.decoder = DepthDecoder(
-            token_dim = token_dim,
-            skip_dim  = feature_dim,
-            hidden    = decoder_hidden,
+            token_dim         = token_dim,
+            skip_dim          = feature_dim,
+            hidden            = decoder_hidden,
+            predict_depth_map = predict_depth_map,
         )
 
     # ------------------------------------------------------------------
@@ -364,12 +367,23 @@ class DepthOnlyNet(nn.Module):
 
         Returns
         -------
-        {
-          "point1"      : (B, 3, 480, 640),  # XYZ in view-1 camera frame
-          "point2"      : (B, 3, 480, 640),  # XYZ in view-1 camera frame
-          "confidence1" : (B, 1, 480, 640),
-          "confidence2" : (B, 1, 480, 640),
-        }
+        Point-map mode (predict_depth_map=False, default)::
+
+            {
+              "point1"      : (B, 3, 480, 640),  # XYZ in view-1 camera frame
+              "point2"      : (B, 3, 480, 640),  # XYZ in view-1 camera frame
+              "confidence1" : (B, 1, 480, 640),
+              "confidence2" : (B, 1, 480, 640),
+            }
+
+        Depth-map mode (predict_depth_map=True)::
+
+            {
+              "depth1"      : (B, 1, 480, 640),  # scalar depth (metres, softplus)
+              "depth2"      : (B, 1, 480, 640),
+              "confidence1" : (B, 1, 480, 640),
+              "confidence2" : (B, 1, 480, 640),
+            }
         """
         # ── 1. Cap input resolution to bound s16 token count ─────────────────
         # depth_input (passed to decoder for the residual prior) stays at
@@ -447,42 +461,49 @@ class DepthOnlyNet(nn.Module):
         t1_out, t2_out, cam_tok1, cam_tok2 = self.cross_attn(t1, t2, T_12=T_12)
         # t1_out, t2_out : (B, N, token_dim)
 
-        # ── 5. Build point priors + decode both views ────────────────────────
-        # K is required to build the geometric prior; if not provided, fall
-        # back to a unit approximation (X=Y=0, Z=depth) which is also safe
-        # since the residual head is zero-initialised.
-        if K is not None:
-            # Point prior for view 1: unproject depth1 in view-1 frame.
-            point_prior1 = self._unproject(depth1, K)          # (B, 3, H1, W1)
-
-            # Point prior for view 2: unproject depth2 in view-2 frame, then
-            # warp into view-1 frame via T_21 = se3_inv(T_12).
-            if T_12 is not None:
-                T_21 = se3_inv(T_12)                           # cam2 → cam1
-                pp2_cam2 = self._unproject(depth2, K)          # (B, 3, H2, W2)
-                point_prior2 = transform_pts(pp2_cam2, T_21)  # (B, 3, H2, W2)
-            else:
-                # No pose: view-2 prior stays in view-2 frame (best we can do)
-                point_prior2 = self._unproject(depth2, K)
+        # ── 5. Build priors + decode both views ─────────────────────────────
+        if self.predict_depth_map:
+            # ── Depth-map mode: use MDE depths directly as 1-channel priors.
+            # No unprojection or pose-warping needed — the decoder predicts
+            # a scalar depth residual on top of the MDE prior.
+            prior1 = depth1     # (B, 1, H1, W1)  — passed at original resolution
+            prior2 = depth2     # (B, 1, H2, W2)
         else:
-            # Fallback: trivial prior [0, 0, depth] — residual head corrects.
-            zeros = torch.zeros_like(depth1)
-            point_prior1 = torch.cat([zeros, zeros, depth1], dim=1)
-            zeros2 = torch.zeros_like(depth2)
-            point_prior2 = torch.cat([zeros2, zeros2, depth2], dim=1)
+            # ── Point-map mode: build geometric 3-D priors.
+            # K is required to build the geometric prior; if not provided, fall
+            # back to a unit approximation (X=Y=0, Z=depth) which is also safe
+            # since the residual head is zero-initialised.
+            if K is not None:
+                # Point prior for view 1: unproject depth1 in view-1 frame.
+                prior1 = self._unproject(depth1, K)             # (B, 3, H1, W1)
 
-        # Optional isotropic scale normalisation — applied identically to X, Y, Z
-        # of both priors so the decoder's residual head operates in ~O(1) units.
-        # Zero-initialised residual head is a no-op at t=0 regardless of scale.
-        if point_norm_scale is not None:
-            point_prior1 = point_prior1 / point_norm_scale
-            point_prior2 = point_prior2 / point_norm_scale
+                # Point prior for view 2: unproject depth2 in view-2 frame, then
+                # warp into view-1 frame via T_21 = se3_inv(T_12).
+                if T_12 is not None:
+                    T_21 = se3_inv(T_12)                        # cam2 → cam1
+                    pp2_cam2 = self._unproject(depth2, K)       # (B, 3, H2, W2)
+                    prior2 = transform_pts(pp2_cam2, T_21)      # (B, 3, H2, W2)
+                else:
+                    # No pose: view-2 prior stays in view-2 frame (best we can do)
+                    prior2 = self._unproject(depth2, K)
+            else:
+                # Fallback: trivial prior [0, 0, depth] — residual head corrects.
+                zeros = torch.zeros_like(depth1)
+                prior1 = torch.cat([zeros, zeros, depth1], dim=1)
+                zeros2 = torch.zeros_like(depth2)
+                prior2 = torch.cat([zeros2, zeros2, depth2], dim=1)
+
+            # Optional isotropic scale normalisation — applied identically to X, Y, Z
+            # of both priors so the decoder's residual head operates in ~O(1) units.
+            # Zero-initialised residual head is a no-op at t=0 regardless of scale.
+            if point_norm_scale is not None:
+                prior1 = prior1 / point_norm_scale
+                prior2 = prior2 / point_norm_scale
 
         # depth_input passed to decoder is the *original* (un-capped,
-        # un-normalised) point prior so the residual head corrects in
-        # metric-metres space.
-        out1 = self.decoder(t1_out, feats1, point_prior=point_prior1, input_hw=(H1, W1))
-        out2 = self.decoder(t2_out, feats2, point_prior=point_prior2, input_hw=(H2, W2))
+        # un-normalised) prior so the residual head corrects in metric-metres space.
+        out1 = self.decoder(t1_out, feats1, point_prior=prior1, input_hw=(H1, W1))
+        out2 = self.decoder(t2_out, feats2, point_prior=prior2, input_hw=(H2, W2))
 
         # ── 6. Pose prediction + optional iterative GRU refinement ────────────
         # PoseHead uses encoder global features (view-specific, before cross-attn).
@@ -519,6 +540,14 @@ class DepthOnlyNet(nn.Module):
                     "T_12_iters": T_12_iters[:-1],   # [T_1 … T_{N-1}] for pose_iters_loss
                 }
 
+        if self.predict_depth_map:
+            return {
+                "depth1":      out1["depth"],
+                "depth2":      out2["depth"],
+                "confidence1": out1["confidence"],
+                "confidence2": out2["confidence"],
+                **pose_preds,
+            }
         return {
             "point1":           out1["point"],
             "point2":           out2["point"],
@@ -569,4 +598,5 @@ def build_depth_only_net(cfg: dict) -> DepthOnlyNet:
         pose_refine_hidden   = c.get("pose_refine_hidden",       128),
         use_image_encoder    = c.get("use_image_encoder",       False),
         image_encoder_ckpt   = c.get("image_encoder_ckpt",       None),
+        predict_depth_map    = c.get("predict_depth_map",        False),
     )

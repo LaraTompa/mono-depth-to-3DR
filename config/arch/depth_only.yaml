@@ -50,7 +50,7 @@ depth_only:
   # true  → blocks act as a fixed feature extractor; only enc_to_dec,
   #          pose_enc, decoder, and heads are trained.
   # false → fine-tune everything end-to-end (recommended after warm-up).
-  freeze_cross_attn: true
+  freeze_cross_attn: false
 
   # Pose prediction mode.
   # false (default): GT T_12 is encoded via PoseEncoder and injected as a
@@ -99,7 +99,7 @@ depth_only:
   #
   # Set use_image_encoder: false (default) to reproduce the original depth-only
   # model exactly.
-  use_image_encoder: true
+  use_image_encoder: false
 
   # Path to the MASt3R .pth checkpoint used to initialise the ViT encoder
   # weights.  The same file used for mast3r_ckpt (cross-attention init) works.
@@ -108,4 +108,14 @@ depth_only:
   #   https://download.europe.naverlabs.com/ComputerVision/MASt3R/
   #       MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth
   image_encoder_ckpt: checkpoint_mast3r/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth
+
+  # Output mode: point maps vs. depth maps
+  # ----------------------------------------
+  # false (default): the decoder predicts a 3-channel XYZ point map in the
+  #   view-1 camera frame (DUSt3R-style).  Supervised by point_map_loss.
+  # true: the decoder predicts a scalar depth map (1-channel, softplus for
+  #   positivity).  Supervised by si_log_loss + mse_depth_loss, identical to
+  #   the v1/vista models.  Useful for ablating the 3D geometry branch or
+  #   when K is unavailable at inference time.
+  predict_depth_map: false
   # image_encoder_ckpt: checkpoint_mast3r/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth

@@ -71,11 +71,14 @@ class DepthDecoder(nn.Module):
 
     def __init__(
         self,
-        token_dim: int = 256,
-        skip_dim:  int = 256,
-        hidden:    int = 128,
+        token_dim:         int  = 256,
+        skip_dim:          int  = 256,
+        hidden:            int  = 128,
+        predict_depth_map: bool = False,
     ):
         super().__init__()
+
+        self.predict_depth_map = predict_depth_map
 
         # Project token_dim → hidden at s16
         self.token_proj = nn.Conv2d(token_dim, hidden, 1)
@@ -91,11 +94,19 @@ class DepthDecoder(nn.Module):
         self.final_conv = ConvBnGelu(hidden, hidden)
 
         # Output heads — zero-init residual head so the network starts as a
-        # passthrough at t=0 (output = point_prior + 0 = point_prior).
-        self.head_resid_xyz = nn.Conv2d(hidden, 3, 1)  # 3-ch XYZ residual (metres)
-        self.head_conf      = nn.Conv2d(hidden, 1, 1)  # confidence logit
+        # passthrough at t=0 (output = prior + 0 = prior).
+        if predict_depth_map:
+            # 1-channel depth residual; softplus applied at inference for positivity.
+            self.head_depth_resid = nn.Conv2d(hidden, 1, 1)
+            zero_heads = (self.head_depth_resid,)
+        else:
+            # 3-channel XYZ residual (metres) — DUSt3R-style point-map output.
+            self.head_resid_xyz = nn.Conv2d(hidden, 3, 1)
+            zero_heads = (self.head_resid_xyz,)
+        self.head_conf = nn.Conv2d(hidden, 1, 1)  # confidence logit
+        zero_heads = zero_heads + (self.head_conf,)
 
-        for head in (self.head_resid_xyz, self.head_conf):
+        for head in zero_heads:
             nn.init.zeros_(head.weight)
             nn.init.zeros_(head.bias)
 
@@ -103,14 +114,21 @@ class DepthDecoder(nn.Module):
         self,
         tokens:      torch.Tensor,   # (B, N, token_dim)  cross-attended tokens
         skips:       dict,           # {"s4", "s8", "s16"} from DepthEncoder
-        point_prior: torch.Tensor,   # (B, 3, H, W) geometric point-map prior (metric XYZ)
-        input_hw:    tuple,          # (H, W) spatial size of the point prior
+        point_prior: torch.Tensor,   # (B, 3, H, W) point-map prior  OR  (B, 1, H, W) depth prior
+        input_hw:    tuple,          # (H, W) spatial size of the prior
     ) -> dict:
         """
-        Returns
-        -------
+        Returns (point-map mode)
+        ------------------------
         {
           "point":      (B, 3, 480, 640),  # XYZ in view-1 camera frame, metric
+          "confidence": (B, 1, 480, 640),
+        }
+
+        Returns (depth-map mode, predict_depth_map=True)
+        -------------------------------------------------
+        {
+          "depth":      (B, 1, 480, 640),  # scalar depth in metres (softplus)
           "confidence": (B, 1, 480, 640),
         }
         """
@@ -149,20 +167,21 @@ class DepthDecoder(nn.Module):
         x = F.interpolate(x, size=(OUT_H, OUT_W), mode="bilinear", align_corners=False)
         x = self.final_conv(x)                          # (B, hidden, 480, 640)
 
-        # ── Upsample point prior to output resolution ───────────────────────
+        # ── Upsample prior to output resolution ────────────────────────────
         prior_480 = F.interpolate(
             point_prior, size=(OUT_H, OUT_W), mode="bilinear", align_corners=False
-        )                                                # (B, 3, 480, 640)
+        )                                                # (B, C, 480, 640)  C=3 or 1
 
-        # ── Output heads ─────────────────────────────────────────────────
-        residual_xyz = self.head_resid_xyz(x)            # (B, 3, 480, 640)
-        conf_logit   = self.head_conf(x)                 # (B, 1, 480, 640)
+        conf = torch.sigmoid(self.head_conf(x))          # (B, 1, 480, 640)  ∈ (0,1)
 
-        # point = prior + XYZ residual  (metric metres, no per-axis rescaling)
-        point = prior_480 + residual_xyz                 # (B, 3, 480, 640)
-        conf  = torch.sigmoid(conf_logit)                # (B, 1, 480, 640)  ∈ (0,1)
-
-        return {
-            "point":      point,
-            "confidence": conf,
-        }
+        if self.predict_depth_map:
+            # ── Depth-map output (1-channel, softplus for positivity) ────────
+            residual_depth = self.head_depth_resid(x)    # (B, 1, 480, 640)
+            # prior_480 is (B, 1, H, W) scalar depth; softplus guarantees > 0.
+            depth = F.softplus(prior_480 + residual_depth)  # (B, 1, 480, 640)
+            return {"depth": depth, "confidence": conf}
+        else:
+            # ── Point-map output (3-channel XYZ residual, DUSt3R-style) ─────
+            residual_xyz = self.head_resid_xyz(x)        # (B, 3, 480, 640)
+            point = prior_480 + residual_xyz             # (B, 3, 480, 640)  metric metres
+            return {"point": point, "confidence": conf}
