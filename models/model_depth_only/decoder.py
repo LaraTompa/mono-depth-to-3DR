@@ -27,6 +27,18 @@ starts as a passthrough (prior only) at t=0:
 Everything stays in metric (metres).  No per-axis or global scalar
 normalisation is applied to the point maps.
 
+Depth-map output  (predict_depth_map=True)
+-------------------------------------------
+Instead of an XYZ residual, the decoder predicts a scalar log-space
+multiplicative correction on top of the scalar MDE depth prior:
+
+    depth_out = depth_prior_480 * exp(log_scale)
+
+Zero-initialising the head weight + bias makes log_scale = 0 at t=0, so
+exp(log_scale) = 1× and the network starts as a passthrough (prior only).
+This differs from ``LegacyDepthDecoder``, which applied a raw
+softplus(·)-activated scale plus an additive residual.
+
 Confidence
 ----------
 A separate sigmoid-activated head produces a per-pixel confidence map at
@@ -96,9 +108,10 @@ class DepthDecoder(nn.Module):
         # Output heads — zero-init residual head so the network starts as a
         # passthrough at t=0 (output = prior + 0 = prior).
         if predict_depth_map:
-            # 1-channel depth residual; softplus applied at inference for positivity.
-            self.head_depth_resid = nn.Conv2d(hidden, 1, 1)
-            zero_heads = (self.head_depth_resid,)
+            # 1-channel log-space multiplicative correction: depth = prior * exp(log_scale).
+            # Zero-init → exp(0) = 1 → passthrough (scale=1) at t=0.
+            self.head_log_scale = nn.Conv2d(hidden, 1, 1)
+            zero_heads = (self.head_log_scale,)
         else:
             # 3-channel XYZ residual (metres) — DUSt3R-style point-map output.
             self.head_resid_xyz = nn.Conv2d(hidden, 3, 1)
@@ -128,7 +141,8 @@ class DepthDecoder(nn.Module):
         Returns (depth-map mode, predict_depth_map=True)
         -------------------------------------------------
         {
-          "depth":      (B, 1, 480, 640),  # scalar depth in metres (softplus)
+          "depth":      (B, 1, 480, 640),  # scalar depth in metres (multiplicative,
+                                            # log-space correction of the prior)
           "confidence": (B, 1, 480, 640),
         }
         """
@@ -175,10 +189,13 @@ class DepthDecoder(nn.Module):
         conf = torch.sigmoid(self.head_conf(x))          # (B, 1, 480, 640)  ∈ (0,1)
 
         if self.predict_depth_map:
-            # ── Depth-map output (1-channel, softplus for positivity) ────────
-            residual_depth = self.head_depth_resid(x)    # (B, 1, 480, 640)
-            # prior_480 is (B, 1, H, W) scalar depth; softplus guarantees > 0.
-            depth = F.softplus(prior_480 + residual_depth)  # (B, 1, 480, 640)
+            # ── Depth-map output (multiplicative correction in log-space) ────
+            # depth = prior * exp(log_scale).  Unlike LegacyDepthDecoder's raw
+            # softplus(head_scale(x)) scale, the correction is predicted directly
+            # in log-space so it is symmetric around 1× (log_scale=0 → passthrough)
+            # and exp(·) guarantees strict positivity without a softplus/epsilon.
+            log_scale = self.head_log_scale(x)            # (B, 1, 480, 640)
+            depth = prior_480 * torch.exp(log_scale)      # (B, 1, 480, 640)
             return {"depth": depth, "confidence": conf}
         else:
             # ── Point-map output (3-channel XYZ residual, DUSt3R-style) ─────

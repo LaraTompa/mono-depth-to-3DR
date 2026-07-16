@@ -379,7 +379,8 @@ class DepthOnlyNet(nn.Module):
         Depth-map mode (predict_depth_map=True)::
 
             {
-              "depth1"      : (B, 1, 480, 640),  # scalar depth (metres, softplus)
+              "depth1"      : (B, 1, 480, 640),  # scalar depth (metres, log-space
+                                                  # multiplicative correction of prior)
               "depth2"      : (B, 1, 480, 640),
               "confidence1" : (B, 1, 480, 640),
               "confidence2" : (B, 1, 480, 640),
