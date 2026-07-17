@@ -547,6 +547,8 @@ class DepthOnlyNet(nn.Module):
                 "depth2":      out2["depth"],
                 "confidence1": out1["confidence"],
                 "confidence2": out2["confidence"],
+                "log_scale1":  out1["log_scale"],
+                "log_scale2":  out2["log_scale"],
                 **pose_preds,
             }
         return {

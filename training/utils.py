@@ -3,6 +3,7 @@
 import torch
 from torch.utils.data import DataLoader
 from data.preprocessing import PreSampledPairDataset
+from collections import deque
 import os
 
 # ---------------------------------------------------------------------------
@@ -65,39 +66,83 @@ def build_optimizer(cfg: dict, model: torch.nn.Module) -> torch.optim.Optimizer:
     # Controlled by optimizer.cross_attn_lr_scale in the config (default 0.1).
     cross_attn_scale = float(opt_cfg.get("cross_attn_lr_scale", 0.1))
     cross_attn_mod   = getattr(model, "cross_attn", None)
+    use_cross_attn_split = cross_attn_mod is not None and cross_attn_scale != 1.0
+    cross_attn_ids = {id(p) for p in cross_attn_mod.parameters()} if use_cross_attn_split else set()
 
-    if cross_attn_mod is not None and cross_attn_scale != 1.0:
-        cross_attn_ids  = {id(p) for p in cross_attn_mod.parameters()}
-        main_params     = [p for p in model.parameters() if id(p) not in cross_attn_ids]
-        cross_attn_params = list(cross_attn_mod.parameters())
-        # Group 0 = everything except cross_attn  (lr unchanged)
-        # Group 1 = cross_attn                    (lr * scale)
-        param_groups = [
-            {"params": main_params},
-            {"params": cross_attn_params, "lr": lr * cross_attn_scale},
-        ]
+    # Weight-decay exclusion split: parameters with ndim > 1 (weight matrices /
+    # conv kernels) get weight_decay=wd, everything else (biases, norm
+    # weight+bias, standalone scalar params like log_conf_pose/log_conf_K)
+    # gets weight_decay=0.0. Combined with the cross_attn lr split above this
+    # yields up to 4 param groups: {main, cross_attn} x {decay, no_decay}.
+    main_decay, main_no_decay = [], []
+    cross_decay, cross_no_decay = [], []
+    for p in model.parameters():
+        is_cross = id(p) in cross_attn_ids
+        is_decay = p.ndim > 1
+        if is_cross:
+            (cross_decay if is_decay else cross_no_decay).append(p)
+        else:
+            (main_decay if is_decay else main_no_decay).append(p)
+
+    cross_lr = lr * cross_attn_scale
+    param_groups = []
+    if main_decay:
+        param_groups.append({"params": main_decay, "lr": lr, "weight_decay": wd})
+    if main_no_decay:
+        param_groups.append({"params": main_no_decay, "lr": lr, "weight_decay": 0.0})
+    if use_cross_attn_split:
+        if cross_decay:
+            param_groups.append({"params": cross_decay, "lr": cross_lr, "weight_decay": wd})
+        if cross_no_decay:
+            param_groups.append({"params": cross_no_decay, "lr": cross_lr, "weight_decay": 0.0})
         print(f"[optimizer] cross_attn lr scale={cross_attn_scale}  "
-              f"(main lr={lr:.2e}, cross_attn lr={lr * cross_attn_scale:.2e})")
+              f"(main lr={lr:.2e}, cross_attn lr={cross_lr:.2e})")
     else:
-        param_groups = model.parameters()
+        # No separate cross_attn lr: fold any cross_attn params (there are
+        # none here since cross_attn_ids is empty) into the main groups.
+        pass
+
+    n_main_decay      = sum(p.numel() for p in main_decay)
+    n_main_no_decay   = sum(p.numel() for p in main_no_decay)
+    n_cross_decay     = sum(p.numel() for p in cross_decay)
+    n_cross_no_decay  = sum(p.numel() for p in cross_no_decay)
+    print(f"[optimizer] main/decay: {n_main_decay} params, "
+          f"main/no_decay: {n_main_no_decay} params, "
+          f"cross_attn/decay: {n_cross_decay} params, "
+          f"cross_attn/no_decay: {n_cross_no_decay} params")
 
     if kind == "adamw":
         betas = tuple(opt_cfg.get("betas", [0.9, 0.999]))
-        return torch.optim.AdamW(param_groups, lr=lr, weight_decay=wd, betas=betas)
+        return torch.optim.AdamW(param_groups, betas=betas)
     elif kind == "adam":
         betas = tuple(opt_cfg.get("betas", [0.9, 0.999]))
-        return torch.optim.Adam(param_groups, lr=lr, weight_decay=wd, betas=betas)
+        return torch.optim.Adam(param_groups, betas=betas)
     elif kind == "sgd":
-        return torch.optim.SGD(param_groups, lr=lr, weight_decay=wd, momentum=0.9)
+        return torch.optim.SGD(param_groups, momentum=0.9)
     else:
         raise ValueError(f"Unknown optimizer type: '{kind}'")
-    
-def optimizer_step(optimizer, model, grad_clip, scaler=None) -> None:
+
+
+def optimizer_step(optimizer, model, grad_clip, scaler=None, log_every: int | None = None, step: int | None = None) -> None:
     # When using AMP, unscale before clipping so norms are in fp32 scale.
     if scaler is not None:
         scaler.unscale_(optimizer)
     if grad_clip:
         total_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+        pre_clip_norm = float(total_norm)
+
+        # --- diagnostic only: track how often clipping actually engages ---
+        # Reuses the value clip_grad_norm_ already computed; no extra pass
+        # over gradients. History window mirrors the log_every cadence.
+        if not hasattr(optimizer, "_grad_norm_history"):
+            optimizer._grad_norm_history = deque(maxlen=max(int(log_every or 50), 1))
+        hist = optimizer._grad_norm_history
+        hist.append(pre_clip_norm)
+        if log_every and step is not None and (step + 1) % log_every == 0:
+            clip_frac = sum(1 for n in hist if n > grad_clip) / len(hist)
+            print(f"[grad-norm] step={step + 1}  pre_clip_norm={pre_clip_norm:.4f}  "
+                  f"grad_clip={grad_clip:.4f}  clip_frac(last {len(hist)})={clip_frac:.2%}")
+
         if not torch.isfinite(total_norm):
             print(f"[NaN grad] total_norm={total_norm:.4f} — skipping update")
             optimizer.zero_grad(set_to_none=True)

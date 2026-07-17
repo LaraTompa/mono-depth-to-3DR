@@ -386,6 +386,18 @@ def run_epoch(
                     + (f"  point_norm_scale={point_norm_scale:.4f}" if point_norm_scale is not None else "  (no point norm)")
                 )
 
+            # log_scale head diagnostic (depth-map branch only) — first 500
+            # global training steps only, to avoid spamming later epochs.
+            if train and model_variant == "depth_only" and "log_scale1" in outputs:
+                global_step = (epoch - 1) * len(loader) + step
+                if global_step < 500:
+                    ls = torch.cat([outputs["log_scale1"], outputs["log_scale2"]]).detach().float()
+                    print(
+                        f"[log_scale] step={global_step:d} "
+                        f"mean={ls.mean():.4f} abs_mean={ls.abs().mean():.4f} "
+                        f"min={ls.min():.4f} max={ls.max():.4f}"
+                    )
+
             loss, breakdown = compute_total_loss(
                 outputs, batch, cfg.get("loss", {}), K_iter,
                 use_confidence=use_confidence,
@@ -430,7 +442,8 @@ def run_epoch(
                 # (or on the very last batch of the epoch).
                 is_last_batch = (step + 1 == len(loader))
                 if (step + 1) % grad_accum_steps == 0 or is_last_batch:
-                    optimizer_step(optimizer, model, grad_clip, scaler=scaler)
+                    optimizer_step(optimizer, model, grad_clip, scaler=scaler,
+                                   log_every=log_every, step=step)
 
             totals["loss"]       += loss.item()
             totals["depth"]      += breakdown.get("depth",     0.0)

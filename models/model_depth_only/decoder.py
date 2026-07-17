@@ -194,9 +194,9 @@ class DepthDecoder(nn.Module):
             # softplus(head_scale(x)) scale, the correction is predicted directly
             # in log-space so it is symmetric around 1× (log_scale=0 → passthrough)
             # and exp(·) guarantees strict positivity without a softplus/epsilon.
-            log_scale = self.head_log_scale(x)            # (B, 1, 480, 640)
+            log_scale = self.head_log_scale(x).clamp(min=-3.0, max=3.0)  # (B, 1, 480, 640)         # (B, 1, 480, 640)
             depth = prior_480 * torch.exp(log_scale)      # (B, 1, 480, 640)
-            return {"depth": depth, "confidence": conf}
+            return {"depth": depth, "confidence": conf, "log_scale": log_scale}
         else:
             # ── Point-map output (3-channel XYZ residual, DUSt3R-style) ─────
             residual_xyz = self.head_resid_xyz(x)        # (B, 3, 480, 640)
