@@ -69,16 +69,29 @@ def build_optimizer(cfg: dict, model: torch.nn.Module) -> torch.optim.Optimizer:
     use_cross_attn_split = cross_attn_mod is not None and cross_attn_scale != 1.0
     cross_attn_ids = {id(p) for p in cross_attn_mod.parameters()} if use_cross_attn_split else set()
 
+    # Zero-init output heads (e.g. head_log_scale, head_resid_xyz, head_conf)
+    # mark themselves via `_zero_init_head_names` on the owning submodule (see
+    # models/model_depth_only/decoder.py). These heads start as a "no
+    # correction" passthrough at t=0; weight_decay on their WEIGHT tensor
+    # would keep pulling it back toward that zero starting point, fighting
+    # the training signal directly. We match by dotted parameter name (e.g.
+    # "decoder.head_log_scale.weight" contains "head_log_scale").
+    zero_init_head_names = set()
+    for m in model.modules():
+        zero_init_head_names.update(getattr(m, "_zero_init_head_names", ()))
+
     # Weight-decay exclusion split: parameters with ndim > 1 (weight matrices /
     # conv kernels) get weight_decay=wd, everything else (biases, norm
-    # weight+bias, standalone scalar params like log_conf_pose/log_conf_K)
-    # gets weight_decay=0.0. Combined with the cross_attn lr split above this
-    # yields up to 4 param groups: {main, cross_attn} x {decay, no_decay}.
+    # weight+bias, standalone scalar params like log_conf_pose/log_conf_K,
+    # and now the zero-init heads' weight tensors) gets weight_decay=0.0.
+    # Combined with the cross_attn lr split above this yields up to 4 param
+    # groups: {main, cross_attn} x {decay, no_decay}.
     main_decay, main_no_decay = [], []
     cross_decay, cross_no_decay = [], []
-    for p in model.parameters():
+    for name, p in model.named_parameters():
         is_cross = id(p) in cross_attn_ids
-        is_decay = p.ndim > 1
+        is_zero_init_head = any(h in name for h in zero_init_head_names)
+        is_decay = p.ndim > 1 and not is_zero_init_head
         if is_cross:
             (cross_decay if is_decay else cross_no_decay).append(p)
         else:

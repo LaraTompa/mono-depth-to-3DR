@@ -123,6 +123,20 @@ class DepthDecoder(nn.Module):
             nn.init.zeros_(head.weight)
             nn.init.zeros_(head.bias)
 
+        # Names of the zero-initialised output-head submodules above, exposed
+        # so callers outside this module (e.g. build_optimizer in
+        # training/utils.py) can identify these params unambiguously and
+        # exclude their WEIGHT tensors from weight decay too — not just their
+        # biases via the generic ndim<=1 rule. Zero-init heads start as a
+        # "no correction" passthrough at t=0, and weight_decay would otherwise
+        # keep pulling the weight back toward that starting point, fighting
+        # the training signal directly.
+        self._zero_init_head_names = {head_attr for head_attr, head in (
+            ("head_log_scale", getattr(self, "head_log_scale", None)),
+            ("head_resid_xyz", getattr(self, "head_resid_xyz", None)),
+            ("head_conf", self.head_conf),
+        ) if head is not None}
+
     def forward(
         self,
         tokens:      torch.Tensor,   # (B, N, token_dim)  cross-attended tokens
@@ -250,6 +264,11 @@ class LegacyDepthDecoder(nn.Module):
         for head in (self.head_scale, self.head_resid, self.head_conf):
             nn.init.zeros_(head.weight)
             nn.init.zeros_(head.bias)
+
+        # See DepthDecoder._zero_init_head_names — same purpose: let
+        # build_optimizer identify and exclude these heads' WEIGHT tensors
+        # from weight decay, not just their biases.
+        self._zero_init_head_names = {"head_scale", "head_resid", "head_conf"}
 
     def forward(
         self,

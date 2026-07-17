@@ -397,6 +397,15 @@ def run_epoch(
                         f"mean={ls.mean():.4f} abs_mean={ls.abs().mean():.4f} "
                         f"min={ls.min():.4f} max={ls.max():.4f}"
                     )
+                    # Temporary diagnostic: log the zero-init head WEIGHT norm
+                    # itself (not just the activation output above) to confirm
+                    # whether the weight tensor is actually moving under the
+                    # updated no_decay exclusion, or only the activation was
+                    # changing while the weight stayed pinned near zero.
+                    head_log_scale = getattr(getattr(model, "decoder", None), "head_log_scale", None)
+                    if head_log_scale is not None:
+                        w_norm = head_log_scale.weight.detach().float().norm().item()
+                        print(f"[log_scale] step={global_step:d} head_log_scale.weight.norm={w_norm:.6f}")
 
             loss, breakdown = compute_total_loss(
                 outputs, batch, cfg.get("loss", {}), K_iter,
