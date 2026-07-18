@@ -3,8 +3,8 @@ test_set_eval.py — Full test-set evaluation of DepthAlignNet.
 
 Iterates over every scene in a test dataset directory, runs model inference
 on consecutive frame pairs, computes depth / pixel-consistency /
-photometric-consistency metrics (and the same for median-scaled monocular
-depths), and writes:
+geometric-consistency / photometric-consistency metrics (and the same for
+median-scaled monocular depths), and writes:
 
   <output_dir>/
     metrics_per_pair.csv        – one row per evaluated frame pair
@@ -36,8 +36,11 @@ python scripts/test_set_eval.py \\
 import argparse
 import csv
 import glob
+import heapq
+import itertools
 import os
 import sys
+from collections import defaultdict
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _REPO_ROOT)
@@ -55,6 +58,14 @@ from metrics.pixel_consistency import compute_pixel_consistency
 from metrics.photometric_consistency import compute_photometric
 
 EPS = 1e-6
+
+
+def _nanmean2(a, b):
+    vals = np.array([a, b], dtype=np.float64)
+    finite = vals[np.isfinite(vals)]
+    if finite.size == 0:
+        return float("nan")
+    return float(finite.mean())
 
 
 def normalize_depth_map(depth: torch.Tensor, params: dict | None) -> torch.Tensor:
@@ -273,6 +284,61 @@ def _safe_pixel_consistency(gt_src, pred_src, gt_tgt, K, pose_src, pose_tgt):
         return float("nan"), float("nan"), float("nan")
 
 
+def _compute_geometric_error(gt_src, pred_tgt, K, pose_src, pose_tgt):
+    """Mirror training geometric_consistency_loss as an eval metric in metres."""
+    H, W = gt_src.shape
+    y_idx, x_idx = np.meshgrid(np.arange(H), np.arange(W), indexing="ij")
+
+    K_inv = np.linalg.inv(K)
+    xy1 = np.stack([x_idx, y_idx, np.ones_like(x_idx)], axis=-1).astype(np.float32)
+    pts_src = (K_inv @ xy1[..., None])[..., 0] * gt_src[..., None]
+
+    T_12 = np.linalg.inv(pose_tgt) @ pose_src
+    pts_tgt = (T_12[:3, :3] @ pts_src[..., None])[..., 0] + T_12[:3, 3]
+
+    z_tgt = pts_tgt[..., 2]
+    proj = (K @ pts_tgt[..., None])[..., 0]
+    u_tgt = proj[..., 0] / (z_tgt + EPS)
+    v_tgt = proj[..., 1] / (z_tgt + EPS)
+
+    pred_tgt = pred_tgt.astype(np.float32)
+    sampled_tgt = cv2.remap(
+        pred_tgt,
+        u_tgt.astype(np.float32),
+        v_tgt.astype(np.float32),
+        interpolation=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=0,
+    )
+
+    uv1_tgt = np.stack([u_tgt, v_tgt, np.ones_like(u_tgt)], axis=-1).astype(np.float32)
+    pts_tgt_from_pred = (K_inv @ uv1_tgt[..., None])[..., 0] * sampled_tgt[..., None]
+    dist = np.sqrt(np.sum((pts_tgt - pts_tgt_from_pred) ** 2, axis=-1))
+
+    valid = (
+        _depth_mask(gt_src) &
+        (z_tgt > 0) &
+        (u_tgt >= 0) & (u_tgt < W) &
+        (v_tgt >= 0) & (v_tgt < H) &
+        (sampled_tgt > _DEPTH_MIN) & (sampled_tgt < _DEPTH_MAX) &
+        np.isfinite(dist)
+    )
+
+    n_valid = int(valid.sum())
+    if n_valid < 100:
+        return float("nan"), 0.0
+
+    return float(dist[valid].mean()), float(valid.mean())
+
+
+def _safe_geometric_error(gt_src, pred_tgt, K, pose_src, pose_tgt):
+    try:
+        err, vr = _compute_geometric_error(gt_src, pred_tgt, K, pose_src, pose_tgt)
+        return float(err), float(vr)
+    except Exception:
+        return float("nan"), float("nan")
+
+
 def _safe_photometric(img_src, img_tgt, depth, K, pose_src, pose_tgt):
     try:
         ssim, l2, vr = compute_photometric(
@@ -353,10 +419,13 @@ _METRIC_COLS = [
     "abs_rel_v2",  "rmse_v2",  "mae_v2",  "delta1_v2",  "delta2_v2",  "delta3_v2",
     "pc_mae_12",   "pc_rmse_12",  "pc_vr_12",
     "pc_mae_21",   "pc_rmse_21",  "pc_vr_21",
-    "pc_mae_avg",  "pc_rmse_avg",
+    "pc_mae_avg",  "pc_rmse_avg", "pc_vr_avg",
+    "geo_12", "geo_vr_12",
+    "geo_21", "geo_vr_21",
+    "geo_avg", "geo_vr_avg",
     "photo_ssim_12", "photo_l2_12", "photo_vr_12",
     "photo_ssim_21", "photo_l2_21", "photo_vr_21",
-    "photo_ssim_avg", "photo_l2_avg",
+    "photo_ssim_avg", "photo_l2_avg", "photo_vr_avg",
     # ── monocular (pre-alignment, scaled) ─────────────────────────────────
     "mono_scale1", "mono_scale2",
     "mono_abs_rel_v1", "mono_rmse_v1", "mono_mae_v1",
@@ -365,10 +434,13 @@ _METRIC_COLS = [
     "mono_delta1_v2", "mono_delta2_v2", "mono_delta3_v2",
     "mono_pc_mae_12",  "mono_pc_rmse_12",  "mono_pc_vr_12",
     "mono_pc_mae_21",  "mono_pc_rmse_21",  "mono_pc_vr_21",
-    "mono_pc_mae_avg", "mono_pc_rmse_avg",
+    "mono_pc_mae_avg", "mono_pc_rmse_avg", "mono_pc_vr_avg",
+    "mono_geo_12", "mono_geo_vr_12",
+    "mono_geo_21", "mono_geo_vr_21",
+    "mono_geo_avg", "mono_geo_vr_avg",
     "mono_photo_ssim_12", "mono_photo_l2_12", "mono_photo_vr_12",
     "mono_photo_ssim_21", "mono_photo_l2_21", "mono_photo_vr_21",
-    "mono_photo_ssim_avg", "mono_photo_l2_avg",
+    "mono_photo_ssim_avg", "mono_photo_l2_avg", "mono_photo_vr_avg",
     # ── predicted camera params (if available) ────────────────────────────
     "pred_fx", "pred_fy", "pred_cx", "pred_cy",
     "gt_fx",   "gt_fy",   "gt_cx",   "gt_cy",
@@ -380,6 +452,129 @@ _ALL_COLS = _ID_COLS + _METRIC_COLS
 
 def _nan_row():
     return {c: float("nan") for c in _METRIC_COLS}
+
+
+def _row_mean(row, *keys):
+    vals = [row.get(k) for k in keys]
+    finite = [float(v) for v in vals if isinstance(v, (int, float, np.floating)) and np.isfinite(v)]
+    if not finite:
+        return float("nan")
+    return float(np.mean(finite))
+
+
+def _save_correlation_plots(all_rows, output_dir):
+    corr_dir = os.path.join(output_dir, "correlations")
+    os.makedirs(corr_dir, exist_ok=True)
+
+    specs = [
+        {
+            "filename": "pixel_mae_vs_valid_ratio_aligned.png",
+            "title": "Aligned Pixel Consistency vs Valid Pixel Coverage",
+            "x_key": "pc_vr_avg",
+            "y_key": "pc_mae_avg",
+            "x_label": "Average valid pixel ratio",
+            "y_label": "Average pixel consistency MAE",
+        },
+        {
+            "filename": "geometric_error_vs_valid_ratio_aligned.png",
+            "title": "Aligned Geometric Error vs Valid Pixel Coverage",
+            "x_key": "geo_vr_avg",
+            "y_key": "geo_avg",
+            "x_label": "Average valid pixel ratio",
+            "y_label": "Average geometric error (m)",
+        },
+        {
+            "filename": "pixel_mae_vs_geometric_error_aligned.png",
+            "title": "Aligned Pixel Consistency vs Geometric Error",
+            "x_key": "geo_avg",
+            "y_key": "pc_mae_avg",
+            "x_label": "Average geometric error (m)",
+            "y_label": "Average pixel consistency MAE",
+        },
+        {
+            "filename": "photometric_l2_vs_valid_ratio_aligned.png",
+            "title": "Aligned Photometric L2 vs Valid Pixel Coverage",
+            "x_key": "photo_vr_avg",
+            "y_key": "photo_l2_avg",
+            "x_label": "Average valid pixel ratio",
+            "y_label": "Average photometric L2",
+        },
+        {
+            "filename": "pixel_mae_vs_valid_ratio_mono_scaled.png",
+            "title": "Mono Scaled Pixel Consistency vs Valid Pixel Coverage",
+            "x_key": "mono_pc_vr_avg",
+            "y_key": "mono_pc_mae_avg",
+            "x_label": "Average valid pixel ratio",
+            "y_label": "Average pixel consistency MAE",
+        },
+        {
+            "filename": "geometric_error_vs_valid_ratio_mono_scaled.png",
+            "title": "Mono Scaled Geometric Error vs Valid Pixel Coverage",
+            "x_key": "mono_geo_vr_avg",
+            "y_key": "mono_geo_avg",
+            "x_label": "Average valid pixel ratio",
+            "y_label": "Average geometric error (m)",
+        },
+    ]
+
+    summary_lines = [
+        "CORRELATION PLOT SUMMARY",
+        "=" * 70,
+    ]
+    saved = 0
+
+    for spec in specs:
+        points = [
+            (float(r[spec["x_key"]]), float(r[spec["y_key"]]))
+            for r in all_rows
+            if isinstance(r.get(spec["x_key"]), (int, float, np.floating))
+            and isinstance(r.get(spec["y_key"]), (int, float, np.floating))
+            and np.isfinite(r[spec["x_key"]])
+            and np.isfinite(r[spec["y_key"]])
+        ]
+        if len(points) < 3:
+            summary_lines.append(f"{spec['filename']}: skipped (need at least 3 finite points, found {len(points)})")
+            continue
+
+        xs = np.array([p[0] for p in points], dtype=np.float64)
+        ys = np.array([p[1] for p in points], dtype=np.float64)
+        corr = float(np.corrcoef(xs, ys)[0, 1]) if len(xs) >= 2 else float("nan")
+
+        fig, ax = plt.subplots(figsize=(7.5, 5.5))
+        ax.scatter(xs, ys, s=20, alpha=0.7, edgecolors="none")
+        if len(xs) >= 2 and np.std(xs) > 0 and np.std(ys) > 0:
+            slope, intercept = np.polyfit(xs, ys, 1)
+            x_line = np.linspace(xs.min(), xs.max(), 100)
+            ax.plot(x_line, slope * x_line + intercept, color="tab:red", linewidth=2)
+
+        ax.set_title(spec["title"])
+        ax.set_xlabel(spec["x_label"])
+        ax.set_ylabel(spec["y_label"])
+        ax.grid(True, alpha=0.25)
+        ax.text(
+            0.02,
+            0.98,
+            f"n={len(xs)}\npearson={corr:.3f}",
+            transform=ax.transAxes,
+            va="top",
+            ha="left",
+            fontsize=9,
+            bbox={"boxstyle": "round", "facecolor": "white", "alpha": 0.85},
+        )
+        fig.tight_layout()
+        fig.savefig(os.path.join(corr_dir, spec["filename"]), dpi=150, bbox_inches="tight")
+        plt.close(fig)
+
+        summary_lines.append(f"{spec['filename']}: n={len(xs)}, pearson={corr:.4f}")
+        saved += 1
+
+    summary_lines.append("=" * 70)
+
+    summary_path = os.path.join(corr_dir, "correlation_summary.txt")
+    with open(summary_path, "w", encoding="utf-8") as sf:
+        sf.write("\n".join(summary_lines) + "\n")
+
+    return corr_dir, saved
 
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
@@ -423,12 +618,60 @@ def main(args):
     bw_dir    = os.path.join(args.output_dir, "best_worst")
     os.makedirs(bw_dir, exist_ok=True)
 
-    csv_file  = open(csv_path, "w", newline="", encoding="utf-8")
-    writer    = csv.DictWriter(csv_file, fieldnames=_ALL_COLS, extrasaction="ignore")
-    writer.writeheader()
+    # ── Resume support ────────────────────────────────────────────────────
+    # If --resume is set and a metrics_per_pair.csv already exists in
+    # output_dir, load the (batch, sample, scene, frame1, frame2) keys that
+    # were already evaluated so we can skip them and append new rows instead
+    # of overwriting the file.
+    resume_mode = bool(args.resume) and os.path.isfile(csv_path)
+    done_keys = set()
+    done_count_per_scene = defaultdict(int)
+    all_rows = []        # accumulate lightweight rows for summary stats
 
-    all_rows = []        # accumulate for summary + best/worst selection
-    total_pairs = 0
+    if resume_mode:
+        rewrite_resume_csv = False
+        with open(csv_path, "r", newline="", encoding="utf-8") as rf:
+            reader = csv.DictReader(rf)
+            existing_cols = reader.fieldnames or []
+            rewrite_resume_csv = existing_cols != _ALL_COLS
+            for r in reader:
+                key = (r.get("batch"), r.get("sample"), r.get("scene"),
+                       r.get("frame1"), r.get("frame2"))
+                done_keys.add(key)
+                done_count_per_scene[key[:3]] += 1
+                conv = dict(r)
+                for c in _METRIC_COLS:
+                    try:
+                        conv[c] = float(conv[c])
+                    except (TypeError, ValueError):
+                        conv[c] = float("nan")
+                all_rows.append(conv)
+        if rewrite_resume_csv:
+            with open(csv_path, "w", newline="", encoding="utf-8") as wf:
+                rewrite_writer = csv.DictWriter(wf, fieldnames=_ALL_COLS, extrasaction="ignore")
+                rewrite_writer.writeheader()
+                for r in all_rows:
+                    rewrite_writer.writerow({col: r.get(col, "") for col in _ALL_COLS})
+            print(f"[eval] --resume: upgraded CSV schema in {csv_path} to include new averaged correlation fields.")
+        print(f"[eval] --resume: found {len(done_keys)} already-evaluated pairs "
+              f"in {csv_path}; they will be skipped.")
+    elif args.resume:
+        print(f"[eval] --resume set but no existing CSV found at {csv_path}; "
+              f"starting a fresh run.")
+
+    csv_file  = open(csv_path, "a" if resume_mode else "w", newline="", encoding="utf-8")
+    writer    = csv.DictWriter(csv_file, fieldnames=_ALL_COLS, extrasaction="ignore")
+    if not resume_mode:
+        writer.writeheader()
+
+    total_pairs = len(all_rows)
+
+    # Bounded best/worst candidate heaps (by pc_mae_avg) so we never hold
+    # every pair's images in memory at once — this is what previously caused
+    # OOM crashes on large runs (e.g. --window 0, which evaluates every pair).
+    best_heap = []   # smallest pc_mae_avg -> stored as (-val, seq, row) max-heap
+    worst_heap = []  # largest pc_mae_avg  -> stored as (val, seq, row) min-heap
+    _bw_seq = itertools.count()
 
     # ── Iterate scenes ───────────────────────────────────────────────────────
     for scene_idx, (b_name, s_name, sc_name, sc_path) in enumerate(scenes):
@@ -458,7 +701,8 @@ def main(args):
             K_np = None   # will fill per-pair from image size
 
         # Evaluate up to args.window consecutive pairs per scene
-        pairs_this_scene = 0
+        # (start count from any pairs already done for this scene when resuming)
+        pairs_this_scene = done_count_per_scene.get((b_name, s_name, sc_name), 0)
         for pi in range(0, len(frame_ids) - 1, args.pair_stride):
             if args.window > 0 and pairs_this_scene >= args.window:
                 break
@@ -466,6 +710,9 @@ def main(args):
                 break
 
             fid1, fid2 = frame_ids[pi], frame_ids[pi + 1]
+
+            if resume_mode and (b_name, s_name, sc_name, fid1, fid2) in done_keys:
+                continue
 
             color1_path = os.path.join(color_dir, f"{fid1}.png")
             color2_path = os.path.join(color_dir, f"{fid2}.png")
@@ -620,8 +867,20 @@ def main(args):
                     row["pc_mae_21"]  = pc21_mae
                     row["pc_rmse_21"] = pc21_rmse
                     row["pc_vr_21"]   = pc21_vr
-                    row["pc_mae_avg"]  = (pc12_mae + pc21_mae) / 2
-                    row["pc_rmse_avg"] = (pc12_rmse + pc21_rmse) / 2
+                    row["pc_mae_avg"]  = _nanmean2(pc12_mae, pc21_mae)
+                    row["pc_rmse_avg"] = _nanmean2(pc12_rmse, pc21_rmse)
+                    row["pc_vr_avg"]   = _nanmean2(pc12_vr, pc21_vr)
+
+                    geo12, geo12_vr = _safe_geometric_error(
+                        gt1_raw, pred2_full, K_eval, pose1_np, pose2_np)
+                    geo21, geo21_vr = _safe_geometric_error(
+                        gt2_raw, pred1_full, K_eval, pose2_np, pose1_np)
+                    row["geo_12"] = geo12
+                    row["geo_vr_12"] = geo12_vr
+                    row["geo_21"] = geo21
+                    row["geo_vr_21"] = geo21_vr
+                    row["geo_avg"] = _nanmean2(geo12, geo21)
+                    row["geo_vr_avg"] = _nanmean2(geo12_vr, geo21_vr)
 
                     # ── Photometric consistency (aligned) ────────────────────
                     ph12_ssim, ph12_l2, ph12_vr = _safe_photometric(
@@ -634,8 +893,9 @@ def main(args):
                     row["photo_ssim_21"] = ph21_ssim
                     row["photo_l2_21"]   = ph21_l2
                     row["photo_vr_21"]   = ph21_vr
-                    row["photo_ssim_avg"] = (ph12_ssim + ph21_ssim) / 2
-                    row["photo_l2_avg"]   = (ph12_l2   + ph21_l2)   / 2
+                    row["photo_ssim_avg"] = _nanmean2(ph12_ssim, ph21_ssim)
+                    row["photo_l2_avg"]   = _nanmean2(ph12_l2, ph21_l2)
+                    row["photo_vr_avg"]   = _nanmean2(ph12_vr, ph21_vr)
 
                 # ── Mono scaled metrics ──────────────────────────────────────
                 s1 = _median_scale(pred_mono1, gt1_raw)
@@ -664,8 +924,20 @@ def main(args):
                     row["mono_pc_mae_21"]  = mpc21_mae
                     row["mono_pc_rmse_21"] = mpc21_rmse
                     row["mono_pc_vr_21"]   = mpc21_vr
-                    row["mono_pc_mae_avg"]  = (mpc12_mae + mpc21_mae) / 2
-                    row["mono_pc_rmse_avg"] = (mpc12_rmse + mpc21_rmse) / 2
+                    row["mono_pc_mae_avg"]  = _nanmean2(mpc12_mae, mpc21_mae)
+                    row["mono_pc_rmse_avg"] = _nanmean2(mpc12_rmse, mpc21_rmse)
+                    row["mono_pc_vr_avg"]   = _nanmean2(mpc12_vr, mpc21_vr)
+
+                    mgeo12, mgeo12_vr = _safe_geometric_error(
+                        gt1_raw, mono2_scaled, K_eval, pose1_np, pose2_np)
+                    mgeo21, mgeo21_vr = _safe_geometric_error(
+                        gt2_raw, mono1_scaled, K_eval, pose2_np, pose1_np)
+                    row["mono_geo_12"] = mgeo12
+                    row["mono_geo_vr_12"] = mgeo12_vr
+                    row["mono_geo_21"] = mgeo21
+                    row["mono_geo_vr_21"] = mgeo21_vr
+                    row["mono_geo_avg"] = _nanmean2(mgeo12, mgeo21)
+                    row["mono_geo_vr_avg"] = _nanmean2(mgeo12_vr, mgeo21_vr)
 
                     mph12_ssim, mph12_l2, mph12_vr = _safe_photometric(
                         img1_gray, img2_gray, mono1_scaled, K_eval, pose1_np, pose2_np)
@@ -677,8 +949,9 @@ def main(args):
                     row["mono_photo_ssim_21"] = mph21_ssim
                     row["mono_photo_l2_21"]   = mph21_l2
                     row["mono_photo_vr_21"]   = mph21_vr
-                    row["mono_photo_ssim_avg"] = (mph12_ssim + mph21_ssim) / 2
-                    row["mono_photo_l2_avg"]   = (mph12_l2   + mph21_l2)   / 2
+                    row["mono_photo_ssim_avg"] = _nanmean2(mph12_ssim, mph21_ssim)
+                    row["mono_photo_l2_avg"]   = _nanmean2(mph12_l2, mph21_l2)
+                    row["mono_photo_vr_avg"]   = _nanmean2(mph12_vr, mph21_vr)
 
                 # Store inputs for best/worst visualisation
                 row["_img1"]       = img1_np
@@ -702,7 +975,19 @@ def main(args):
             writer.writerow(public_row)
             csv_file.flush()
 
-            all_rows.append(row)
+            # Keep only lightweight metrics for the running summary; heavy
+            # image arrays are tracked separately in bounded best/worst heaps.
+            all_rows.append(public_row)
+
+            pc_val = row.get("pc_mae_avg")
+            if isinstance(pc_val, float) and np.isfinite(pc_val) and "_img1" in row:
+                heapq.heappush(best_heap, (-pc_val, next(_bw_seq), dict(row)))
+                if len(best_heap) > args.n_best_worst:
+                    heapq.heappop(best_heap)
+                heapq.heappush(worst_heap, (pc_val, next(_bw_seq), dict(row)))
+                if len(worst_heap) > args.n_best_worst:
+                    heapq.heappop(worst_heap)
+
             total_pairs      += 1
             pairs_this_scene += 1
 
@@ -744,11 +1029,15 @@ def main(args):
             "Pixel Consistency (aligned)": [
                 "pc_mae_12","pc_rmse_12","pc_vr_12",
                 "pc_mae_21","pc_rmse_21","pc_vr_21",
-                "pc_mae_avg","pc_rmse_avg"],
+                "pc_mae_avg","pc_rmse_avg","pc_vr_avg"],
+            "Geometric Consistency (aligned, m)": [
+                "geo_12","geo_vr_12",
+                "geo_21","geo_vr_21",
+                "geo_avg","geo_vr_avg"],
             "Photometric Consistency (aligned)": [
                 "photo_ssim_12","photo_l2_12","photo_vr_12",
                 "photo_ssim_21","photo_l2_21","photo_vr_21",
-                "photo_ssim_avg","photo_l2_avg"],
+                "photo_ssim_avg","photo_l2_avg","photo_vr_avg"],
             "Monocular Scale Factors": [
                 "mono_scale1","mono_scale2"],
             "Mono Scaled Depth (view 1)": [
@@ -760,11 +1049,15 @@ def main(args):
             "Pixel Consistency (mono scaled)": [
                 "mono_pc_mae_12","mono_pc_rmse_12","mono_pc_vr_12",
                 "mono_pc_mae_21","mono_pc_rmse_21","mono_pc_vr_21",
-                "mono_pc_mae_avg","mono_pc_rmse_avg"],
+                "mono_pc_mae_avg","mono_pc_rmse_avg","mono_pc_vr_avg"],
+            "Geometric Consistency (mono scaled, m)": [
+                "mono_geo_12","mono_geo_vr_12",
+                "mono_geo_21","mono_geo_vr_21",
+                "mono_geo_avg","mono_geo_vr_avg"],
             "Photometric Consistency (mono scaled)": [
                 "mono_photo_ssim_12","mono_photo_l2_12","mono_photo_vr_12",
                 "mono_photo_ssim_21","mono_photo_l2_21","mono_photo_vr_21",
-                "mono_photo_ssim_avg","mono_photo_l2_avg"],
+                "mono_photo_ssim_avg","mono_photo_l2_avg","mono_photo_vr_avg"],
         }
 
         col_w = max(len(c) for cols in sections.values() for c in cols) + 2
@@ -787,25 +1080,26 @@ def main(args):
 
     print(f"[eval] Summary saved to {summary_path}")
 
-    # ── Best / worst by pixel consistency MAE (avg of 1→2 and 2→1) ─────────
-    sortable = [r for r in all_rows
-                if isinstance(r.get("pc_mae_avg"), float)
-                and np.isfinite(r["pc_mae_avg"])
-                and "_img1" in r]
+    corr_dir, n_corr = _save_correlation_plots(all_rows, args.output_dir)
+    print(f"[eval] Saved {n_corr} correlation plots to {corr_dir}")
 
-    if not sortable:
+    # ── Best / worst by pixel consistency MAE (avg of 1→2 and 2→1) ─────────
+    # Note: best_heap/worst_heap only contain pairs evaluated in *this* run
+    # (skipped/resumed pairs from a previous run aren't re-visualized since
+    # their images are no longer held in memory).
+    if not best_heap and not worst_heap:
         print("[eval] No rows with valid pc_mae_avg — skipping best/worst visualizations.")
         return
 
-    sortable_sorted = sorted(sortable, key=lambda r: r["pc_mae_avg"])
-    n_vis = min(args.n_best_worst, len(sortable_sorted))
+    best_sorted  = [entry[2] for entry in sorted(best_heap,  key=lambda e: -e[0])]
+    worst_sorted = [entry[2] for entry in sorted(worst_heap, key=lambda e: e[0], reverse=True)]
 
     def _label(r):
         return (f"{r['batch']}/{r['sample']}/{r['scene']} "
                 f"({r['frame1']},{r['frame2']})  pc_mae_avg={r['pc_mae_avg']:.4f}")
 
-    print(f"\n[eval] Saving top-{n_vis} best and worst visualizations...")
-    for rank, r in enumerate(sortable_sorted[:n_vis]):
+    print(f"\n[eval] Saving top-{len(best_sorted)} best and top-{len(worst_sorted)} worst visualizations...")
+    for rank, r in enumerate(best_sorted):
         fname = (f"best_{rank+1:02d}_{r['batch']}_{r['sample']}_"
                  f"{r['scene']}_{r['frame1']}-{r['frame2']}.png")
         title = f"BEST #{rank+1}  {_label(r)}"
@@ -816,7 +1110,7 @@ def main(args):
             title, os.path.join(bw_dir, fname),
         )
 
-    for rank, r in enumerate(sortable_sorted[-n_vis:]):
+    for rank, r in enumerate(worst_sorted):
         fname = (f"worst_{rank+1:02d}_{r['batch']}_{r['sample']}_"
                  f"{r['scene']}_{r['frame1']}-{r['frame2']}.png")
         title = f"WORST #{rank+1}  {_label(r)}"
@@ -844,6 +1138,10 @@ if __name__ == "__main__":
                         help="Path to model checkpoint (.pt)")
     parser.add_argument("--output_dir", required=True,
                         help="Directory to write all outputs")
+    parser.add_argument("--resume", action="store_true",
+                        help="Resume evaluation using an existing --output_dir: "
+                             "pairs already present in metrics_per_pair.csv are "
+                             "skipped and new results are appended.")
 
     # Dataset
     parser.add_argument("--data_dir", default="datasets_test/sampled_data",
