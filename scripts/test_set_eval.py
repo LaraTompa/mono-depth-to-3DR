@@ -351,6 +351,27 @@ def _safe_geometric_error(gt_src, pred_tgt, K, pose_src, pose_tgt):
         return float("nan"), float("nan")
 
 
+def _relative_rotation_translation(pose_src, pose_tgt):
+    """Rodrigues rotation angle (deg) and translation magnitude (m) of the
+    relative transform between two cam-to-world poses. Symmetric under
+    src/tgt swap (inverse rotation has the same angle; inverse translation
+    has the same norm), so a single value describes the pair."""
+    T = np.linalg.inv(pose_tgt) @ pose_src
+    R = T[:3, :3]
+    t = T[:3, 3]
+    cos_theta = np.clip((np.trace(R) - 1.0) / 2.0, -1.0, 1.0)
+    theta_deg = float(np.degrees(np.arccos(cos_theta)))
+    trans_mag = float(np.linalg.norm(t))
+    return theta_deg, trans_mag
+
+
+def _safe_relative_rotation_translation(pose_src, pose_tgt):
+    try:
+        return _relative_rotation_translation(pose_src, pose_tgt)
+    except Exception:
+        return float("nan"), float("nan")
+
+
 def _safe_photometric(img_src, img_tgt, depth, K, pose_src, pose_tgt):
     try:
         ssim, l2, vr = compute_photometric(
@@ -453,6 +474,8 @@ _METRIC_COLS = [
     "mono_photo_ssim_12", "mono_photo_l2_12", "mono_photo_vr_12",
     "mono_photo_ssim_21", "mono_photo_l2_21", "mono_photo_vr_21",
     "mono_photo_ssim_avg", "mono_photo_l2_avg", "mono_photo_vr_avg",
+    # ── relative camera motion (pair-level; same for aligned & mono) ───────
+    "rel_rot_angle_deg", "rel_trans_mag",
     # ── predicted camera params (if available) ────────────────────────────
     "pred_fx", "pred_fy", "pred_cx", "pred_cy",
     "gt_fx",   "gt_fy",   "gt_cx",   "gt_cy",
@@ -504,6 +527,92 @@ def _save_correlation_plots(all_rows, output_dir):
         pad = span * pad_fraction
         return lo - pad, hi + pad
 
+    def _make_bin_edges(xs_all, n_bins=5, fixed_range=None):
+        """Compute interval-boxplot bin edges. If fixed_range=(lo, hi) is
+        given (e.g. a [0, 1] ratio), use evenly spaced edges over that range.
+        Otherwise fall back to the robust (2nd-98th percentile) data range."""
+        if fixed_range is not None:
+            lo, hi = fixed_range
+        else:
+            xs_all = np.asarray(xs_all, dtype=np.float64)
+            xs_all = xs_all[np.isfinite(xs_all)]
+            if xs_all.size == 0:
+                return np.linspace(0.0, 1.0, n_bins + 1)
+            lo, hi = np.nanpercentile(xs_all, [2.0, 98.0])
+            if not np.isfinite(lo) or not np.isfinite(hi) or lo == hi:
+                lo, hi = float(np.min(xs_all)), float(np.max(xs_all))
+                if lo == hi:
+                    lo, hi = lo - 0.5, hi + 0.5
+        return np.linspace(lo, hi, n_bins + 1)
+
+    def _save_boxplot_by_interval(spec, series_points, bin_edges):
+        """Draw grouped boxplots of y-values binned by x-value interval,
+        with one box per series side-by-side within each interval."""
+        n_bins = len(bin_edges) - 1
+        colors = ["tab:blue", "tab:orange"]
+        n_series = len(series_points)
+        group_width = 0.8
+        box_width = (group_width / max(n_series, 1)) * 0.9
+
+        fig, ax = plt.subplots(figsize=(max(7.5, n_bins * 1.3), 5.5))
+        legend_handles = []
+        any_data = False
+
+        for s_idx, (series, points) in enumerate(series_points):
+            if not points:
+                continue
+            xs = np.array([p[0] for p in points], dtype=np.float64)
+            ys = np.array([p[1] for p in points], dtype=np.float64)
+            bin_idx = np.clip(np.digitize(xs, bin_edges[1:-1], right=False), 0, n_bins - 1)
+
+            data_per_bin, positions, n_pts = [], [], 0
+            for b in range(n_bins):
+                vals = ys[bin_idx == b]
+                if vals.size == 0:
+                    continue
+                data_per_bin.append(vals)
+                offset = (s_idx - (n_series - 1) / 2.0) * box_width
+                positions.append((b + 1) + offset)
+                n_pts += vals.size
+            if not data_per_bin:
+                continue
+
+            any_data = True
+            color = colors[s_idx % len(colors)]
+            bp = ax.boxplot(
+                data_per_bin, positions=positions, widths=box_width * 0.9,
+                patch_artist=True, showfliers=False,
+            )
+            for patch in bp["boxes"]:
+                patch.set_facecolor(color)
+                patch.set_alpha(0.5)
+            for med in bp["medians"]:
+                med.set_color(color)
+                med.set_linewidth(1.8)
+            legend_handles.append(
+                plt.Line2D([0], [0], color=color, lw=6, alpha=0.5,
+                           label=f"{series['label']} (n={n_pts})")
+            )
+
+        if not any_data:
+            plt.close(fig)
+            return False
+
+        tick_labels = [f"{bin_edges[i]:.2f}-{bin_edges[i + 1]:.2f}" for i in range(n_bins)]
+        ax.set_xticks(range(1, n_bins + 1))
+        ax.set_xticklabels(tick_labels, rotation=30, ha="right")
+        ax.set_title(spec["title"] + " (interval boxplots)")
+        ax.set_xlabel(spec["x_label"])
+        ax.set_ylabel(spec["y_label"])
+        ax.grid(True, axis="y", alpha=0.25)
+        if legend_handles:
+            ax.legend(handles=legend_handles, loc="best", fontsize=8, frameon=True)
+        fig.tight_layout()
+        out_path = os.path.join(corr_dir, spec["filename"].replace(".png", "_boxplot.png"))
+        fig.savefig(out_path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        return True
+
     specs = [
         {
             "filename": "pixel_mae_vs_valid_ratio_combined.png",
@@ -514,6 +623,7 @@ def _save_correlation_plots(all_rows, output_dir):
             ],
             "x_label": "Average valid pixel ratio",
             "y_label": "Average pixel consistency MAE",
+            "fixed_range": (0.0, 1.0),
         },
         {
             "filename": "geometric_error_vs_valid_ratio_combined.png",
@@ -524,6 +634,7 @@ def _save_correlation_plots(all_rows, output_dir):
             ],
             "x_label": "Average valid pixel ratio",
             "y_label": "Average geometric error (m)",
+            "fixed_range": (0.0, 1.0),
         },
         {
             "filename": "pixel_mae_vs_geometric_error_combined.png",
@@ -544,6 +655,47 @@ def _save_correlation_plots(all_rows, output_dir):
             ],
             "x_label": "Average valid pixel ratio",
             "y_label": "Average photometric L2",
+            "fixed_range": (0.0, 1.0),
+        },
+        {
+            "filename": "geometric_error_vs_rotation_angle_combined.png",
+            "title": "Aligned vs Mono Scaled Geometric Error vs Relative Rotation Angle",
+            "series": [
+                {"label": "Aligned", "x_key": "rel_rot_angle_deg", "y_key": "geo_avg"},
+                {"label": "Mono scaled", "x_key": "rel_rot_angle_deg", "y_key": "mono_geo_avg"},
+            ],
+            "x_label": "Relative rotation angle (deg, Rodrigues)",
+            "y_label": "Average geometric error (m)",
+        },
+        {
+            "filename": "pixel_mae_vs_rotation_angle_combined.png",
+            "title": "Aligned vs Mono Scaled Pixel Consistency vs Relative Rotation Angle",
+            "series": [
+                {"label": "Aligned", "x_key": "rel_rot_angle_deg", "y_key": "pc_mae_avg"},
+                {"label": "Mono scaled", "x_key": "rel_rot_angle_deg", "y_key": "mono_pc_mae_avg"},
+            ],
+            "x_label": "Relative rotation angle (deg, Rodrigues)",
+            "y_label": "Average pixel consistency MAE",
+        },
+        {
+            "filename": "geometric_error_vs_translation_magnitude_combined.png",
+            "title": "Aligned vs Mono Scaled Geometric Error vs Relative Translation Magnitude",
+            "series": [
+                {"label": "Aligned", "x_key": "rel_trans_mag", "y_key": "geo_avg"},
+                {"label": "Mono scaled", "x_key": "rel_trans_mag", "y_key": "mono_geo_avg"},
+            ],
+            "x_label": "Relative translation magnitude (m)",
+            "y_label": "Average geometric error (m)",
+        },
+        {
+            "filename": "pixel_mae_vs_translation_magnitude_combined.png",
+            "title": "Aligned vs Mono Scaled Pixel Consistency vs Relative Translation Magnitude",
+            "series": [
+                {"label": "Aligned", "x_key": "rel_trans_mag", "y_key": "pc_mae_avg"},
+                {"label": "Mono scaled", "x_key": "rel_trans_mag", "y_key": "mono_pc_mae_avg"},
+            ],
+            "x_label": "Relative translation magnitude (m)",
+            "y_label": "Average pixel consistency MAE",
         },
     ]
 
@@ -552,6 +704,7 @@ def _save_correlation_plots(all_rows, output_dir):
         "=" * 70,
     ]
     saved = 0
+    boxplot_saved = 0
 
     for spec in specs:
         series_points = []
@@ -621,13 +774,24 @@ def _save_correlation_plots(all_rows, output_dir):
         summary_lines.append(f"{spec['filename']}: " + " | ".join(legend_entries))
         saved += 1
 
+        # ── Boxplot-per-interval counterpart of the same relationship ──────
+        bin_edges = _make_bin_edges(xs_all, n_bins=5, fixed_range=spec.get("fixed_range"))
+        if _save_boxplot_by_interval(spec, series_points, bin_edges):
+            boxplot_saved += 1
+            summary_lines.append(
+                f"{spec['filename'].replace('.png', '_boxplot.png')}: "
+                f"{len(bin_edges) - 1} intervals over [{bin_edges[0]:.3f}, {bin_edges[-1]:.3f}]"
+            )
+        else:
+            summary_lines.append(f"{spec['filename'].replace('.png', '_boxplot.png')}: skipped (no data in any interval)")
+
     summary_lines.append("=" * 70)
 
     summary_path = os.path.join(corr_dir, "correlation_summary.txt")
     with open(summary_path, "w", encoding="utf-8") as sf:
         sf.write("\n".join(summary_lines) + "\n")
 
-    return corr_dir, saved
+    return corr_dir, saved, boxplot_saved
 
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
@@ -834,6 +998,9 @@ def main(args):
                         pose1_np = load_pose(pose1_path)
                         pose2_np = load_pose(pose2_path)
                         T_12_init_np = np.linalg.inv(pose2_np) @ pose1_np
+                        rel_rot_deg, rel_trans_mag = _safe_relative_rotation_translation(pose1_np, pose2_np)
+                        row["rel_rot_angle_deg"] = rel_rot_deg
+                        row["rel_trans_mag"] = rel_trans_mag
                     else:
                         pose1_np = pose2_np = None
                         T_12_init_np = np.eye(4, dtype=np.float32)
@@ -1140,8 +1307,8 @@ def main(args):
 
     print(f"[eval] Summary saved to {summary_path}")
 
-    corr_dir, n_corr = _save_correlation_plots(all_rows, args.output_dir)
-    print(f"[eval] Saved {n_corr} correlation plots to {corr_dir}")
+    corr_dir, n_corr, n_boxplots = _save_correlation_plots(all_rows, args.output_dir)
+    print(f"[eval] Saved {n_corr} correlation plots and {n_boxplots} interval boxplots to {corr_dir}")
 
     # ── Best / worst by pixel consistency MAE (avg of 1→2 and 2→1) ─────────
     # Note: best_heap/worst_heap only contain pairs evaluated in *this* run
