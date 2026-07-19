@@ -287,6 +287,21 @@ def main(args):
     model_variant = arch_cfg.get("model", "v1")
     print(f"[eval] Model variant: {model_variant}")
 
+    # Accept common checkpoint layouts used across older experiments.
+    model_state = ckpt.get("model")
+    if model_state is None:
+        model_state = ckpt.get("state_dict") or ckpt.get("model_state_dict")
+    if model_state is None:
+        raise KeyError(
+            "Checkpoint is missing model weights "
+            "(expected one of: model, state_dict, model_state_dict)"
+        )
+
+    # Some older/parallel saves prefix every key with "module.".
+    # Strip only when all keys share the prefix to avoid accidental rewrites.
+    if model_state and all(k.startswith("module.") for k in model_state.keys()):
+        model_state = {k[len("module."):]: v for k, v in model_state.items()}
+
     if model_variant == "depth_only":
         from models.model_depth_only.network import build_depth_only_net
         model = build_depth_only_net(arch_cfg)
@@ -338,8 +353,27 @@ def main(args):
             camera_head_hidden  = int(cam_cfg.get("hidden_dim", 64)),
         )
 
-    # Extract model weights only; drop optimizer state (2× model size, not needed for eval)
-    model_state = ckpt.pop("model")
+    # Backward-compatible state-dict loading for old depth_only decoder heads.
+    has_legacy_decoder_heads = any(
+        k.endswith("decoder.head_scale.weight") for k in model_state.keys()
+    )
+    if model_variant == "depth_only" and has_legacy_decoder_heads:
+        from models.model_depth_only.decoder import LegacyDepthDecoder
+
+        c = arch_cfg.get("depth_only", arch_cfg)
+        model.decoder = LegacyDepthDecoder(
+            token_dim=int(c.get("token_dim", 768)),
+            skip_dim=int(c.get("feature_dim", 256)),
+            hidden=int(c.get("decoder_hidden", 128)),
+        ).to(device)
+        model.predict_depth_map = True
+        print(
+            "[eval] Old-style depth decoder detected "
+            "(head_scale / head_resid). Using LegacyDepthDecoder."
+        )
+
+    # Drop heavy training-only states (not needed for eval).
+    ckpt.pop("model", None)
     ckpt.pop("optimizer", None)
     ckpt.pop("scheduler", None)
     # cfg, arch, epoch remain in ckpt for inspection

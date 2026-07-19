@@ -130,6 +130,18 @@ def build_model(ckpt, device):
     arch_cfg = ckpt.get("arch", {})
     model_variant = arch_cfg.get("model", "v1")
 
+    # Accept common checkpoint layouts used across older experiments.
+    sd = ckpt.get("model")
+    if sd is None:
+        sd = ckpt.get("state_dict") or ckpt.get("model_state_dict")
+    if sd is None:
+        raise KeyError("Checkpoint is missing model weights (expected one of: model, state_dict, model_state_dict)")
+
+    # Some older/parallel saves prefix every key with "module.".
+    # Strip only when all keys share the prefix to avoid accidental rewrites.
+    if sd and all(k.startswith("module.") for k in sd.keys()):
+        sd = {k[len("module."):]: v for k, v in sd.items()}
+
     if model_variant == "depth_only":
         from models.model_depth_only.network import build_depth_only_net
         model = build_depth_only_net(arch_cfg)
@@ -193,8 +205,8 @@ def build_model(ckpt, device):
     # network's forward returns {"depth1", "depth2"} rather than point maps.
     # All trained weights (encoder, cross-attention, decoder backbone) load
     # with strict=True and nothing is discarded.
-    sd = ckpt["model"]
-    if "decoder.head_scale.weight" in sd:
+    has_legacy_decoder_heads = any(k.endswith("decoder.head_scale.weight") for k in sd.keys())
+    if has_legacy_decoder_heads:
         from models.model_depth_only.decoder import LegacyDepthDecoder
         c = arch_cfg.get("depth_only", arch_cfg)
         legacy_dec = LegacyDepthDecoder(
