@@ -466,54 +466,72 @@ def _save_correlation_plots(all_rows, output_dir):
     corr_dir = os.path.join(output_dir, "correlations")
     os.makedirs(corr_dir, exist_ok=True)
 
+    def _finite_points(rows, x_key, y_key):
+        points = []
+        for r in rows:
+            x_val = r.get(x_key)
+            y_val = r.get(y_key)
+            if isinstance(x_val, (int, float, np.floating)) and isinstance(y_val, (int, float, np.floating)):
+                if np.isfinite(x_val) and np.isfinite(y_val):
+                    points.append((float(x_val), float(y_val)))
+        return points
+
+    def _robust_limits(values, lower=2.0, upper=98.0, pad_fraction=0.08):
+        values = np.asarray(values, dtype=np.float64)
+        values = values[np.isfinite(values)]
+        if values.size == 0:
+            return 0.0, 1.0
+        lo, hi = np.percentile(values, [lower, upper])
+        if not np.isfinite(lo) or not np.isfinite(hi):
+            lo = float(np.min(values))
+            hi = float(np.max(values))
+        if lo == hi:
+            span = abs(lo) if lo != 0 else 1.0
+            return lo - 0.5 * span, hi + 0.5 * span
+        span = hi - lo
+        pad = span * pad_fraction
+        return lo - pad, hi + pad
+
     specs = [
         {
-            "filename": "pixel_mae_vs_valid_ratio_aligned.png",
-            "title": "Aligned Pixel Consistency vs Valid Pixel Coverage",
-            "x_key": "pc_vr_avg",
-            "y_key": "pc_mae_avg",
+            "filename": "pixel_mae_vs_valid_ratio_combined.png",
+            "title": "Aligned vs Mono Scaled Pixel Consistency vs Valid Pixel Coverage",
+            "series": [
+                {"label": "Aligned", "x_key": "pc_vr_avg", "y_key": "pc_mae_avg"},
+                {"label": "Mono scaled", "x_key": "mono_pc_vr_avg", "y_key": "mono_pc_mae_avg"},
+            ],
             "x_label": "Average valid pixel ratio",
             "y_label": "Average pixel consistency MAE",
         },
         {
-            "filename": "geometric_error_vs_valid_ratio_aligned.png",
-            "title": "Aligned Geometric Error vs Valid Pixel Coverage",
-            "x_key": "geo_vr_avg",
-            "y_key": "geo_avg",
+            "filename": "geometric_error_vs_valid_ratio_combined.png",
+            "title": "Aligned vs Mono Scaled Geometric Error vs Valid Pixel Coverage",
+            "series": [
+                {"label": "Aligned", "x_key": "geo_vr_avg", "y_key": "geo_avg"},
+                {"label": "Mono scaled", "x_key": "mono_geo_vr_avg", "y_key": "mono_geo_avg"},
+            ],
             "x_label": "Average valid pixel ratio",
             "y_label": "Average geometric error (m)",
         },
         {
-            "filename": "pixel_mae_vs_geometric_error_aligned.png",
-            "title": "Aligned Pixel Consistency vs Geometric Error",
-            "x_key": "geo_avg",
-            "y_key": "pc_mae_avg",
+            "filename": "pixel_mae_vs_geometric_error_combined.png",
+            "title": "Aligned vs Mono Scaled Pixel Consistency vs Geometric Error",
+            "series": [
+                {"label": "Aligned", "x_key": "geo_avg", "y_key": "pc_mae_avg"},
+                {"label": "Mono scaled", "x_key": "mono_geo_avg", "y_key": "mono_pc_mae_avg"},
+            ],
             "x_label": "Average geometric error (m)",
             "y_label": "Average pixel consistency MAE",
         },
         {
-            "filename": "photometric_l2_vs_valid_ratio_aligned.png",
-            "title": "Aligned Photometric L2 vs Valid Pixel Coverage",
-            "x_key": "photo_vr_avg",
-            "y_key": "photo_l2_avg",
+            "filename": "photometric_l2_vs_valid_ratio_combined.png",
+            "title": "Aligned vs Mono Scaled Photometric L2 vs Valid Pixel Coverage",
+            "series": [
+                {"label": "Aligned", "x_key": "photo_vr_avg", "y_key": "photo_l2_avg"},
+                {"label": "Mono scaled", "x_key": "mono_photo_vr_avg", "y_key": "mono_photo_l2_avg"},
+            ],
             "x_label": "Average valid pixel ratio",
             "y_label": "Average photometric L2",
-        },
-        {
-            "filename": "pixel_mae_vs_valid_ratio_mono_scaled.png",
-            "title": "Mono Scaled Pixel Consistency vs Valid Pixel Coverage",
-            "x_key": "mono_pc_vr_avg",
-            "y_key": "mono_pc_mae_avg",
-            "x_label": "Average valid pixel ratio",
-            "y_label": "Average pixel consistency MAE",
-        },
-        {
-            "filename": "geometric_error_vs_valid_ratio_mono_scaled.png",
-            "title": "Mono Scaled Geometric Error vs Valid Pixel Coverage",
-            "x_key": "mono_geo_vr_avg",
-            "y_key": "mono_geo_avg",
-            "x_label": "Average valid pixel ratio",
-            "y_label": "Average geometric error (m)",
         },
     ]
 
@@ -524,37 +542,60 @@ def _save_correlation_plots(all_rows, output_dir):
     saved = 0
 
     for spec in specs:
-        points = [
-            (float(r[spec["x_key"]]), float(r[spec["y_key"]]))
-            for r in all_rows
-            if isinstance(r.get(spec["x_key"]), (int, float, np.floating))
-            and isinstance(r.get(spec["y_key"]), (int, float, np.floating))
-            and np.isfinite(r[spec["x_key"]])
-            and np.isfinite(r[spec["y_key"]])
-        ]
-        if len(points) < 3:
-            summary_lines.append(f"{spec['filename']}: skipped (need at least 3 finite points, found {len(points)})")
+        series_points = []
+        for series in spec["series"]:
+            points = _finite_points(all_rows, series["x_key"], series["y_key"])
+            series_points.append((series, points))
+
+        n_total = sum(len(points) for _, points in series_points)
+        if n_total < 3:
+            summary_lines.append(f"{spec['filename']}: skipped (need at least 3 finite points, found {n_total})")
             continue
 
-        xs = np.array([p[0] for p in points], dtype=np.float64)
-        ys = np.array([p[1] for p in points], dtype=np.float64)
-        corr = float(np.corrcoef(xs, ys)[0, 1]) if len(xs) >= 2 else float("nan")
+        xs_all = np.concatenate([
+            np.array([p[0] for p in points], dtype=np.float64)
+            for _, points in series_points if points
+        ])
+        ys_all = np.concatenate([
+            np.array([p[1] for p in points], dtype=np.float64)
+            for _, points in series_points if points
+        ])
+        x_lo, x_hi = _robust_limits(xs_all)
+        y_lo, y_hi = _robust_limits(ys_all)
 
         fig, ax = plt.subplots(figsize=(7.5, 5.5))
-        ax.scatter(xs, ys, s=20, alpha=0.7, edgecolors="none")
-        if len(xs) >= 2 and np.std(xs) > 0 and np.std(ys) > 0:
-            slope, intercept = np.polyfit(xs, ys, 1)
-            x_line = np.linspace(xs.min(), xs.max(), 100)
-            ax.plot(x_line, slope * x_line + intercept, color="tab:red", linewidth=2)
+        colors = ["tab:blue", "tab:orange"]
+        legend_entries = []
+        for idx, (series, points) in enumerate(series_points):
+            if not points:
+                summary_lines.append(f"{spec['filename']} / {series['label']}: skipped (no finite points)")
+                continue
+
+            xs = np.array([p[0] for p in points], dtype=np.float64)
+            ys = np.array([p[1] for p in points], dtype=np.float64)
+            corr = float(np.corrcoef(xs, ys)[0, 1]) if len(xs) >= 2 else float("nan")
+            color = colors[idx % len(colors)]
+
+            ax.scatter(xs, ys, s=20, alpha=0.55, edgecolors="none", color=color, label=f"{series['label']} points")
+            if len(xs) >= 2 and np.std(xs) > 0 and np.std(ys) > 0:
+                slope, intercept = np.polyfit(xs, ys, 1)
+                x_line = np.linspace(np.nanpercentile(xs, 2), np.nanpercentile(xs, 98), 100)
+                ax.plot(x_line, slope * x_line + intercept, color=color, linewidth=2.2, label=f"{series['label']} trend (r={corr:.3f})")
+                legend_entries.append(f"{series['label']}: n={len(xs)}, pearson={corr:.4f}")
+            else:
+                legend_entries.append(f"{series['label']}: n={len(xs)}, pearson=n/a")
 
         ax.set_title(spec["title"])
         ax.set_xlabel(spec["x_label"])
         ax.set_ylabel(spec["y_label"])
         ax.grid(True, alpha=0.25)
+        ax.set_xlim(x_lo, x_hi)
+        ax.set_ylim(y_lo, y_hi)
+        ax.legend(loc="best", fontsize=8, frameon=True)
         ax.text(
             0.02,
             0.98,
-            f"n={len(xs)}\npearson={corr:.3f}",
+            "\n".join(legend_entries),
             transform=ax.transAxes,
             va="top",
             ha="left",
@@ -565,7 +606,7 @@ def _save_correlation_plots(all_rows, output_dir):
         fig.savefig(os.path.join(corr_dir, spec["filename"]), dpi=150, bbox_inches="tight")
         plt.close(fig)
 
-        summary_lines.append(f"{spec['filename']}: n={len(xs)}, pearson={corr:.4f}")
+        summary_lines.append(f"{spec['filename']}: " + " | ".join(legend_entries))
         saved += 1
 
     summary_lines.append("=" * 70)
