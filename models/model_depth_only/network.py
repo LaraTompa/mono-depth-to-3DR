@@ -542,15 +542,17 @@ class DepthOnlyNet(nn.Module):
                 }
 
         if self.predict_depth_map:
-            return {
+            outputs = {
                 "depth1":      out1["depth"],
                 "depth2":      out2["depth"],
                 "confidence1": out1["confidence"],
                 "confidence2": out2["confidence"],
-                "log_scale1":  out1["log_scale"],
-                "log_scale2":  out2["log_scale"],
                 **pose_preds,
             }
+            if "log_scale" in out1 and "log_scale" in out2:
+                outputs["log_scale1"] = out1["log_scale"]
+                outputs["log_scale2"] = out2["log_scale"]
+            return outputs
         return {
             "point1":           out1["point"],
             "point2":           out2["point"],
