@@ -741,296 +741,303 @@ def main(args):
             print(f"  [warn] no intrinsics file, using heuristic for {sc_path}")
             K_np = None   # will fill per-pair from image size
 
-        # Evaluate up to args.window consecutive pairs per scene
+        # Evaluate up to args.window pairs per scene across all lags
         # (start count from any pairs already done for this scene when resuming)
         pairs_this_scene = done_count_per_scene.get((b_name, s_name, sc_name), 0)
-        for pi in range(0, len(frame_ids) - 1, args.pair_stride):
+        for pi in range(0, len(frame_ids), args.pair_stride):
             if args.window > 0 and pairs_this_scene >= args.window:
                 break
             if args.max_pairs > 0 and total_pairs >= args.max_pairs:
                 break
+            for lag in range(1, args.pair_lag_max + 1):
+                if pi + lag >= len(frame_ids):
+                    continue
+                if args.window > 0 and pairs_this_scene >= args.window:
+                    break
+                if args.max_pairs > 0 and total_pairs >= args.max_pairs:
+                    break
 
-            fid1, fid2 = frame_ids[pi], frame_ids[pi + 1]
+                fid1, fid2 = frame_ids[pi], frame_ids[pi + lag]
 
-            if resume_mode and (b_name, s_name, sc_name, fid1, fid2) in done_keys:
-                continue
+                if resume_mode and (b_name, s_name, sc_name, fid1, fid2) in done_keys:
+                    continue
 
-            color1_path = os.path.join(color_dir, f"{fid1}.png")
-            color2_path = os.path.join(color_dir, f"{fid2}.png")
-            depth1_path = os.path.join(depth_dir, f"{fid1}.npy")
-            depth2_path = os.path.join(depth_dir, f"{fid2}.npy")
-            pred1_path  = os.path.join(pred_dir,  f"{fid1}.png")
-            pred2_path  = os.path.join(pred_dir,  f"{fid2}.png")
-            pose1_path  = os.path.join(pose_dir,  f"{fid1}.txt")
-            pose2_path  = os.path.join(pose_dir,  f"{fid2}.txt")
+                color1_path = os.path.join(color_dir, f"{fid1}.png")
+                color2_path = os.path.join(color_dir, f"{fid2}.png")
+                depth1_path = os.path.join(depth_dir, f"{fid1}.npy")
+                depth2_path = os.path.join(depth_dir, f"{fid2}.npy")
+                pred1_path  = os.path.join(pred_dir,  f"{fid1}.png")
+                pred2_path  = os.path.join(pred_dir,  f"{fid2}.png")
+                pose1_path  = os.path.join(pose_dir,  f"{fid1}.txt")
+                pose2_path  = os.path.join(pose_dir,  f"{fid2}.txt")
 
-            missing = [p for p in (color1_path, color2_path, depth1_path,
-                                    depth2_path, pred1_path, pred2_path)
-                       if not os.path.isfile(p)]
-            if missing:
-                print(f"  [skip] missing files: {missing}")
-                continue
+                missing = [p for p in (color1_path, color2_path, depth1_path,
+                                        depth2_path, pred1_path, pred2_path)
+                           if not os.path.isfile(p)]
+                if missing:
+                    print(f"  [skip] missing files: {missing}")
+                    continue
 
-            print(f"[{scene_idx+1}/{len(scenes)}] {b_name}/{s_name}/{sc_name} "
-                  f"pair ({fid1},{fid2})")
+                print(f"[{scene_idx+1}/{len(scenes)}] {b_name}/{s_name}/{sc_name} "
+                      f"pair ({fid1},{fid2})")
 
-            row = {"batch": b_name, "sample": s_name, "scene": sc_name,
-                   "frame1": fid1, "frame2": fid2}
-            row.update(_nan_row())
+                row = {"batch": b_name, "sample": s_name, "scene": sc_name,
+                       "frame1": fid1, "frame2": fid2}
+                row.update(_nan_row())
 
-            try:
-                # ── Load images ──────────────────────────────────────────────
-                img1_np = load_image(color1_path, as_gray=False)   # (H,W,3) float32
-                img2_np = load_image(color2_path, as_gray=False)
-                H, W = img1_np.shape[:2]
+                try:
+                    # ── Load images ──────────────────────────────────────────────
+                    img1_np = load_image(color1_path, as_gray=False)   # (H,W,3) float32
+                    img2_np = load_image(color2_path, as_gray=False)
+                    H, W = img1_np.shape[:2]
 
-                img1_gray = cv2.cvtColor(img1_np, cv2.COLOR_RGB2GRAY)
-                img2_gray = cv2.cvtColor(img2_np, cv2.COLOR_RGB2GRAY)
+                    img1_gray = cv2.cvtColor(img1_np, cv2.COLOR_RGB2GRAY)
+                    img2_gray = cv2.cvtColor(img2_np, cv2.COLOR_RGB2GRAY)
 
-                # ── Load GT depths ───────────────────────────────────────────
-                gt1_raw = load_gt_depth(depth1_path)
-                gt2_raw = load_gt_depth(depth2_path)
-                if gt1_raw.shape != (H, W):
-                    gt1_raw = cv2.resize(gt1_raw, (W, H), interpolation=cv2.INTER_NEAREST)
-                if gt2_raw.shape != (H, W):
-                    gt2_raw = cv2.resize(gt2_raw, (W, H), interpolation=cv2.INTER_NEAREST)
+                    # ── Load GT depths ───────────────────────────────────────────
+                    gt1_raw = load_gt_depth(depth1_path)
+                    gt2_raw = load_gt_depth(depth2_path)
+                    if gt1_raw.shape != (H, W):
+                        gt1_raw = cv2.resize(gt1_raw, (W, H), interpolation=cv2.INTER_NEAREST)
+                    if gt2_raw.shape != (H, W):
+                        gt2_raw = cv2.resize(gt2_raw, (W, H), interpolation=cv2.INTER_NEAREST)
 
-                # ── Load mono predictions ────────────────────────────────────
-                pred_mono1 = load_pred_depth_zoe(pred1_path, args.depth_scale_pred)
-                pred_mono2 = load_pred_depth_zoe(pred2_path, args.depth_scale_pred)
-                if pred_mono1.shape != (H, W):
-                    pred_mono1 = cv2.resize(pred_mono1, (W, H), interpolation=cv2.INTER_NEAREST)
-                if pred_mono2.shape != (H, W):
-                    pred_mono2 = cv2.resize(pred_mono2, (W, H), interpolation=cv2.INTER_NEAREST)
+                    # ── Load mono predictions ────────────────────────────────────
+                    pred_mono1 = load_pred_depth_zoe(pred1_path, args.depth_scale_pred)
+                    pred_mono2 = load_pred_depth_zoe(pred2_path, args.depth_scale_pred)
+                    if pred_mono1.shape != (H, W):
+                        pred_mono1 = cv2.resize(pred_mono1, (W, H), interpolation=cv2.INTER_NEAREST)
+                    if pred_mono2.shape != (H, W):
+                        pred_mono2 = cv2.resize(pred_mono2, (W, H), interpolation=cv2.INTER_NEAREST)
 
-                # ── Intrinsics ───────────────────────────────────────────────
-                if K_np is None:
-                    fx = 0.9 * max(H, W)
-                    K_np = np.array([[fx, 0., W/2.], [0., fx, H/2.], [0., 0., 1.]],
-                                    dtype=np.float32)
+                    # ── Intrinsics ───────────────────────────────────────────────
+                    if K_np is None:
+                        fx = 0.9 * max(H, W)
+                        K_np = np.array([[fx, 0., W/2.], [0., fx, H/2.], [0., 0., 1.]],
+                                        dtype=np.float32)
 
-                # ── Poses ────────────────────────────────────────────────────
-                has_poses = os.path.isfile(pose1_path) and os.path.isfile(pose2_path)
-                if has_poses:
-                    pose1_np = load_pose(pose1_path)
-                    pose2_np = load_pose(pose2_path)
-                    T_12_init_np = np.linalg.inv(pose2_np) @ pose1_np
-                else:
-                    pose1_np = pose2_np = None
-                    T_12_init_np = np.eye(4, dtype=np.float32)
+                    # ── Poses ────────────────────────────────────────────────────
+                    has_poses = os.path.isfile(pose1_path) and os.path.isfile(pose2_path)
+                    if has_poses:
+                        pose1_np = load_pose(pose1_path)
+                        pose2_np = load_pose(pose2_path)
+                        T_12_init_np = np.linalg.inv(pose2_np) @ pose1_np
+                    else:
+                        pose1_np = pose2_np = None
+                        T_12_init_np = np.eye(4, dtype=np.float32)
 
-                # ── Prepare tensors ──────────────────────────────────────────
-                rgb1_t = (torch.from_numpy(img1_np)
-                          .permute(2, 0, 1).unsqueeze(0).to(device))
-                rgb2_t = (torch.from_numpy(img2_np)
-                          .permute(2, 0, 1).unsqueeze(0).to(device))
-                depth1_t = (torch.from_numpy(pred_mono1)
-                            .unsqueeze(0).unsqueeze(0).to(device))
-                depth2_t = (torch.from_numpy(pred_mono2)
-                            .unsqueeze(0).unsqueeze(0).to(device))
-                if normalize_depths:
-                    depth1_t = normalize_depth_map(depth1_t, depth_norm_cfg.get("mde"))
-                    depth2_t = normalize_depth_map(depth2_t, depth_norm_cfg.get("mde"))
-                K_t = torch.from_numpy(K_np.astype(np.float32)).unsqueeze(0).to(device)
-                T_12_t = torch.from_numpy(T_12_init_np.astype(np.float32)).unsqueeze(0).to(device)
-
-                # ── Inference ────────────────────────────────────────────────
-                outputs = run_inference(
-                    model, model_variant, cfg,
-                    rgb1_t, rgb2_t, depth1_t, depth2_t,
-                    K_t, T_12_t, device,
-                )
-
-                # depth_only outputs point1/point2 (XYZ maps); derive depth from Z-channel.
-                if "point1" in outputs:
-                    # depth1 = Z of point1 in cam1 frame (correct).
-                    pred1_out_t = outputs["point1"][:, 2:3].clamp(min=0)  # (B,1,pH,pW)
-                    if normalize_points and point_norm_scale_eval is not None:
-                        pred1_out_t = pred1_out_t * point_norm_scale_eval
-
-                    # point2 is expressed in cam1 frame; get the real depth in cam2 frame
-                    # by transforming the 3-D points with T_12 (cam1 → cam2) and taking Z.
-                    _p2 = outputs["point2"]                          # (B, 3, pH, pW) in cam1
-                    if normalize_points and point_norm_scale_eval is not None:
-                        _p2 = _p2 * point_norm_scale_eval            # → metric units
-                    _B2, _, _pH2, _pW2 = _p2.shape
-                    _R12 = T_12_t[:, :3, :3].to(dtype=_p2.dtype)
-                    _t12 = T_12_t[:, :3,  3].to(dtype=_p2.dtype)
-                    _p2_cam2 = (
-                        torch.bmm(_R12, _p2.reshape(_B2, 3, -1)) + _t12.unsqueeze(-1)
-                    ).reshape(_B2, 3, _pH2, _pW2)
-                    pred2_out_t = _p2_cam2[:, 2:3].clamp(min=0)     # depth in cam2 frame
-                else:
-                    pred1_out_t = outputs["depth1"]
-                    pred2_out_t = outputs["depth2"]
+                    # ── Prepare tensors ──────────────────────────────────────────
+                    rgb1_t = (torch.from_numpy(img1_np)
+                              .permute(2, 0, 1).unsqueeze(0).to(device))
+                    rgb2_t = (torch.from_numpy(img2_np)
+                              .permute(2, 0, 1).unsqueeze(0).to(device))
+                    depth1_t = (torch.from_numpy(pred_mono1)
+                                .unsqueeze(0).unsqueeze(0).to(device))
+                    depth2_t = (torch.from_numpy(pred_mono2)
+                                .unsqueeze(0).unsqueeze(0).to(device))
                     if normalize_depths:
-                        pred1_out_t = denormalize_depth_map(pred1_out_t, depth_norm_cfg.get("gt"))
-                        pred2_out_t = denormalize_depth_map(pred2_out_t, depth_norm_cfg.get("gt"))
-                pred1_out = pred1_out_t.squeeze().cpu().numpy()
-                pred2_out = pred2_out_t.squeeze().cpu().numpy()
+                        depth1_t = normalize_depth_map(depth1_t, depth_norm_cfg.get("mde"))
+                        depth2_t = normalize_depth_map(depth2_t, depth_norm_cfg.get("mde"))
+                    K_t = torch.from_numpy(K_np.astype(np.float32)).unsqueeze(0).to(device)
+                    T_12_t = torch.from_numpy(T_12_init_np.astype(np.float32)).unsqueeze(0).to(device)
 
-                # Resize to image resolution
-                pred1_full = cv2.resize(pred1_out, (W, H), interpolation=cv2.INTER_LINEAR)
-                pred2_full = cv2.resize(pred2_out, (W, H), interpolation=cv2.INTER_LINEAR)
+                    # ── Inference ────────────────────────────────────────────────
+                    outputs = run_inference(
+                        model, model_variant, cfg,
+                        rgb1_t, rgb2_t, depth1_t, depth2_t,
+                        K_t, T_12_t, device,
+                    )
 
-                # Predicted camera params
-                if "K_pred" in outputs:
-                    Kp = outputs["K_pred"][0].cpu().numpy()
-                    row["pred_fx"] = float(Kp[0, 0])
-                    row["pred_fy"] = float(Kp[1, 1])
-                    row["pred_cx"] = float(Kp[0, 2])
-                    row["pred_cy"] = float(Kp[1, 2])
-                row["gt_fx"] = float(K_np[0, 0])
-                row["gt_fy"] = float(K_np[1, 1])
-                row["gt_cx"] = float(K_np[0, 2])
-                row["gt_cy"] = float(K_np[1, 2])
+                    # depth_only outputs point1/point2 (XYZ maps); derive depth from Z-channel.
+                    if "point1" in outputs:
+                        # depth1 = Z of point1 in cam1 frame (correct).
+                        pred1_out_t = outputs["point1"][:, 2:3].clamp(min=0)  # (B,1,pH,pW)
+                        if normalize_points and point_norm_scale_eval is not None:
+                            pred1_out_t = pred1_out_t * point_norm_scale_eval
 
-                # ── Use GT or predicted K for metric projection ───────────────
-                K_eval = K_np  # use GT intrinsics when available
+                        # point2 is expressed in cam1 frame; get the real depth in cam2 frame
+                        # by transforming the 3-D points with T_12 (cam1 → cam2) and taking Z.
+                        _p2 = outputs["point2"]                          # (B, 3, pH, pW) in cam1
+                        if normalize_points and point_norm_scale_eval is not None:
+                            _p2 = _p2 * point_norm_scale_eval            # → metric units
+                        _B2, _, _pH2, _pW2 = _p2.shape
+                        _R12 = T_12_t[:, :3, :3].to(dtype=_p2.dtype)
+                        _t12 = T_12_t[:, :3,  3].to(dtype=_p2.dtype)
+                        _p2_cam2 = (
+                            torch.bmm(_R12, _p2.reshape(_B2, 3, -1)) + _t12.unsqueeze(-1)
+                        ).reshape(_B2, 3, _pH2, _pW2)
+                        pred2_out_t = _p2_cam2[:, 2:3].clamp(min=0)     # depth in cam2 frame
+                    else:
+                        pred1_out_t = outputs["depth1"]
+                        pred2_out_t = outputs["depth2"]
+                        if normalize_depths:
+                            pred1_out_t = denormalize_depth_map(pred1_out_t, depth_norm_cfg.get("gt"))
+                            pred2_out_t = denormalize_depth_map(pred2_out_t, depth_norm_cfg.get("gt"))
+                    pred1_out = pred1_out_t.squeeze().cpu().numpy()
+                    pred2_out = pred2_out_t.squeeze().cpu().numpy()
 
-                # ── Depth metrics (aligned) ──────────────────────────────────
-                m1 = _safe_depth_metrics(pred1_full, gt1_raw)
-                m2 = _safe_depth_metrics(pred2_full, gt2_raw)
-                for k, v in m1.items():
-                    row[f"{k}_v1"] = v
-                for k, v in m2.items():
-                    row[f"{k}_v2"] = v
+                    # Resize to image resolution
+                    pred1_full = cv2.resize(pred1_out, (W, H), interpolation=cv2.INTER_LINEAR)
+                    pred2_full = cv2.resize(pred2_out, (W, H), interpolation=cv2.INTER_LINEAR)
 
-                # ── Pixel consistency (aligned) ──────────────────────────────
-                if has_poses:
-                    pc12_mae, pc12_rmse, pc12_vr = _safe_pixel_consistency(
-                        gt1_raw, pred1_full, gt2_raw, K_eval, pose1_np, pose2_np)
-                    pc21_mae, pc21_rmse, pc21_vr = _safe_pixel_consistency(
-                        gt2_raw, pred2_full, gt1_raw, K_eval, pose2_np, pose1_np)
-                    row["pc_mae_12"]  = pc12_mae
-                    row["pc_rmse_12"] = pc12_rmse
-                    row["pc_vr_12"]   = pc12_vr
-                    row["pc_mae_21"]  = pc21_mae
-                    row["pc_rmse_21"] = pc21_rmse
-                    row["pc_vr_21"]   = pc21_vr
-                    row["pc_mae_avg"]  = _nanmean2(pc12_mae, pc21_mae)
-                    row["pc_rmse_avg"] = _nanmean2(pc12_rmse, pc21_rmse)
-                    row["pc_vr_avg"]   = _nanmean2(pc12_vr, pc21_vr)
+                    # Predicted camera params
+                    if "K_pred" in outputs:
+                        Kp = outputs["K_pred"][0].cpu().numpy()
+                        row["pred_fx"] = float(Kp[0, 0])
+                        row["pred_fy"] = float(Kp[1, 1])
+                        row["pred_cx"] = float(Kp[0, 2])
+                        row["pred_cy"] = float(Kp[1, 2])
+                    row["gt_fx"] = float(K_np[0, 0])
+                    row["gt_fy"] = float(K_np[1, 1])
+                    row["gt_cx"] = float(K_np[0, 2])
+                    row["gt_cy"] = float(K_np[1, 2])
 
-                    geo12, geo12_vr = _safe_geometric_error(
-                        gt1_raw, pred2_full, K_eval, pose1_np, pose2_np)
-                    geo21, geo21_vr = _safe_geometric_error(
-                        gt2_raw, pred1_full, K_eval, pose2_np, pose1_np)
-                    row["geo_12"] = geo12
-                    row["geo_vr_12"] = geo12_vr
-                    row["geo_21"] = geo21
-                    row["geo_vr_21"] = geo21_vr
-                    row["geo_avg"] = _nanmean2(geo12, geo21)
-                    row["geo_vr_avg"] = _nanmean2(geo12_vr, geo21_vr)
+                    # ── Use GT or predicted K for metric projection ───────────────
+                    K_eval = K_np  # use GT intrinsics when available
 
-                    # ── Photometric consistency (aligned) ────────────────────
-                    ph12_ssim, ph12_l2, ph12_vr = _safe_photometric(
-                        img1_gray, img2_gray, pred1_full, K_eval, pose1_np, pose2_np)
-                    ph21_ssim, ph21_l2, ph21_vr = _safe_photometric(
-                        img2_gray, img1_gray, pred2_full, K_eval, pose2_np, pose1_np)
-                    row["photo_ssim_12"] = ph12_ssim
-                    row["photo_l2_12"]   = ph12_l2
-                    row["photo_vr_12"]   = ph12_vr
-                    row["photo_ssim_21"] = ph21_ssim
-                    row["photo_l2_21"]   = ph21_l2
-                    row["photo_vr_21"]   = ph21_vr
-                    row["photo_ssim_avg"] = _nanmean2(ph12_ssim, ph21_ssim)
-                    row["photo_l2_avg"]   = _nanmean2(ph12_l2, ph21_l2)
-                    row["photo_vr_avg"]   = _nanmean2(ph12_vr, ph21_vr)
+                    # ── Depth metrics (aligned) ──────────────────────────────────
+                    m1 = _safe_depth_metrics(pred1_full, gt1_raw)
+                    m2 = _safe_depth_metrics(pred2_full, gt2_raw)
+                    for k, v in m1.items():
+                        row[f"{k}_v1"] = v
+                    for k, v in m2.items():
+                        row[f"{k}_v2"] = v
 
-                # ── Mono scaled metrics ──────────────────────────────────────
-                s1 = _median_scale(pred_mono1, gt1_raw)
-                s2 = _median_scale(pred_mono2, gt2_raw)
-                row["mono_scale1"] = s1
-                row["mono_scale2"] = s2
+                    # ── Pixel consistency (aligned) ──────────────────────────────
+                    if has_poses:
+                        pc12_mae, pc12_rmse, pc12_vr = _safe_pixel_consistency(
+                            gt1_raw, pred1_full, gt2_raw, K_eval, pose1_np, pose2_np)
+                        pc21_mae, pc21_rmse, pc21_vr = _safe_pixel_consistency(
+                            gt2_raw, pred2_full, gt1_raw, K_eval, pose2_np, pose1_np)
+                        row["pc_mae_12"]  = pc12_mae
+                        row["pc_rmse_12"] = pc12_rmse
+                        row["pc_vr_12"]   = pc12_vr
+                        row["pc_mae_21"]  = pc21_mae
+                        row["pc_rmse_21"] = pc21_rmse
+                        row["pc_vr_21"]   = pc21_vr
+                        row["pc_mae_avg"]  = _nanmean2(pc12_mae, pc21_mae)
+                        row["pc_rmse_avg"] = _nanmean2(pc12_rmse, pc21_rmse)
+                        row["pc_vr_avg"]   = _nanmean2(pc12_vr, pc21_vr)
 
-                mono1_scaled = pred_mono1 * s1
-                mono2_scaled = pred_mono2 * s2
+                        geo12, geo12_vr = _safe_geometric_error(
+                            gt1_raw, pred2_full, K_eval, pose1_np, pose2_np)
+                        geo21, geo21_vr = _safe_geometric_error(
+                            gt2_raw, pred1_full, K_eval, pose2_np, pose1_np)
+                        row["geo_12"] = geo12
+                        row["geo_vr_12"] = geo12_vr
+                        row["geo_21"] = geo21
+                        row["geo_vr_21"] = geo21_vr
+                        row["geo_avg"] = _nanmean2(geo12, geo21)
+                        row["geo_vr_avg"] = _nanmean2(geo12_vr, geo21_vr)
 
-                mm1 = _safe_depth_metrics(mono1_scaled, gt1_raw)
-                mm2 = _safe_depth_metrics(mono2_scaled, gt2_raw)
-                for k, v in mm1.items():
-                    row[f"mono_{k}_v1"] = v
-                for k, v in mm2.items():
-                    row[f"mono_{k}_v2"] = v
+                        # ── Photometric consistency (aligned) ────────────────────
+                        ph12_ssim, ph12_l2, ph12_vr = _safe_photometric(
+                            img1_gray, img2_gray, pred1_full, K_eval, pose1_np, pose2_np)
+                        ph21_ssim, ph21_l2, ph21_vr = _safe_photometric(
+                            img2_gray, img1_gray, pred2_full, K_eval, pose2_np, pose1_np)
+                        row["photo_ssim_12"] = ph12_ssim
+                        row["photo_l2_12"]   = ph12_l2
+                        row["photo_vr_12"]   = ph12_vr
+                        row["photo_ssim_21"] = ph21_ssim
+                        row["photo_l2_21"]   = ph21_l2
+                        row["photo_vr_21"]   = ph21_vr
+                        row["photo_ssim_avg"] = _nanmean2(ph12_ssim, ph21_ssim)
+                        row["photo_l2_avg"]   = _nanmean2(ph12_l2, ph21_l2)
+                        row["photo_vr_avg"]   = _nanmean2(ph12_vr, ph21_vr)
 
-                if has_poses:
-                    mpc12_mae, mpc12_rmse, mpc12_vr = _safe_pixel_consistency(
-                        gt1_raw, mono1_scaled, gt2_raw, K_eval, pose1_np, pose2_np)
-                    mpc21_mae, mpc21_rmse, mpc21_vr = _safe_pixel_consistency(
-                        gt2_raw, mono2_scaled, gt1_raw, K_eval, pose2_np, pose1_np)
-                    row["mono_pc_mae_12"]  = mpc12_mae
-                    row["mono_pc_rmse_12"] = mpc12_rmse
-                    row["mono_pc_vr_12"]   = mpc12_vr
-                    row["mono_pc_mae_21"]  = mpc21_mae
-                    row["mono_pc_rmse_21"] = mpc21_rmse
-                    row["mono_pc_vr_21"]   = mpc21_vr
-                    row["mono_pc_mae_avg"]  = _nanmean2(mpc12_mae, mpc21_mae)
-                    row["mono_pc_rmse_avg"] = _nanmean2(mpc12_rmse, mpc21_rmse)
-                    row["mono_pc_vr_avg"]   = _nanmean2(mpc12_vr, mpc21_vr)
+                    # ── Mono scaled metrics ──────────────────────────────────────
+                    s1 = _median_scale(pred_mono1, gt1_raw)
+                    s2 = _median_scale(pred_mono2, gt2_raw)
+                    row["mono_scale1"] = s1
+                    row["mono_scale2"] = s2
 
-                    mgeo12, mgeo12_vr = _safe_geometric_error(
-                        gt1_raw, mono2_scaled, K_eval, pose1_np, pose2_np)
-                    mgeo21, mgeo21_vr = _safe_geometric_error(
-                        gt2_raw, mono1_scaled, K_eval, pose2_np, pose1_np)
-                    row["mono_geo_12"] = mgeo12
-                    row["mono_geo_vr_12"] = mgeo12_vr
-                    row["mono_geo_21"] = mgeo21
-                    row["mono_geo_vr_21"] = mgeo21_vr
-                    row["mono_geo_avg"] = _nanmean2(mgeo12, mgeo21)
-                    row["mono_geo_vr_avg"] = _nanmean2(mgeo12_vr, mgeo21_vr)
+                    mono1_scaled = pred_mono1 * s1
+                    mono2_scaled = pred_mono2 * s2
 
-                    mph12_ssim, mph12_l2, mph12_vr = _safe_photometric(
-                        img1_gray, img2_gray, mono1_scaled, K_eval, pose1_np, pose2_np)
-                    mph21_ssim, mph21_l2, mph21_vr = _safe_photometric(
-                        img2_gray, img1_gray, mono2_scaled, K_eval, pose2_np, pose1_np)
-                    row["mono_photo_ssim_12"] = mph12_ssim
-                    row["mono_photo_l2_12"]   = mph12_l2
-                    row["mono_photo_vr_12"]   = mph12_vr
-                    row["mono_photo_ssim_21"] = mph21_ssim
-                    row["mono_photo_l2_21"]   = mph21_l2
-                    row["mono_photo_vr_21"]   = mph21_vr
-                    row["mono_photo_ssim_avg"] = _nanmean2(mph12_ssim, mph21_ssim)
-                    row["mono_photo_l2_avg"]   = _nanmean2(mph12_l2, mph21_l2)
-                    row["mono_photo_vr_avg"]   = _nanmean2(mph12_vr, mph21_vr)
+                    mm1 = _safe_depth_metrics(mono1_scaled, gt1_raw)
+                    mm2 = _safe_depth_metrics(mono2_scaled, gt2_raw)
+                    for k, v in mm1.items():
+                        row[f"mono_{k}_v1"] = v
+                    for k, v in mm2.items():
+                        row[f"mono_{k}_v2"] = v
 
-                # Store inputs for best/worst visualisation
-                row["_img1"]       = img1_np
-                row["_img2"]       = img2_np
-                row["_gt1"]        = gt1_raw
-                row["_gt2"]        = gt2_raw
-                row["_pred1"]      = pred1_full
-                row["_pred2"]      = pred2_full
-                row["_mono1_sc"]   = mono1_scaled
-                row["_mono2_sc"]   = mono2_scaled
-                conf1_np = outputs.get("confidence1")
-                conf2_np = outputs.get("confidence2")
-                row["_conf1"] = conf1_np.squeeze().cpu().numpy() if conf1_np is not None else None
-                row["_conf2"] = conf2_np.squeeze().cpu().numpy() if conf2_np is not None else None
+                    if has_poses:
+                        mpc12_mae, mpc12_rmse, mpc12_vr = _safe_pixel_consistency(
+                            gt1_raw, mono1_scaled, gt2_raw, K_eval, pose1_np, pose2_np)
+                        mpc21_mae, mpc21_rmse, mpc21_vr = _safe_pixel_consistency(
+                            gt2_raw, mono2_scaled, gt1_raw, K_eval, pose2_np, pose1_np)
+                        row["mono_pc_mae_12"]  = mpc12_mae
+                        row["mono_pc_rmse_12"] = mpc12_rmse
+                        row["mono_pc_vr_12"]   = mpc12_vr
+                        row["mono_pc_mae_21"]  = mpc21_mae
+                        row["mono_pc_rmse_21"] = mpc21_rmse
+                        row["mono_pc_vr_21"]   = mpc21_vr
+                        row["mono_pc_mae_avg"]  = _nanmean2(mpc12_mae, mpc21_mae)
+                        row["mono_pc_rmse_avg"] = _nanmean2(mpc12_rmse, mpc21_rmse)
+                        row["mono_pc_vr_avg"]   = _nanmean2(mpc12_vr, mpc21_vr)
 
-            except Exception as exc:
-                print(f"  [ERROR] {b_name}/{s_name}/{sc_name} ({fid1},{fid2}): {exc}")
+                        mgeo12, mgeo12_vr = _safe_geometric_error(
+                            gt1_raw, mono2_scaled, K_eval, pose1_np, pose2_np)
+                        mgeo21, mgeo21_vr = _safe_geometric_error(
+                            gt2_raw, mono1_scaled, K_eval, pose2_np, pose1_np)
+                        row["mono_geo_12"] = mgeo12
+                        row["mono_geo_vr_12"] = mgeo12_vr
+                        row["mono_geo_21"] = mgeo21
+                        row["mono_geo_vr_21"] = mgeo21_vr
+                        row["mono_geo_avg"] = _nanmean2(mgeo12, mgeo21)
+                        row["mono_geo_vr_avg"] = _nanmean2(mgeo12_vr, mgeo21_vr)
 
-            # Write CSV row (without private _ keys)
-            public_row = {k: v for k, v in row.items() if not k.startswith("_")}
-            writer.writerow(public_row)
-            csv_file.flush()
+                        mph12_ssim, mph12_l2, mph12_vr = _safe_photometric(
+                            img1_gray, img2_gray, mono1_scaled, K_eval, pose1_np, pose2_np)
+                        mph21_ssim, mph21_l2, mph21_vr = _safe_photometric(
+                            img2_gray, img1_gray, mono2_scaled, K_eval, pose2_np, pose1_np)
+                        row["mono_photo_ssim_12"] = mph12_ssim
+                        row["mono_photo_l2_12"]   = mph12_l2
+                        row["mono_photo_vr_12"]   = mph12_vr
+                        row["mono_photo_ssim_21"] = mph21_ssim
+                        row["mono_photo_l2_21"]   = mph21_l2
+                        row["mono_photo_vr_21"]   = mph21_vr
+                        row["mono_photo_ssim_avg"] = _nanmean2(mph12_ssim, mph21_ssim)
+                        row["mono_photo_l2_avg"]   = _nanmean2(mph12_l2, mph21_l2)
+                        row["mono_photo_vr_avg"]   = _nanmean2(mph12_vr, mph21_vr)
 
-            # Keep only lightweight metrics for the running summary; heavy
-            # image arrays are tracked separately in bounded best/worst heaps.
-            all_rows.append(public_row)
+                    # Store inputs for best/worst visualisation
+                    row["_img1"]       = img1_np
+                    row["_img2"]       = img2_np
+                    row["_gt1"]        = gt1_raw
+                    row["_gt2"]        = gt2_raw
+                    row["_pred1"]      = pred1_full
+                    row["_pred2"]      = pred2_full
+                    row["_mono1_sc"]   = mono1_scaled
+                    row["_mono2_sc"]   = mono2_scaled
+                    conf1_np = outputs.get("confidence1")
+                    conf2_np = outputs.get("confidence2")
+                    row["_conf1"] = conf1_np.squeeze().cpu().numpy() if conf1_np is not None else None
+                    row["_conf2"] = conf2_np.squeeze().cpu().numpy() if conf2_np is not None else None
 
-            pc_val = row.get("pc_mae_avg")
-            if isinstance(pc_val, float) and np.isfinite(pc_val) and "_img1" in row:
-                heapq.heappush(best_heap, (-pc_val, next(_bw_seq), dict(row)))
-                if len(best_heap) > args.n_best_worst:
-                    heapq.heappop(best_heap)
-                heapq.heappush(worst_heap, (pc_val, next(_bw_seq), dict(row)))
-                if len(worst_heap) > args.n_best_worst:
-                    heapq.heappop(worst_heap)
+                except Exception as exc:
+                    print(f"  [ERROR] {b_name}/{s_name}/{sc_name} ({fid1},{fid2}): {exc}")
 
-            total_pairs      += 1
-            pairs_this_scene += 1
+                # Write CSV row (without private _ keys)
+                public_row = {k: v for k, v in row.items() if not k.startswith("_")}
+                writer.writerow(public_row)
+                csv_file.flush()
+
+                # Keep only lightweight metrics for the running summary; heavy
+                # image arrays are tracked separately in bounded best/worst heaps.
+                all_rows.append(public_row)
+
+                pc_val = row.get("pc_mae_avg")
+                if isinstance(pc_val, float) and np.isfinite(pc_val) and "_img1" in row:
+                    heapq.heappush(best_heap, (-pc_val, next(_bw_seq), dict(row)))
+                    if len(best_heap) > args.n_best_worst:
+                        heapq.heappop(best_heap)
+                    heapq.heappush(worst_heap, (pc_val, next(_bw_seq), dict(row)))
+                    if len(worst_heap) > args.n_best_worst:
+                        heapq.heappop(worst_heap)
+
+                total_pairs      += 1
+                pairs_this_scene += 1
 
         if args.max_pairs > 0 and total_pairs >= args.max_pairs:
             print(f"[eval] Reached max_pairs={args.max_pairs}, stopping.")
@@ -1198,7 +1205,11 @@ if __name__ == "__main__":
     parser.add_argument("--window", type=int, default=0,
                         help="Max consecutive pairs per scene to evaluate (0 = all)")
     parser.add_argument("--pair_stride", type=int, default=1,
-                        help="Step between evaluated pairs within a scene")
+                        help="Step between anchor-frame indices within a scene")
+    parser.add_argument("--pair_lag_max", type=int, default=1,
+                        help="Maximum frame-index lag between paired frames (default 1). "
+                             "A value of k generates pairs (i, i+1) … (i, i+k) for each "
+                             "anchor i, mirroring PreSampledPairDataset pair_lag_max.")
 
     # Scales
     parser.add_argument("--depth_scale_pred", type=float, default=1000.0,
