@@ -54,7 +54,7 @@ import torch
 
 from metrics.utils import load_intrinsics, load_pose, load_depth, load_image
 from metrics.depth_consistency import depth_metrics
-from metrics.pixel_consistency import compute_pixel_consistency
+from metrics.pixel_consistency import compute_pixel_consistency, project_with_depth
 from metrics.photometric_consistency import compute_photometric
 
 EPS = 1e-6
@@ -436,6 +436,194 @@ def save_pair_visualization(
 
     _show(axes[3, 0], pred1_mono_scaled, "Mono Scaled Depth 1", vmin=d_vmin, vmax=d_vmax)
     _show(axes[3, 1], pred2_mono_scaled, "Mono Scaled Depth 2", vmin=d_vmin, vmax=d_vmax)
+
+    plt.tight_layout()
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    plt.savefig(out_path, dpi=120, bbox_inches="tight")
+    plt.close(fig)
+
+
+def save_combined_point_cloud_ply(depth1, depth2, K, T_2to1, path, rgb1=None, rgb2=None):
+    """Back-project two depth maps and merge them in view-1 camera frame.
+
+    This is the primary tool for visually inspecting *geometric* consistency:
+    when depth + relative pose are correct, the two colored point clouds
+    should coincide on shared surfaces; misalignment (double walls/edges,
+    drifting floors, etc.) is immediately visible when opened in a viewer
+    such as MeshLab / CloudCompare.
+
+    Parameters
+    ----------
+    depth1/depth2 : (H, W) float32 ndarray  – metric depths in metres.
+    K             : (3, 3) float32 ndarray  – shared camera intrinsics.
+    T_2to1        : (4, 4) float32 ndarray  – rigid transform cam2 → cam1.
+    path          : str                      – output .ply file path.
+    rgb1/rgb2     : (H, W, 3) float32 in [0,1], optional – per-pixel colour.
+    """
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+
+    fx, fy = float(K[0, 0]), float(K[1, 1])
+    cx, cy = float(K[0, 2]), float(K[1, 2])
+
+    def _backproject(depth, rgb):
+        H, W = depth.shape
+        u = np.arange(W, dtype=np.float32)
+        v = np.arange(H, dtype=np.float32)
+        uu, vv = np.meshgrid(u, v)
+        valid = np.isfinite(depth) & (depth > 0.0)
+        Z = depth[valid]
+        X = (uu[valid] - cx) * Z / fx
+        Y = (vv[valid] - cy) * Z / fy
+        pts = np.stack([X, Y, Z], axis=1).astype(np.float32)
+        col = None
+        if rgb is not None:
+            rgb_u8 = (np.clip(rgb, 0.0, 1.0) * 255).astype(np.uint8)
+            col = rgb_u8[valid]
+        return pts, col
+
+    pts1, col1 = _backproject(depth1, rgb1)
+    pts2, col2 = _backproject(depth2, rgb2)
+
+    R = T_2to1[:3, :3].astype(np.float32)
+    t = T_2to1[:3,  3].astype(np.float32)
+    pts2_in_1 = (R @ pts2.T).T + t  # (N2, 3)
+
+    pts_all = np.concatenate([pts1, pts2_in_1], axis=0)
+    has_color = col1 is not None and col2 is not None
+    if has_color:
+        col_all = np.concatenate([col1, col2], axis=0)
+
+    N = len(pts_all)
+
+    with open(path, "wb") as f:
+        header = (
+            "ply\n"
+            "format binary_little_endian 1.0\n"
+            f"element vertex {N}\n"
+            "property float x\n"
+            "property float y\n"
+            "property float z\n"
+        )
+        if has_color:
+            header += (
+                "property uchar red\n"
+                "property uchar green\n"
+                "property uchar blue\n"
+            )
+        header += "end_header\n"
+        f.write(header.encode("ascii"))
+
+        if has_color:
+            dt = np.dtype([
+                ("x", "<f4"), ("y", "<f4"), ("z", "<f4"),
+                ("r", "u1"),  ("g", "u1"),  ("b", "u1"),
+            ])
+            data = np.empty(N, dtype=dt)
+            data["x"], data["y"], data["z"] = pts_all[:, 0], pts_all[:, 1], pts_all[:, 2]
+            data["r"], data["g"], data["b"] = col_all[:, 0], col_all[:, 1], col_all[:, 2]
+        else:
+            dt = np.dtype([("x", "<f4"), ("y", "<f4"), ("z", "<f4")])
+            data = np.empty(N, dtype=dt)
+            data["x"], data["y"], data["z"] = pts_all[:, 0], pts_all[:, 1], pts_all[:, 2]
+
+        f.write(data.tobytes())
+
+
+def save_pixel_consistency_visualization(
+    img1_np, img2_np, gt1, gt2, pred1_full, K, pose1_np, pose2_np,
+    title, out_path, n_lines=40, seed=0,
+):
+    """Visualize the pixel-consistency reprojection error for a frame pair
+    (direction: view1 → view2, using the *predicted/aligned* depth1).
+
+    Two panels:
+      (top)    image1 | image2 shown side-by-side with sparse correspondence
+               lines for a sample of valid source pixels: green endpoint =
+               reprojection using GT depth1 (the "correct" correspondence),
+               red endpoint = reprojection using predicted depth1. The gap
+               between the green/red endpoints *is* the per-pixel
+               reprojection error that `pc_mae`/`pc_rmse` summarize — this
+               makes the metric's spatial distribution directly visible.
+      (bottom) image1, image2-warped-into-view1 (via predicted depth1 +
+               pose), and their absolute difference — showing the
+               photometric consequence of any geometric misalignment.
+    """
+    H, W = gt1.shape
+
+    # GT correspondence: src(1) -> tgt(2), requires GT depth valid at target too.
+    x_gt, y_gt, valid_gt_proj = project_with_depth(gt1, K, pose1_np, pose2_np, cam_to_world=True)
+    x_gt_i = np.clip(np.round(x_gt).astype(np.int32), 0, W - 1)
+    y_gt_i = np.clip(np.round(y_gt).astype(np.int32), 0, H - 1)
+    valid_gt = valid_gt_proj & (gt2[y_gt_i, x_gt_i] > 0)
+
+    # Predicted correspondence: src(1) -> tgt(2), using the aligned model depth.
+    x_pred, y_pred, valid_pred_proj = project_with_depth(pred1_full, K, pose1_np, pose2_np, cam_to_world=True)
+
+    valid = valid_gt & valid_pred_proj
+    ys, xs = np.nonzero(valid)
+    n_valid = int(len(xs))
+
+    img1_c = np.clip(img1_np, 0, 1)
+    img2_c = np.clip(img2_np, 0, 1)
+
+    fig = plt.figure(figsize=(14, 11))
+    gs = fig.add_gridspec(2, 3, height_ratios=[1.3, 1.0])
+    fig.suptitle(title, fontsize=9, wrap=True)
+
+    # ── Top: side-by-side correspondence lines ──────────────────────────
+    ax_top = fig.add_subplot(gs[0, :])
+    composite = np.concatenate([img1_c, img2_c], axis=1)
+    ax_top.imshow(composite)
+    ax_top.axvline(W, color="white", linewidth=1.0)
+    ax_top.set_title(
+        "Correspondence lines 1\u21922 (green=GT depth, red=predicted depth); "
+        f"gap = reprojection error (n={min(n_lines, n_valid)} of {n_valid} valid pts)",
+        fontsize=8,
+    )
+    ax_top.axis("off")
+
+    if n_valid > 0:
+        rng = np.random.RandomState(seed)
+        n_sample = min(n_lines, n_valid)
+        idx = rng.choice(n_valid, size=n_sample, replace=False)
+        for i in idx:
+            py, px = int(ys[i]), int(xs[i])
+            gx, gy = float(x_gt[py, px]) + W, float(y_gt[py, px])
+            rx, ry = float(x_pred[py, px]) + W, float(y_pred[py, px])
+            ax_top.plot(px, py, "o", color="white", markersize=3,
+                        markeredgecolor="black", markeredgewidth=0.5)
+            ax_top.plot([px, gx], [py, gy], "-", color="lime", linewidth=0.8, alpha=0.85)
+            ax_top.plot([px, rx], [py, ry], "-", color="red", linewidth=0.8, alpha=0.85)
+            ax_top.plot(gx, gy, "x", color="lime", markersize=5, markeredgewidth=1.5)
+            ax_top.plot(rx, ry, "+", color="red", markersize=5, markeredgewidth=1.5)
+
+    # ── Bottom: image1, warped image2→view1 (pred depth), abs diff ──────
+    warped2to1 = cv2.remap(
+        img2_c.astype(np.float32), x_pred, y_pred,
+        interpolation=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_CONSTANT, borderValue=0,
+    )
+    diff = np.abs(img1_c - warped2to1).mean(axis=-1)
+    diff_masked = np.where(valid_pred_proj, diff, np.nan)
+
+    ax_img1 = fig.add_subplot(gs[1, 0])
+    ax_img1.imshow(img1_c)
+    ax_img1.set_title("Image 1 (view src)", fontsize=8)
+    ax_img1.axis("off")
+
+    ax_warp = fig.add_subplot(gs[1, 1])
+    ax_warp.imshow(np.clip(warped2to1, 0, 1))
+    ax_warp.set_title("Image 2 warped \u2192 view 1 (pred depth)", fontsize=8)
+    ax_warp.axis("off")
+
+    ax_diff = fig.add_subplot(gs[1, 2])
+    cmap = plt.get_cmap("inferno").copy()
+    cmap.set_bad(color="0.5")
+    vmax = float(np.nanpercentile(diff_masked, 95)) if np.isfinite(diff_masked).any() else 1.0
+    im = ax_diff.imshow(diff_masked, cmap=cmap, vmin=0.0, vmax=max(vmax, 1e-3))
+    ax_diff.set_title("|Image1 \u2212 warped| (masked)", fontsize=8)
+    ax_diff.axis("off")
+    fig.colorbar(im, ax=ax_diff, fraction=0.046, pad=0.04)
 
     plt.tight_layout()
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
@@ -1189,6 +1377,9 @@ def main(args):
                     row["_pred2"]      = pred2_full
                     row["_mono1_sc"]   = mono1_scaled
                     row["_mono2_sc"]   = mono2_scaled
+                    row["_pose1"]      = pose1_np if has_poses else None
+                    row["_pose2"]      = pose2_np if has_poses else None
+                    row["_K"]          = K_eval
                     conf1_np = outputs.get("confidence1")
                     conf2_np = outputs.get("confidence2")
                     row["_conf1"] = conf1_np.squeeze().cpu().numpy() if conf1_np is not None else None
@@ -1325,6 +1516,49 @@ def main(args):
         return (f"{r['batch']}/{r['sample']}/{r['scene']} "
                 f"({r['frame1']},{r['frame2']})  pc_mae_avg={r['pc_mae_avg']:.4f}")
 
+    def _save_extra_visualizations(rank, r, kind):
+        """Save combined point clouds (geometric consistency) and the
+        pixel-consistency correspondence/warp figure for one best/worst pair.
+        Skipped when GT poses aren't available for the pair."""
+        pose1_np, pose2_np = r.get("_pose1"), r.get("_pose2")
+        if pose1_np is None or pose2_np is None:
+            return
+        K_eval = r["_K"]
+        base = (f"{kind}_{rank+1:02d}_{r['batch']}_{r['sample']}_"
+                f"{r['scene']}_{r['frame1']}-{r['frame2']}")
+
+        T_2to1 = np.linalg.inv(pose1_np) @ pose2_np  # cam2 -> cam1
+
+        # Combined point clouds merged into view-1's camera frame: aligned
+        # (model) prediction, mono-scaled baseline, and GT (perfect-alignment
+        # reference) — all three viewable side by side in a PLY viewer to
+        # judge how well estimated depth+pose reproduce true 3-D overlap.
+        if not args.skip_point_clouds:
+            save_combined_point_cloud_ply(
+                r["_pred1"], r["_pred2"], K_eval, T_2to1,
+                os.path.join(bw_dir, f"{base}_pcd_aligned.ply"),
+                rgb1=r["_img1"], rgb2=r["_img2"],
+            )
+            save_combined_point_cloud_ply(
+                r["_mono1_sc"], r["_mono2_sc"], K_eval, T_2to1,
+                os.path.join(bw_dir, f"{base}_pcd_mono.ply"),
+                rgb1=r["_img1"], rgb2=r["_img2"],
+            )
+            save_combined_point_cloud_ply(
+                r["_gt1"], r["_gt2"], K_eval, T_2to1,
+                os.path.join(bw_dir, f"{base}_pcd_gt.ply"),
+                rgb1=r["_img1"], rgb2=r["_img2"],
+            )
+
+        # Pixel-consistency correspondence/warp figure.
+        save_pixel_consistency_visualization(
+            r["_img1"], r["_img2"], r["_gt1"], r["_gt2"], r["_pred1"],
+            K_eval, pose1_np, pose2_np,
+            title=f"{kind.upper()} #{rank+1}  {_label(r)}",
+            out_path=os.path.join(bw_dir, f"{base}_pixel_consistency.png"),
+            n_lines=args.n_corr_lines,
+        )
+
     print(f"\n[eval] Saving top-{len(best_sorted)} best and top-{len(worst_sorted)} worst visualizations...")
     for rank, r in enumerate(best_sorted):
         fname = (f"best_{rank+1:02d}_{r['batch']}_{r['sample']}_"
@@ -1336,6 +1570,7 @@ def main(args):
             r.get("_conf1"), r.get("_conf2"),
             title, os.path.join(bw_dir, fname),
         )
+        _save_extra_visualizations(rank, r, "best")
 
     for rank, r in enumerate(worst_sorted):
         fname = (f"worst_{rank+1:02d}_{r['batch']}_{r['sample']}_"
@@ -1347,9 +1582,12 @@ def main(args):
             r.get("_conf1"), r.get("_conf2"),
             title, os.path.join(bw_dir, fname),
         )
+        _save_extra_visualizations(rank, r, "worst")
 
     print(f"[eval] Best/worst visualizations saved to {bw_dir}")
     print(f"[eval] Done.")
+
+
 
 
 # ─── CLI ─────────────────────────────────────────────────────────────────────
@@ -1399,6 +1637,12 @@ if __name__ == "__main__":
     # Output
     parser.add_argument("--n_best_worst", type=int, default=5,
                         help="Number of best/worst pairs to visualize")
+    parser.add_argument("--skip_point_clouds", action="store_true",
+                        help="Skip saving combined-point-cloud .ply files for "
+                             "best/worst pairs (geometric consistency view)")
+    parser.add_argument("--n_corr_lines", type=int, default=40,
+                        help="Number of sampled correspondence lines to draw "
+                             "in the best/worst pixel-consistency figures")
 
     # Device
     parser.add_argument("--device", default="cuda",
