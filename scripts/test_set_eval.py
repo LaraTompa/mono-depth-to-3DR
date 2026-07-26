@@ -1550,12 +1550,21 @@ def main(args):
                 rgb1=r["_img1"], rgb2=r["_img2"],
             )
 
-        # Pixel-consistency correspondence/warp figure.
+        # Pixel-consistency correspondence/warp figure — aligned model output.
         save_pixel_consistency_visualization(
             r["_img1"], r["_img2"], r["_gt1"], r["_gt2"], r["_pred1"],
             K_eval, pose1_np, pose2_np,
             title=f"{kind.upper()} #{rank+1}  {_label(r)}",
             out_path=os.path.join(bw_dir, f"{base}_pixel_consistency.png"),
+            n_lines=args.n_corr_lines,
+        )
+
+        # Pixel-consistency correspondence/warp figure — mono-scaled baseline.
+        save_pixel_consistency_visualization(
+            r["_img1"], r["_img2"], r["_gt1"], r["_gt2"], r["_mono1_sc"],
+            K_eval, pose1_np, pose2_np,
+            title=f"{kind.upper()} #{rank+1}  {_label(r)}  [mono scaled]",
+            out_path=os.path.join(bw_dir, f"{base}_pixel_consistency_mono.png"),
             n_lines=args.n_corr_lines,
         )
 
