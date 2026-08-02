@@ -389,6 +389,33 @@ def _median_scale(pred, gt):
     return float(np.median(gt[mask] / (pred[mask] + EPS)))
 
 
+def _scene_median_scale(sc_path, frame_ids, depth_scale_pred, pred_depth_dir):
+    """Single median scale factor pooled across all frames in a scene."""
+    depth_dir = os.path.join(sc_path, "depth")
+    pred_dir  = os.path.join(sc_path, pred_depth_dir)
+    all_gt, all_pred = [], []
+    for fid in frame_ids:
+        gt_path   = os.path.join(depth_dir, f"{fid}.npy")
+        pred_path = os.path.join(pred_dir,  f"{fid}.png")
+        if not (os.path.isfile(gt_path) and os.path.isfile(pred_path)):
+            continue
+        try:
+            gt   = load_gt_depth(gt_path)
+            pred = load_pred_depth_zoe(pred_path, depth_scale_pred)
+            if pred.shape != gt.shape:
+                pred = cv2.resize(pred, (gt.shape[1], gt.shape[0]),
+                                  interpolation=cv2.INTER_NEAREST)
+            mask = _depth_mask(gt) & (pred > 0) & np.isfinite(pred)
+            if mask.sum() > 0:
+                all_gt.append(gt[mask])
+                all_pred.append(pred[mask])
+        except Exception:
+            continue
+    if not all_gt:
+        return 1.0
+    return float(np.median(np.concatenate(all_gt) / (np.concatenate(all_pred) + EPS)))
+
+
 # ─── Visualization ───────────────────────────────────────────────────────────
 
 def save_pair_visualization(
@@ -662,6 +689,21 @@ _METRIC_COLS = [
     "mono_photo_ssim_12", "mono_photo_l2_12", "mono_photo_vr_12",
     "mono_photo_ssim_21", "mono_photo_l2_21", "mono_photo_vr_21",
     "mono_photo_ssim_avg", "mono_photo_l2_avg", "mono_photo_vr_avg",
+    # ── monocular (pre-alignment, scene-level median scaled) ──────────────
+    "scene_scale",
+    "scene_abs_rel_v1", "scene_rmse_v1", "scene_mae_v1",
+    "scene_delta1_v1", "scene_delta2_v1", "scene_delta3_v1",
+    "scene_abs_rel_v2", "scene_rmse_v2", "scene_mae_v2",
+    "scene_delta1_v2", "scene_delta2_v2", "scene_delta3_v2",
+    "scene_pc_mae_12",  "scene_pc_rmse_12",  "scene_pc_vr_12",
+    "scene_pc_mae_21",  "scene_pc_rmse_21",  "scene_pc_vr_21",
+    "scene_pc_mae_avg", "scene_pc_rmse_avg", "scene_pc_vr_avg",
+    "scene_geo_12", "scene_geo_vr_12",
+    "scene_geo_21", "scene_geo_vr_21",
+    "scene_geo_avg", "scene_geo_vr_avg",
+    "scene_photo_ssim_12", "scene_photo_l2_12", "scene_photo_vr_12",
+    "scene_photo_ssim_21", "scene_photo_l2_21", "scene_photo_vr_21",
+    "scene_photo_ssim_avg", "scene_photo_l2_avg", "scene_photo_vr_avg",
     # ── relative camera motion (pair-level; same for aligned & mono) ───────
     "rel_rot_angle_deg", "rel_trans_mag",
     # ── predicted camera params (if available) ────────────────────────────
@@ -737,7 +779,7 @@ def _save_correlation_plots(all_rows, output_dir):
         """Draw grouped boxplots of y-values binned by x-value interval,
         with one box per series side-by-side within each interval."""
         n_bins = len(bin_edges) - 1
-        colors = ["tab:blue", "tab:orange"]
+        colors = ["tab:blue", "tab:orange", "tab:green"]
         n_series = len(series_points)
         group_width = 0.8
         box_width = (group_width / max(n_series, 1)) * 0.9
@@ -808,6 +850,7 @@ def _save_correlation_plots(all_rows, output_dir):
             "series": [
                 {"label": "Aligned", "x_key": "pc_vr_avg", "y_key": "pc_mae_avg"},
                 {"label": "Mono scaled", "x_key": "mono_pc_vr_avg", "y_key": "mono_pc_mae_avg"},
+                {"label": "Scene scaled", "x_key": "scene_pc_vr_avg", "y_key": "scene_pc_mae_avg"},
             ],
             "x_label": "Average valid pixel ratio",
             "y_label": "Average pixel consistency MAE",
@@ -819,6 +862,7 @@ def _save_correlation_plots(all_rows, output_dir):
             "series": [
                 {"label": "Aligned", "x_key": "geo_vr_avg", "y_key": "geo_avg"},
                 {"label": "Mono scaled", "x_key": "mono_geo_vr_avg", "y_key": "mono_geo_avg"},
+                {"label": "Scene scaled", "x_key": "scene_geo_vr_avg", "y_key": "scene_geo_avg"},
             ],
             "x_label": "Average valid pixel ratio",
             "y_label": "Average geometric error (m)",
@@ -830,6 +874,7 @@ def _save_correlation_plots(all_rows, output_dir):
             "series": [
                 {"label": "Aligned", "x_key": "geo_avg", "y_key": "pc_mae_avg"},
                 {"label": "Mono scaled", "x_key": "mono_geo_avg", "y_key": "mono_pc_mae_avg"},
+                {"label": "Scene scaled", "x_key": "scene_geo_avg", "y_key": "scene_pc_mae_avg"},
             ],
             "x_label": "Average geometric error (m)",
             "y_label": "Average pixel consistency MAE",
@@ -840,6 +885,7 @@ def _save_correlation_plots(all_rows, output_dir):
             "series": [
                 {"label": "Aligned", "x_key": "photo_vr_avg", "y_key": "photo_l2_avg"},
                 {"label": "Mono scaled", "x_key": "mono_photo_vr_avg", "y_key": "mono_photo_l2_avg"},
+                {"label": "Scene scaled", "x_key": "scene_photo_vr_avg", "y_key": "scene_photo_l2_avg"},
             ],
             "x_label": "Average valid pixel ratio",
             "y_label": "Average photometric L2",
@@ -851,6 +897,7 @@ def _save_correlation_plots(all_rows, output_dir):
             "series": [
                 {"label": "Aligned", "x_key": "rel_rot_angle_deg", "y_key": "geo_avg"},
                 {"label": "Mono scaled", "x_key": "rel_rot_angle_deg", "y_key": "mono_geo_avg"},
+                {"label": "Scene scaled", "x_key": "rel_rot_angle_deg", "y_key": "scene_geo_avg"},
             ],
             "x_label": "Relative rotation angle (deg, Rodrigues)",
             "y_label": "Average geometric error (m)",
@@ -861,6 +908,7 @@ def _save_correlation_plots(all_rows, output_dir):
             "series": [
                 {"label": "Aligned", "x_key": "rel_rot_angle_deg", "y_key": "pc_mae_avg"},
                 {"label": "Mono scaled", "x_key": "rel_rot_angle_deg", "y_key": "mono_pc_mae_avg"},
+                {"label": "Scene scaled", "x_key": "rel_rot_angle_deg", "y_key": "scene_pc_mae_avg"},
             ],
             "x_label": "Relative rotation angle (deg, Rodrigues)",
             "y_label": "Average pixel consistency MAE",
@@ -871,6 +919,7 @@ def _save_correlation_plots(all_rows, output_dir):
             "series": [
                 {"label": "Aligned", "x_key": "rel_trans_mag", "y_key": "geo_avg"},
                 {"label": "Mono scaled", "x_key": "rel_trans_mag", "y_key": "mono_geo_avg"},
+                {"label": "Scene scaled", "x_key": "rel_trans_mag", "y_key": "scene_geo_avg"},
             ],
             "x_label": "Relative translation magnitude (m)",
             "y_label": "Average geometric error (m)",
@@ -881,6 +930,7 @@ def _save_correlation_plots(all_rows, output_dir):
             "series": [
                 {"label": "Aligned", "x_key": "rel_trans_mag", "y_key": "pc_mae_avg"},
                 {"label": "Mono scaled", "x_key": "rel_trans_mag", "y_key": "mono_pc_mae_avg"},
+                {"label": "Scene scaled", "x_key": "rel_trans_mag", "y_key": "scene_pc_mae_avg"},
             ],
             "x_label": "Relative translation magnitude (m)",
             "y_label": "Average pixel consistency MAE",
@@ -917,7 +967,7 @@ def _save_correlation_plots(all_rows, output_dir):
         y_lo, y_hi = _robust_limits(ys_all)
 
         fig, ax = plt.subplots(figsize=(7.5, 5.5))
-        colors = ["tab:blue", "tab:orange"]
+        colors = ["tab:blue", "tab:orange", "tab:green"]
         legend_entries = []
         for idx, (series, points) in enumerate(series_points):
             if not points:
@@ -1104,6 +1154,9 @@ def main(args):
         else:
             print(f"  [warn] no intrinsics file, using heuristic for {sc_path}")
             K_np = None   # will fill per-pair from image size
+
+        # Scene-level median scale (single scale pooled across all frames)
+        scene_scale = _scene_median_scale(sc_path, frame_ids, args.depth_scale_pred, args.pred_depth_dir)
 
         # Evaluate up to args.window pairs per scene across all lags
         # (start count from any pairs already done for this scene when resuming)
@@ -1368,6 +1421,58 @@ def main(args):
                         row["mono_photo_l2_avg"]   = _nanmean2(mph12_l2, mph21_l2)
                         row["mono_photo_vr_avg"]   = _nanmean2(mph12_vr, mph21_vr)
 
+                    # ── Scene-median-scaled metrics ───────────────────────────────
+                    row["scene_scale"] = scene_scale
+                    scene1_scaled = pred_mono1 * scene_scale
+                    scene2_scaled = pred_mono2 * scene_scale
+
+                    sm1 = _safe_depth_metrics(scene1_scaled, gt1_raw)
+                    sm2 = _safe_depth_metrics(scene2_scaled, gt2_raw)
+                    for k, v in sm1.items():
+                        row[f"scene_{k}_v1"] = v
+                    for k, v in sm2.items():
+                        row[f"scene_{k}_v2"] = v
+
+                    if has_poses:
+                        spc12_mae, spc12_rmse, spc12_vr = _safe_pixel_consistency(
+                            gt1_raw, scene1_scaled, gt2_raw, K_eval, pose1_np, pose2_np)
+                        spc21_mae, spc21_rmse, spc21_vr = _safe_pixel_consistency(
+                            gt2_raw, scene2_scaled, gt1_raw, K_eval, pose2_np, pose1_np)
+                        row["scene_pc_mae_12"]  = spc12_mae
+                        row["scene_pc_rmse_12"] = spc12_rmse
+                        row["scene_pc_vr_12"]   = spc12_vr
+                        row["scene_pc_mae_21"]  = spc21_mae
+                        row["scene_pc_rmse_21"] = spc21_rmse
+                        row["scene_pc_vr_21"]   = spc21_vr
+                        row["scene_pc_mae_avg"]  = _nanmean2(spc12_mae, spc21_mae)
+                        row["scene_pc_rmse_avg"] = _nanmean2(spc12_rmse, spc21_rmse)
+                        row["scene_pc_vr_avg"]   = _nanmean2(spc12_vr, spc21_vr)
+
+                        sgeo12, sgeo12_vr = _safe_geometric_error(
+                            gt1_raw, scene2_scaled, K_eval, pose1_np, pose2_np)
+                        sgeo21, sgeo21_vr = _safe_geometric_error(
+                            gt2_raw, scene1_scaled, K_eval, pose2_np, pose1_np)
+                        row["scene_geo_12"]    = sgeo12
+                        row["scene_geo_vr_12"] = sgeo12_vr
+                        row["scene_geo_21"]    = sgeo21
+                        row["scene_geo_vr_21"] = sgeo21_vr
+                        row["scene_geo_avg"]    = _nanmean2(sgeo12, sgeo21)
+                        row["scene_geo_vr_avg"] = _nanmean2(sgeo12_vr, sgeo21_vr)
+
+                        sph12_ssim, sph12_l2, sph12_vr = _safe_photometric(
+                            img1_gray, img2_gray, scene1_scaled, K_eval, pose1_np, pose2_np)
+                        sph21_ssim, sph21_l2, sph21_vr = _safe_photometric(
+                            img2_gray, img1_gray, scene2_scaled, K_eval, pose2_np, pose1_np)
+                        row["scene_photo_ssim_12"] = sph12_ssim
+                        row["scene_photo_l2_12"]   = sph12_l2
+                        row["scene_photo_vr_12"]   = sph12_vr
+                        row["scene_photo_ssim_21"] = sph21_ssim
+                        row["scene_photo_l2_21"]   = sph21_l2
+                        row["scene_photo_vr_21"]   = sph21_vr
+                        row["scene_photo_ssim_avg"] = _nanmean2(sph12_ssim, sph21_ssim)
+                        row["scene_photo_l2_avg"]   = _nanmean2(sph12_l2, sph21_l2)
+                        row["scene_photo_vr_avg"]   = _nanmean2(sph12_vr, sph21_vr)
+
                     # Store inputs for best/worst visualisation
                     row["_img1"]       = img1_np
                     row["_img2"]       = img2_np
@@ -1476,6 +1581,25 @@ def main(args):
                 "mono_photo_ssim_12","mono_photo_l2_12","mono_photo_vr_12",
                 "mono_photo_ssim_21","mono_photo_l2_21","mono_photo_vr_21",
                 "mono_photo_ssim_avg","mono_photo_l2_avg","mono_photo_vr_avg"],
+            "Scene Median Scale": ["scene_scale"],
+            "Scene Median Scaled Depth (view 1)": [
+                "scene_abs_rel_v1","scene_rmse_v1","scene_mae_v1",
+                "scene_delta1_v1","scene_delta2_v1","scene_delta3_v1"],
+            "Scene Median Scaled Depth (view 2)": [
+                "scene_abs_rel_v2","scene_rmse_v2","scene_mae_v2",
+                "scene_delta1_v2","scene_delta2_v2","scene_delta3_v2"],
+            "Pixel Consistency (scene scaled)": [
+                "scene_pc_mae_12","scene_pc_rmse_12","scene_pc_vr_12",
+                "scene_pc_mae_21","scene_pc_rmse_21","scene_pc_vr_21",
+                "scene_pc_mae_avg","scene_pc_rmse_avg","scene_pc_vr_avg"],
+            "Geometric Consistency (scene scaled, m)": [
+                "scene_geo_12","scene_geo_vr_12",
+                "scene_geo_21","scene_geo_vr_21",
+                "scene_geo_avg","scene_geo_vr_avg"],
+            "Photometric Consistency (scene scaled)": [
+                "scene_photo_ssim_12","scene_photo_l2_12","scene_photo_vr_12",
+                "scene_photo_ssim_21","scene_photo_l2_21","scene_photo_vr_21",
+                "scene_photo_ssim_avg","scene_photo_l2_avg","scene_photo_vr_avg"],
         }
 
         col_w = max(len(c) for cols in sections.values() for c in cols) + 2
