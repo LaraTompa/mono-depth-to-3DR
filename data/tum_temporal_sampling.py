@@ -325,7 +325,7 @@ if __name__ == "__main__":
             rgb_raw_dir = os.path.join(seq_dir, "color")
             dep_raw_dir = os.path.join(seq_dir, "depth")
             pose_dir    = os.path.join(seq_dir, "pose")
-            intr_dir    = os.path.join(seq_dir, "intrinsics")
+            intr_dir    = os.path.join(seq_dir)
             os.makedirs(rgb_raw_dir, exist_ok=True)
             os.makedirs(dep_raw_dir, exist_ok=True)
             os.makedirs(pose_dir, exist_ok=True)
@@ -333,8 +333,8 @@ if __name__ == "__main__":
 
             # Copy intrinsics files from the source sequence directory
             seq_src = os.path.join(tum_cfg["root_dir"], scene_name)
-            for intr_fname in ("intrinsics_color.txt"):
-                src = os.path.join(seq_src, "intrinsics", intr_fname)
+            for intr_fname in ("intrinsics.txt",):
+                src = os.path.join(seq_src, intr_fname)
                 if os.path.isfile(src):
                     shutil.copy2(src, os.path.join(intr_dir, intr_fname))
                 else:
