@@ -47,6 +47,28 @@ from metrics.depth_consistency import depth_metrics
 from metrics.photometric_consistency import compute_photometric
 
 
+def normalize_depth_map(depth: torch.Tensor, params: dict | None) -> torch.Tensor:
+    """Apply affine depth normalization while preserving invalid zeros."""
+    if not params:
+        return depth
+    scale = float(params.get("scale", 1.0))
+    offset = float(params.get("offset", 0.0))
+    if scale == 0.0:
+        raise ValueError("depth_normalization scale must be non-zero")
+    valid = depth > 0
+    depth_n = (depth - offset) / scale
+    return torch.where(valid, depth_n.clamp(min=0.0), depth)
+
+
+def denormalize_depth_map(depth: torch.Tensor, params: dict | None) -> torch.Tensor:
+    """Invert normalize_depth_map for positive predicted depths."""
+    if not params:
+        return depth
+    scale = float(params.get("scale", 1.0))
+    offset = float(params.get("offset", 0.0))
+    return depth * scale + offset
+
+
 # ─── Save outputs ───────────────────────────────────────────────────────────
 
 def save_depth(depth, path):
@@ -248,13 +270,37 @@ def main(args):
     # This prevents OOM when the saved state dict is large.
     ckpt = torch.load(args.checkpoint, map_location="cpu")  
     cfg = ckpt.get("cfg", {})
+    depth_norm_cfg = cfg.get("depth_normalization", {})
+    normalize_depths = bool(depth_norm_cfg.get("enabled", False))
     print(f"[eval] Loaded checkpoint from epoch {ckpt.get('epoch', '?')}")
+    print(f"[eval] depth_normalization.enabled={normalize_depths}")
+    if normalize_depths:
+        mde_cfg = depth_norm_cfg.get("mde", {})
+        gt_cfg = depth_norm_cfg.get("gt", {})
+        print("[eval] depth normalization params: "
+              f"mde(scale={float(mde_cfg.get('scale', 1.0)):.6f}, offset={float(mde_cfg.get('offset', 0.0)):.6f}), "
+              f"gt(scale={float(gt_cfg.get('scale', 1.0)):.6f}, offset={float(gt_cfg.get('offset', 0.0)):.6f})")
 
     # ── Build model ──────────────────────────────────────────────────────────
     # Extract config with fallbacks for new vs old checkpoint formats
     arch_cfg = ckpt.get("arch", {})  # new format: arch saved in checkpoint
     model_variant = arch_cfg.get("model", "v1")
     print(f"[eval] Model variant: {model_variant}")
+
+    # Accept common checkpoint layouts used across older experiments.
+    model_state = ckpt.get("model")
+    if model_state is None:
+        model_state = ckpt.get("state_dict") or ckpt.get("model_state_dict")
+    if model_state is None:
+        raise KeyError(
+            "Checkpoint is missing model weights "
+            "(expected one of: model, state_dict, model_state_dict)"
+        )
+
+    # Some older/parallel saves prefix every key with "module.".
+    # Strip only when all keys share the prefix to avoid accidental rewrites.
+    if model_state and all(k.startswith("module.") for k in model_state.keys()):
+        model_state = {k[len("module."):]: v for k, v in model_state.items()}
 
     if model_variant == "depth_only":
         from models.model_depth_only.network import build_depth_only_net
@@ -307,8 +353,27 @@ def main(args):
             camera_head_hidden  = int(cam_cfg.get("hidden_dim", 64)),
         )
 
-    # Extract model weights only; drop optimizer state (2× model size, not needed for eval)
-    model_state = ckpt.pop("model")
+    # Backward-compatible state-dict loading for old depth_only decoder heads.
+    has_legacy_decoder_heads = any(
+        k.endswith("decoder.head_scale.weight") for k in model_state.keys()
+    )
+    if model_variant == "depth_only" and has_legacy_decoder_heads:
+        from models.model_depth_only.decoder import LegacyDepthDecoder
+
+        c = arch_cfg.get("depth_only", arch_cfg)
+        model.decoder = LegacyDepthDecoder(
+            token_dim=int(c.get("token_dim", 768)),
+            skip_dim=int(c.get("feature_dim", 256)),
+            hidden=int(c.get("decoder_hidden", 128)),
+        ).to(device)
+        model.predict_depth_map = True
+        print(
+            "[eval] Old-style depth decoder detected "
+            "(head_scale / head_resid). Using LegacyDepthDecoder."
+        )
+
+    # Drop heavy training-only states (not needed for eval).
+    ckpt.pop("model", None)
     ckpt.pop("optimizer", None)
     ckpt.pop("scheduler", None)
     # cfg, arch, epoch remain in ckpt for inspection
@@ -347,11 +412,13 @@ def main(args):
     if pred_depth2_np.shape != (H, W):
         pred_depth2_np = cv2.resize(pred_depth2_np, (W, H), interpolation=cv2.INTER_NEAREST)
 
-    # MDE sources (DepthPro / ZoeDepth) are metric estimators — pass raw metric
-    # depths directly.  No normalisation needed; the decoder uses them as a
-    # metric prior and geometric consistency operates in metric space.
+    # Keep metric monocular priors for monocular baseline metrics/outputs.
+    # For model input, optionally apply the same normalization used in training.
     depth_mono1 = torch.from_numpy(pred_depth1_np).unsqueeze(0).unsqueeze(0).to(device)  # (1,1,H,W) metres
     depth_mono2 = torch.from_numpy(pred_depth2_np).unsqueeze(0).unsqueeze(0).to(device)
+    if normalize_depths:
+        depth_mono1 = normalize_depth_map(depth_mono1, depth_norm_cfg.get("mde"))
+        depth_mono2 = normalize_depth_map(depth_mono2, depth_norm_cfg.get("mde"))
 
     # ── Intrinsics and poses ─────────────────────────────────────────────────
     if args.intrinsics:
@@ -390,11 +457,20 @@ def main(args):
 
     with torch.no_grad():
         if model_variant == "depth_only":
+            arch_do = arch_cfg.get("depth_only", {})
+            _use_img_enc = arch_do.get("use_image_encoder", False)
+            if _use_img_enc and (rgb1 is None or rgb2 is None):
+                raise ValueError(
+                    "This checkpoint uses use_image_encoder=True. "
+                    "Please provide --img1 and --img2."
+                )
             outputs = model(
                 depth1=depth_mono1,
                 depth2=depth_mono2,
                 T_12=T_12_iter,
-                K=K,  # passed for optional GRU refinement; ignored when pose_refine_iters=0
+                K=K,
+                rgb1=rgb1 if _use_img_enc else None,
+                rgb2=rgb2 if _use_img_enc else None,
             )
         else:
             num_pose_iters = int(train_cfg.get("num_pose_iters", 1))
@@ -419,8 +495,13 @@ def main(args):
                     else:
                         print(f"[eval] iter {pose_it}: non-finite K/T pred, keeping previous.")
 
-    pred1_out = outputs["depth1"].squeeze().cpu().numpy()   # (pH, pW) metres
-    pred2_out = outputs["depth2"].squeeze().cpu().numpy()
+    pred1_out_t = outputs["depth1"]
+    pred2_out_t = outputs["depth2"]
+    if normalize_depths:
+        pred1_out_t = denormalize_depth_map(pred1_out_t, depth_norm_cfg.get("gt"))
+        pred2_out_t = denormalize_depth_map(pred2_out_t, depth_norm_cfg.get("gt"))
+    pred1_out = pred1_out_t.squeeze().cpu().numpy()   # (pH, pW) metres
+    pred2_out = pred2_out_t.squeeze().cpu().numpy()
     print(f"[eval] Output depth range view1: "
           f"{pred1_out[pred1_out > 0].min():.3f} – {pred1_out.max():.3f} m")
     print(f"[eval] Output depth range view2: "
@@ -431,6 +512,22 @@ def main(args):
 
     # Create output dir early so T_12_pred.txt / K_pred.txt saves don't fail
     os.makedirs(args.output_dir, exist_ok=True)
+    # Prepare a metrics log file to capture printed metrics
+    metrics_log_path = os.path.join(args.output_dir, "metrics_all.txt")
+    try:
+        metrics_f = open(metrics_log_path, "w", encoding="utf-8")
+    except Exception:
+        metrics_f = None
+
+    def log(s="", end="\n"):
+        # Print to stdout and append to metrics file when available
+        print(s, end=end)
+        if metrics_f:
+            try:
+                metrics_f.write(str(s) + end)
+                metrics_f.flush()
+            except Exception:
+                pass
 
     # ── Print predicted camera parameters ────────────────────────────────────
     if "T_12_pred" in outputs:
@@ -527,28 +624,28 @@ def main(args):
             print("[eval] Warning: failed to save GT depth visualizations")
 
         # ── Depth metrics ────────────────────────────────────────────────────
-        print("\n=== Depth Metrics ===")
+        log("\n=== Depth Metrics ===")
         # Match training: min_depth=1e-3, max_depth=80.0 (see losses.py si_log_loss defaults)
         mask1 = (gt_depth1_np > 1e-3) & (gt_depth1_np < 80.0) & np.isfinite(gt_depth1_np)
         mask2 = (gt_depth2_np > 1e-3) & (gt_depth2_np < 80.0) & np.isfinite(gt_depth2_np)
         m1 = depth_metrics(pred1_full, gt_depth1_np, mask1)
         m2 = depth_metrics(pred2_full, gt_depth2_np, mask2)
-        print(f"View 1: abs_rel={m1['abs_rel']:.4f}  rmse={m1['rmse']:.4f}  delta1={m1['delta1']:.4f}")
-        print(f"View 2: abs_rel={m2['abs_rel']:.4f}  rmse={m2['rmse']:.4f}  delta1={m2['delta1']:.4f}")
+        log(f"View 1: abs_rel={m1['abs_rel']:.4f}  rmse={m1['rmse']:.4f}  delta1={m1['delta1']:.4f}")
+        log(f"View 2: abs_rel={m2['abs_rel']:.4f}  rmse={m2['rmse']:.4f}  delta1={m2['delta1']:.4f}")
         # depth_metrics also returns mae, delta2, delta3
-        print(f"Average: abs_rel={(m1['abs_rel']+m2['abs_rel'])/2:.4f}  "
-              f"rmse={(m1['rmse']+m2['rmse'])/2:.4f}  "
-              f"delta1={(m1['delta1']+m2['delta1'])/2:.4f}  "
-              f"delta2={(m1['delta2']+m2['delta2'])/2:.4f}  "
-              f"delta3={(m1['delta3']+m2['delta3'])/2:.4f}")
+        log(f"Average: abs_rel={(m1['abs_rel']+m2['abs_rel'])/2:.4f}  "
+            f"rmse={(m1['rmse']+m2['rmse'])/2:.4f}  "
+            f"delta1={(m1['delta1']+m2['delta1'])/2:.4f}  "
+            f"delta2={(m1['delta2']+m2['delta2'])/2:.4f}  "
+            f"delta3={(m1['delta3']+m2['delta3'])/2:.4f}")
 
         # ── Monocular (pre-alignment) depth metrics ───────────────────────
-        print("\n=== Monocular (pre-align) Depth Metrics ===")
+        log("\n=== Monocular (pre-align) Depth Metrics ===")
         try:
             mm1 = depth_metrics(pred_depth1_np, gt_depth1_np, mask1)
             mm2 = depth_metrics(pred_depth2_np, gt_depth2_np, mask2)
-            print(f"Mono View 1: abs_rel={mm1['abs_rel']:.4f}  rmse={mm1['rmse']:.4f}  delta1={mm1['delta1']:.4f}")
-            print(f"Mono View 2: abs_rel={mm2['abs_rel']:.4f}  rmse={mm2['rmse']:.4f}  delta1={mm2['delta1']:.4f}")
+            log(f"Mono View 1: abs_rel={mm1['abs_rel']:.4f}  rmse={mm1['rmse']:.4f}  delta1={mm1['delta1']:.4f}")
+            log(f"Mono View 2: abs_rel={mm2['abs_rel']:.4f}  rmse={mm2['rmse']:.4f}  delta1={mm2['delta1']:.4f}")
             # Save monocular metric summary
             with open(os.path.join(args.output_dir, "metrics_monocular.txt"), "w") as f:
                 f.write("Monocular pre-alignment metrics\n")
@@ -567,7 +664,7 @@ def main(args):
             if n1 > 0 and n2 > 0:
                 s1 = float(np.median(gt_depth1_np[valid1] / (pred_depth1_np[valid1] + eps)))
                 s2 = float(np.median(gt_depth2_np[valid2] / (pred_depth2_np[valid2] + eps)))
-                print(f"[eval] Monocular median scales: s1={s1:.4f}, s2={s2:.4f}")
+                log(f"[eval] Monocular median scales: s1={s1:.4f}, s2={s2:.4f}")
 
                 # Save individually scaled monocular point clouds (each scaled by its median ratio)
                 pred1_scaled = pred_depth1_np * s1
@@ -599,6 +696,91 @@ def main(args):
                     )
                 except Exception:
                     print("[eval] Warning: failed to save combined monocular before-alignment PLY")
+                # Compute and save depth metrics for the median-scaled monocular predictions
+                try:
+                    mm1s = depth_metrics(pred1_scaled, gt_depth1_np, mask1)
+                    mm2s = depth_metrics(pred2_scaled, gt_depth2_np, mask2)
+                    log("\n=== Monocular Scaled (median) Depth Metrics ===")
+                    log(f"Mono Scaled View 1: abs_rel={mm1s['abs_rel']:.4f}  rmse={mm1s['rmse']:.4f}  delta1={mm1s['delta1']:.4f}")
+                    log(f"Mono Scaled View 2: abs_rel={mm2s['abs_rel']:.4f}  rmse={mm2s['rmse']:.4f}  delta1={mm2s['delta1']:.4f}")
+
+                    # Also compute metrics for the combined (min-ratio) scaled monocular depths
+                    mm1c = depth_metrics(pred1_comb, gt_depth1_np, mask1)
+                    mm2c = depth_metrics(pred2_comb, gt_depth2_np, mask2)
+                    log(f"Mono Combined (min ratio) View 1: abs_rel={mm1c['abs_rel']:.4f}  rmse={mm1c['rmse']:.4f}  delta1={mm1c['delta1']:.4f}")
+                    log(f"Mono Combined (min ratio) View 2: abs_rel={mm2c['abs_rel']:.4f}  rmse={mm2c['rmse']:.4f}  delta1={mm2c['delta1']:.4f}")
+
+                    # Save scaled metrics to file
+                    with open(os.path.join(args.output_dir, "metrics_monocular_scaled.txt"), "w") as f:
+                        f.write("Monocular scaled metrics (median scale)\n")
+                        f.write(f"s1: {s1}\n")
+                        f.write(f"s2: {s2}\n")
+                        f.write(f"View1_scaled: {mm1s}\n")
+                        f.write(f"View2_scaled: {mm2s}\n")
+                        f.write("\nMonocular combined (min ratio) metrics\n")
+                        f.write(f"s_comb: {s_comb}\n")
+                        f.write(f"View1_combined: {mm1c}\n")
+                        f.write(f"View2_combined: {mm2c}\n")
+                    # If possible, compute photometric and pixel consistency for scaled monocular depths
+                    if args.pose1 and args.pose2 and img1_gray is not None and img2_gray is not None:
+                        # Prefer GT intrinsics for projection; fall back to predicted if available
+                        K_eval_np = K_np if args.intrinsics else (K_pred_np if 'K_pred_np' in locals() else K_np)
+                        try:
+                            # Photometric: scaled individual views
+                            ssim_s_12, l2_s_12, vr_s_12 = compute_photometric(
+                                img1_gray, img2_gray, pred1_scaled, K_eval_np, pose1_np, pose2_np, cam_to_world=True
+                            )
+                            ssim_s_21, l2_s_21, vr_s_21 = compute_photometric(
+                                img2_gray, img1_gray, pred2_scaled, K_eval_np, pose2_np, pose1_np, cam_to_world=True
+                            )
+                            log(f"Scaled SSIM (1→2): {ssim_s_12:.4f}  L2: {l2_s_12:.4f}  valid_ratio: {vr_s_12:.3f}")
+                            log(f"Scaled SSIM (2→1): {ssim_s_21:.4f}  L2: {l2_s_21:.4f}  valid_ratio: {vr_s_21:.3f}")
+
+                            # Photometric: combined (min-ratio) scaled
+                            ssim_c_12, l2_c_12, vr_c_12 = compute_photometric(
+                                img1_gray, img2_gray, pred1_comb, K_eval_np, pose1_np, pose2_np, cam_to_world=True
+                            )
+                            ssim_c_21, l2_c_21, vr_c_21 = compute_photometric(
+                                img2_gray, img1_gray, pred2_comb, K_eval_np, pose2_np, pose1_np, cam_to_world=True
+                            )
+                            log(f"Scaled SSIM avg: {(ssim_s_12+ssim_s_21)/2:.4f}  L2 avg: {(l2_s_12+l2_s_21)/2:.4f}")
+
+                            # Pixel consistency: individual scaled views
+                            mae_s_12, rmse_s_12, vr_pc_s_12 = compute_pixel_consistency(
+                                gt_depth1_np, pred1_scaled, gt_depth2_np, K_eval_np, pose1_np, pose2_np
+                            )
+                            mae_s_21, rmse_s_21, vr_pc_s_21 = compute_pixel_consistency(
+                                gt_depth2_np, pred2_scaled, gt_depth1_np, K_eval_np, pose2_np, pose1_np
+                            )
+                            log(f"Scaled MAE  (1→2): {mae_s_12:.4f}  RMSE: {rmse_s_12:.4f}  valid_ratio: {vr_pc_s_12:.3f}")
+                            log(f"Scaled MAE  (2→1): {mae_s_21:.4f}  RMSE: {rmse_s_21:.4f}  valid_ratio: {vr_pc_s_21:.3f}")
+
+                            # Pixel consistency: combined (min-ratio) scaled
+                            mae_c_12, rmse_c_12, vr_pc_c_12 = compute_pixel_consistency(
+                                gt_depth1_np, pred1_comb, gt_depth2_np, K_eval_np, pose1_np, pose2_np
+                            )
+                            mae_c_21, rmse_c_21, vr_pc_c_21 = compute_pixel_consistency(
+                                gt_depth2_np, pred2_comb, gt_depth1_np, K_eval_np, pose2_np, pose1_np
+                            )
+
+                            # Append photometric/pixel results to the scaled metrics file
+                            with open(os.path.join(args.output_dir, "metrics_monocular_scaled.txt"), "a") as f:
+                                f.write("\nPhotometric consistency (scaled individual views)\n")
+                                f.write(f"SSIM_1to2: {ssim_s_12}, L2_1to2: {l2_s_12}, valid_ratio: {vr_s_12}\n")
+                                f.write(f"SSIM_2to1: {ssim_s_21}, L2_2to1: {l2_s_21}, valid_ratio: {vr_s_21}\n")
+                                f.write("\nPhotometric consistency (combined min-ratio)\n")
+                                f.write(f"SSIM_1to2: {ssim_c_12}, L2_1to2: {l2_c_12}, valid_ratio: {vr_c_12}\n")
+                                f.write(f"SSIM_2to1: {ssim_c_21}, L2_2to1: {l2_c_21}, valid_ratio: {vr_c_21}\n")
+                                f.write("\nPixel consistency (scaled individual views)\n")
+                                f.write(f"MAE_1to2: {mae_s_12}, RMSE_1to2: {rmse_s_12}, valid_ratio: {vr_pc_s_12}\n")
+                                f.write(f"MAE_2to1: {mae_s_21}, RMSE_2to1: {rmse_s_21}, valid_ratio: {vr_pc_s_21}\n")
+                                f.write("\nPixel consistency (combined min-ratio)\n")
+                                f.write(f"MAE_1to2: {mae_c_12}, RMSE_1to2: {rmse_c_12}, valid_ratio: {vr_pc_c_12}\n")
+                                f.write(f"MAE_2to1: {mae_c_21}, RMSE_2to1: {rmse_c_21}, valid_ratio: {vr_pc_c_21}\n")
+                        except Exception:
+                            print("[eval] Warning: failed to compute/save scaled photometric/pixel consistency")
+                except Exception:
+                    print("[eval] Warning: failed to compute/save scaled monocular metrics")
             else:
                 print("[eval] Warning: insufficient valid pixels to compute monocular scaling or combined mono PLY")
         except Exception:
@@ -608,28 +790,28 @@ def main(args):
         if args.pose1 and args.pose2 and img1_gray is not None and img2_gray is not None:
             # Prefer GT intrinsics for projection; fall back to predicted
             K_eval_np = K_np if args.intrinsics else K_pred_np
-            print("\n=== Photometric Consistency ===")
+            log("\n=== Photometric Consistency ===")
             ssim_12, l2_12, vr_12 = compute_photometric(
                 img1_gray, img2_gray, pred1_full, K_eval_np, pose1_np, pose2_np, cam_to_world=True
             )
             ssim_21, l2_21, vr_21 = compute_photometric(
                 img2_gray, img1_gray, pred2_full, K_eval_np, pose2_np, pose1_np, cam_to_world=True
             )
-            print(f"SSIM (1→2): {ssim_12:.4f}  L2: {l2_12:.4f}  valid_ratio: {vr_12:.3f}")
-            print(f"SSIM (2→1): {ssim_21:.4f}  L2: {l2_21:.4f}  valid_ratio: {vr_21:.3f}")
-            print(f"SSIM avg:   {(ssim_12+ssim_21)/2:.4f}  L2 avg: {(l2_12+l2_21)/2:.4f}")
+            log(f"SSIM (1→2): {ssim_12:.4f}  L2: {l2_12:.4f}  valid_ratio: {vr_12:.3f}")
+            log(f"SSIM (2→1): {ssim_21:.4f}  L2: {l2_21:.4f}  valid_ratio: {vr_21:.3f}")
+            log(f"SSIM avg:   {(ssim_12+ssim_21)/2:.4f}  L2 avg: {(l2_12+l2_21)/2:.4f}")
 
             # ── Pixel consistency ────────────────────────────────────────────
-            print("\n=== Pixel Consistency ===")
+            log("\n=== Pixel Consistency ===")
             mae_12, rmse_12, vr_pc_12 = compute_pixel_consistency(
                 gt_depth1_np, pred1_full, gt_depth2_np, K_eval_np, pose1_np, pose2_np
             )
             mae_21, rmse_21, vr_pc_21 = compute_pixel_consistency(
                 gt_depth2_np, pred2_full, gt_depth1_np, K_eval_np, pose2_np, pose1_np
             )
-            print(f"MAE  (1→2): {mae_12:.4f}  RMSE: {rmse_12:.4f}  valid_ratio: {vr_pc_12:.3f}")
-            print(f"MAE  (2→1): {mae_21:.4f}  RMSE: {rmse_21:.4f}  valid_ratio: {vr_pc_21:.3f}")
-            print(f"MAE  avg:   {(mae_12 + mae_21)/2:.4f}  RMSE avg: {(rmse_12 + rmse_21)/2:.4f}")
+            log(f"MAE  (1→2): {mae_12:.4f}  RMSE: {rmse_12:.4f}  valid_ratio: {vr_pc_12:.3f}")
+            log(f"MAE  (2→1): {mae_21:.4f}  RMSE: {rmse_21:.4f}  valid_ratio: {vr_pc_21:.3f}")
+            log(f"MAE  avg:   {(mae_12 + mae_21)/2:.4f}  RMSE avg: {(rmse_12 + rmse_21)/2:.4f}")
 
     # ── Save model scale / residual heatmaps if provided by network ─────
     # handle a few possible output keys across model variants
@@ -673,6 +855,13 @@ def main(args):
             _save_map(torch.from_numpy(scale_np), "log_scale2_as_scale")
         except Exception:
             print("[eval] Warning: failed to process log_scale2")
+
+    # Close metrics file if open
+    try:
+        if metrics_f:
+            metrics_f.close()
+    except Exception:
+        pass
 
     print(f"\n[eval] Done. Results saved to {args.output_dir}")
 

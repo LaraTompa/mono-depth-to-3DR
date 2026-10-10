@@ -12,6 +12,46 @@ dataset:
   image_size: [480, 640]   # (W, H) for MDE input and model output; see max_encode_hw in arch config
 
 # ---------------------------------------------------------------------------
+# Optional depth normalisation during training/evaluation
+# ---------------------------------------------------------------------------
+depth_normalization:
+  enabled: true
+  max_samples: 2000000  # valid pixels sampled from train split for median/std estimation
+  # Set any value to null to recompute it from the train split at startup.
+  mde:
+    median: 0.4320
+    std: 0.2030
+    scale: 0.4320
+    offset: 0.0
+  gt:
+    median: 1.5890
+    std: 0.8017
+    scale: 1.5890
+    offset: 0.0
+
+# ---------------------------------------------------------------------------
+# Optional point-map scale normalisation (depth_only model only)
+# ---------------------------------------------------------------------------
+# When enabled, a single global scalar (median Euclidean norm of all valid 3D
+# points in the training set, pooled over both views) is computed once before
+# training starts and used to divide the XYZ point-map priors fed to the
+# decoder.  Predicted and GT point maps are compared in these normalised units;
+# pixel_consistency / geometric_consistency losses receive metric inputs via
+# automatic de-normalisation.  Output point maps from the model are in
+# normalised units — multiply by scale to recover metres.
+#
+# Constraints (same as depth_normalization):
+#   - Single isotropic scalar, never per-axis.
+#   - No mean subtraction — scale only.
+#   - Default OFF; no effect on v1 / vista models.
+#
+# scale is populated automatically at runtime by compute_point_normalization_stats().
+point_normalization:
+  enabled: true
+  max_samples: 2000000  # 3D point norms sampled from train split
+  scale: 1.7724         # set to null to recompute from the train split at startup
+
+# ---------------------------------------------------------------------------
 # DataLoader
 # ---------------------------------------------------------------------------
 loader:
@@ -25,36 +65,55 @@ loader:
 # ---------------------------------------------------------------------------
 optimizer:
   type:         adamw
-  lr:           5.0e-5
+  lr:           1.0e-5
   weight_decay: 1.0e-4
   betas:        [0.9, 0.999]
+  # Cross-attention block (MASt3R weights) gets a lower LR to fine-tune
+  # conservatively.  Set to 1.0 to disable the per-group scaling.
+  cross_attn_lr_scale: 0.1
 
 # ---------------------------------------------------------------------------
 # LR scheduler
 # ---------------------------------------------------------------------------
 scheduler:
   type:          cosine
-  eta_min:       3.0e-5   # scaled proportionally with lr (same 10× decay ratio)
+  eta_min:       1.0e-5   # scaled proportionally with lr (same 10× decay ratio)
 
 # ---------------------------------------------------------------------------
 # Loss weights
 # ---------------------------------------------------------------------------
 loss:
-  depth:            0.0    # scale-invariant log loss (supervised)
-  smooth:           0.0   # edge-aware smoothness
+  # ── depth_only (point-map) variant ───────────────────────────────────────
+  # Primary supervised loss: L1 on XYZ point maps with confidence weighting.
+  point_map:        1.0    # L1 XYZ point-map loss (depth_only only)
+
+  # Auxiliary multiview losses — operate on the Z-channel of the point maps
+  # as a depth proxy.  Both are warmup-gated so early training is anchored
+  # purely by point_map supervision.
+  pixel_consistency:              0.1   # multiview reprojection pixel error
+  pixel_consistency_warmup_epochs: 5   # start after this many epochs
+
+  geometric:              0.1   # ViSTA Lgc 3-D warp consistency
+  geometric_warmup_epochs: 5    # start after this many epochs
+  geometric_switch_epochs: 999  # never switch to predicted pose (no pose head)
+
+  # Confidence weighting: disable for first N epochs so the residual head
+  # stabilises before the network also optimises uncertainty.
+  pose_warmup_epochs: 3
+
+  # ── v1 / vista (scalar depth) variant — unused for depth_only ────────────
+  depth:            0.1    # scale-invariant log loss
+  depth_mse:        0.4    # mean-squared-error depth loss
+  smooth:           0.0    # edge-aware smoothness
   iter_supervision: 0.0    # deep supervision over refinement iterations
-  camera:           0.5    # was 0.1 — pose needs stronger signal vs depth (1.0)
-  camera_warmup_epochs: 5   # pose was learning faster after epoch 15 (confidence weighting); front-load it
-  pixel_consistency: 0.0  # multiview reprojection consistency
-  identity:         0.0  # pose round-trip regulariser weight
-  K_reg: 0.0             # was 0.0 — intrinsics supervision helps anchor pose
-  rot: 0.5               # was implicit 1.0 — boost rotation signal
-  trans: 0.5             # raised from 0.5 — translation stalling; more supervision signal
-  pose_warmup_epochs: 5     # disable confidence weighting for first N epochs; match camera_warmup_epochs
-  # -- Geometric consistency (Lgc, ViSTA-SLAM) ----------------------------
-  geometric:              0.5   # weight for Lgc; set 0 to disable
-  geometric_warmup_epochs: 0   # start Lgc after this epoch
-  geometric_switch_epochs: 25   # epoch to switch from GT → predicted pose for Lgc
+
+  # ── Pose losses — only active when predict_pose: true ────────────────────
+  camera:           0.0
+  camera_warmup_epochs: 5
+  identity:         0.0
+  K_reg:            0.0
+  rot:              0.5
+  trans:            0.5
 
 
 # ---------------------------------------------------------------------------
@@ -86,7 +145,7 @@ augmentation:
 # Training
 # ---------------------------------------------------------------------------
 train:
-  epochs: 50
+  epochs: 60
   grad_clip: 1.0                 # max gradient norm; null → disabled
   val_every: 1                   # validate every N epochs
   log_every: 500                  # log every N batches

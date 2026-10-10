@@ -28,3 +28,10 @@ graph_output:
   sampled_data_dir:  "datasets/graph_sampled_data"     # graph: individual saved frames
   batch_size: 4
   num_workers: 2
+
+tum_dataset:
+  root_dir: "/storage/group/dataset_mirrors/tum_rgbd_benchmark"
+  num_frames: 10          # frames per sampled sequence
+  min_stride: 20           # minimum frame gap between consecutive samples
+  max_stride: 40          # maximum frame gap between consecutive samples
+  max_scenes: null        # null = use all valid sequences; set integer to restrict

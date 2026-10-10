@@ -66,12 +66,17 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from models.model_image_depth.geometry import se3_inv
+from models.model_image_depth.geometry import se3_inv, transform_pts
 
 from .encoder          import DepthEncoder
+from .image_encoder    import MASt3RImageEncoder
 from .cross_attention  import CrossAttentionDecoder, _mast3r_init, _vec9_to_se3, _se3_inv
 from .decoder          import DepthDecoder
 from .pose_refinement  import PoseRefinementModule
+
+# Reuse k_inv + se3_inv from losses.py so the unprojection convention
+# here and in point_map_loss() can never drift out of sync.
+from training.losses import k_inv as _k_inv
 
 
 
@@ -151,35 +156,44 @@ class DepthOnlyNet(nn.Module):
 
     Parameters
     ----------
-    feature_dim    : int   Encoder output channels (projected to feature_dim).
-    token_dim      : int   Cross-attention dimension.  If token_dim ≠ feature_dim
-                           an enc_to_dec linear projection is inserted.
-    num_blocks     : int   Number of symmetric CrossBlocks.
-    num_heads      : int   Attention heads per block.
-    mlp_ratio      : float MLP hidden / token_dim ratio.
-    decoder_hidden : int   Decoder internal channel width.
-    use_pose_token : bool  Prepend pose-conditioned token before cross-attn.
-    freeze_encoder : bool  Freeze ConvNeXt backbone (first-conv stays trainable).
+    feature_dim      : int   Encoder output channels (projected to feature_dim).
+    token_dim        : int   Cross-attention dimension.  If token_dim ≠ feature_dim
+                             an enc_to_dec linear projection is inserted.
+    num_blocks       : int   Number of symmetric CrossBlocks.
+    num_heads        : int   Attention heads per block.
+    mlp_ratio        : float MLP hidden / token_dim ratio.
+    decoder_hidden   : int   Decoder internal channel width.
+    use_pose_token   : bool  Prepend pose-conditioned token before cross-attn.
+    freeze_encoder   : bool  Freeze ConvNeXt backbone (first-conv stays trainable).
+    use_image_encoder: bool  Add a frozen MASt3R ViT image encoder whose tokens
+                             are summed onto the depth tokens before cross-attn.
+                             When False (default) the network is identical to
+                             the original depth-only model.
+    image_encoder_ckpt: str|None  MASt3R checkpoint to load image encoder weights
+                             from (same .pth used for mast3r_ckpt works).
     """
 
     def __init__(
         self,
-        feature_dim:      int   = 256,
-        token_dim:        int   = 768,
-        num_blocks:       int   = 4,
-        num_heads:        int   = 12,
-        mlp_ratio:        float = 4.0,
-        decoder_hidden:   int   = 128,
-        use_pose_token:   bool  = True,
-        freeze_encoder:   bool  = False,
-        mast3r_ckpt:      str | None = None,
-        freeze_cross_attn: bool = False,
-        max_encode_hw:    tuple | None = (480, 640),
-        predict_pose:          bool  = False,
-        pose_head_hidden:      int   = 128,
-        pose_refine_iters:     int   = 0,
-        pose_refine_feat_dim:  int   = 128,
-        pose_refine_hidden:    int   = 128,
+        feature_dim:        int   = 256,
+        token_dim:          int   = 768,
+        num_blocks:         int   = 4,
+        num_heads:          int   = 12,
+        mlp_ratio:          float = 4.0,
+        decoder_hidden:     int   = 128,
+        use_pose_token:     bool  = True,
+        freeze_encoder:     bool  = False,
+        mast3r_ckpt:        str | None = None,
+        freeze_cross_attn:  bool  = False,
+        max_encode_hw:      tuple | None = (480, 640),
+        predict_pose:       bool  = False,
+        pose_head_hidden:   int   = 128,
+        pose_refine_iters:  int   = 0,
+        pose_refine_feat_dim: int = 128,
+        pose_refine_hidden: int   = 128,
+        use_image_encoder:  bool  = False,
+        image_encoder_ckpt: str | None = None,
+        predict_depth_map:  bool  = False,
     ):
         super().__init__()
 
@@ -188,6 +202,8 @@ class DepthOnlyNet(nn.Module):
         self.predict_pose       = predict_pose
         self.max_encode_hw      = max_encode_hw
         self.pose_refine_iters  = pose_refine_iters
+        self.use_image_encoder  = use_image_encoder
+        self.predict_depth_map  = predict_depth_map
 
         # ── Shared depth encoder ─────────────────────────────────────────
         self.encoder = DepthEncoder(
@@ -242,17 +258,61 @@ class DepthOnlyNet(nn.Module):
                 hidden_dim = pose_refine_hidden,
                 num_iters  = pose_refine_iters,
             )
+        # ── Optional image encoder (frozen MASt3R ViT-Large) ─────────────
+        # Produces patch tokens summed onto depth tokens before cross-attn.
+        # The output projection (1024 → token_dim) is zero-initialised so
+        # the image branch is a no-op at t=0 — identical to the depth-only
+        # baseline at the start of training.
+        if use_image_encoder:
+            self.image_encoder = MASt3RImageEncoder(
+                token_dim   = token_dim,
+                max_hw      = max_encode_hw,
+                mast3r_ckpt = image_encoder_ckpt,
+                freeze      = True,   # backbone always frozen; only proj trains
+            )
+
         # ── Depth decoders (one per view, weight-tied) ───────────────────
         # Both views share the same decoder weights.
         self.decoder = DepthDecoder(
-            token_dim = token_dim,
-            skip_dim  = feature_dim,
-            hidden    = decoder_hidden,
+            token_dim         = token_dim,
+            skip_dim          = feature_dim,
+            hidden            = decoder_hidden,
+            predict_depth_map = predict_depth_map,
         )
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _unproject(depth: torch.Tensor, K: torch.Tensor) -> torch.Tensor:
+        """
+        Unproject depth map to a 3D point map in the camera frame.
+
+        Uses the same k_inv() helper as training/losses.py so that the
+        point-prior construction here and the GT point-map construction
+        in point_map_loss() share an identical convention.
+
+        depth : (B, 1, H, W)  depth in metres
+        K     : (B, 3, 3)     camera intrinsics (at depth resolution)
+        Returns (B, 3, H, W)  metric XYZ point map
+        """
+        B, _, H, W = depth.shape
+        K_inv = _k_inv(K)  # (B, 3, 3)  analytical, same as losses.k_inv
+
+        ys = torch.arange(H, device=depth.device, dtype=depth.dtype)
+        xs = torch.arange(W, device=depth.device, dtype=depth.dtype)
+        gy, gx = torch.meshgrid(ys, xs, indexing="ij")   # (H, W)
+        N = H * W
+        xy1 = torch.stack(
+            [gx.flatten(), gy.flatten(),
+             torch.ones(N, device=depth.device, dtype=depth.dtype)], dim=0
+        )                                                  # (3, N)
+        xy1 = xy1.unsqueeze(0).expand(B, -1, -1)          # (B, 3, N)
+
+        d_flat = depth.reshape(B, 1, N)
+        xyz = torch.bmm(K_inv, xy1) * d_flat              # (B, 3, N)
+        return xyz.reshape(B, 3, H, W)
 
     def _cap_resolution(self, d: torch.Tensor) -> torch.Tensor:
         """Resize d to at most max_encode_hw (preserving aspect ratio) if set."""
@@ -288,6 +348,9 @@ class DepthOnlyNet(nn.Module):
         depth2: torch.Tensor,                # (B, 1, H2, W2) MDE depth view 2
         T_12:   torch.Tensor | None = None,  # (B, 4, 4)  pose view-1 → view-2
         K:      torch.Tensor | None = None,  # (B, 3, 3)  intrinsics — required for pose refinement
+        rgb1:   torch.Tensor | None = None,  # (B, 3, H1, W1) RGB view 1  (required when use_image_encoder=True)
+        rgb2:   torch.Tensor | None = None,  # (B, 3, H2, W2) RGB view 2  (required when use_image_encoder=True)
+        point_norm_scale: float | None = None,  # optional isotropic scale: priors /= scale, output in normalised units
     ) -> dict:
         """
         Parameters
@@ -297,17 +360,31 @@ class DepthOnlyNet(nn.Module):
                          640×480).
         T_12           : (B, 4, 4)  Relative pose.  Required when
                          use_pose_token=True.
+        K              : (B, 3, 3)  Intrinsics.  Required for point-prior
+                         construction and for pose refinement.
+        rgb1, rgb2     : (B, 3, H, W)  RGB images in [0, 1] range.  Required
+                         when use_image_encoder=True; ignored otherwise.
 
         Returns
         -------
-        {
-          "depth1"      : (B, 1, 480, 640),
-          "depth2"      : (B, 1, 480, 640),
-          "confidence1" : (B, 1, 480, 640),
-          "confidence2" : (B, 1, 480, 640),
-          "log_scale1"  : (B, 1, 480, 640),
-          "log_scale2"  : (B, 1, 480, 640),
-        }
+        Point-map mode (predict_depth_map=False, default)::
+
+            {
+              "point1"      : (B, 3, 480, 640),  # XYZ in view-1 camera frame
+              "point2"      : (B, 3, 480, 640),  # XYZ in view-1 camera frame
+              "confidence1" : (B, 1, 480, 640),
+              "confidence2" : (B, 1, 480, 640),
+            }
+
+        Depth-map mode (predict_depth_map=True)::
+
+            {
+              "depth1"      : (B, 1, 480, 640),  # scalar depth (metres, log-space
+                                                  # multiplicative correction of prior)
+              "depth2"      : (B, 1, 480, 640),
+              "confidence1" : (B, 1, 480, 640),
+              "confidence2" : (B, 1, 480, 640),
+            }
         """
         # ── 1. Cap input resolution to bound s16 token count ─────────────────
         # depth_input (passed to decoder for the residual prior) stays at
@@ -333,15 +410,101 @@ class DepthOnlyNet(nn.Module):
         t1 = self._flatten_s16(feats1)   # (B, N1, token_dim)
         t2 = self._flatten_s16(feats2)   # (B, N2, token_dim)
 
+        # ── 3b. Image encoder fusion (optional) ─────────────────────────
+        # The frozen MASt3R ViT encodes each RGB view into patch tokens
+        # (B, N, token_dim) via a zero-initialised projection.  These are
+        # *summed* onto the depth tokens so that:
+        #   • At t=0 (zero-init proj) the image contribution is exactly 0
+        #     → model is numerically identical to depth-only baseline.
+        #   • As training proceeds the projection learns to incorporate
+        #     image context without altering sequence length or cross-attn cost.
+        # Both the depth s16 grid and the ViT patch grid produce h×w tokens
+        # for the same capped resolution, so no resampling is needed.
+        # If the grids differ (unusual non-multiple-of-16 inputs) we fall back
+        # to bilinear resampling of the image tokens.
+        if self.use_image_encoder:
+            if rgb1 is None or rgb2 is None:
+                raise ValueError(
+                    "rgb1 and rgb2 must be provided when use_image_encoder=True"
+                )
+            img_t1 = self.image_encoder(rgb1)   # (B, N_img1, token_dim)
+            img_t2 = self.image_encoder(rgb2)   # (B, N_img2, token_dim)
+
+            # Align spatial dimensions in case depth-s16 and image patches differ.
+            # Under normal operation (both capped to max_encode_hw) they match.
+            _, _, h1_s16, w1_s16 = feats1["s16"].shape
+            _, _, h2_s16, w2_s16 = feats2["s16"].shape
+
+            def _align_tokens(img_tok, h_depth, w_depth):
+                """Bilinearly resample img tokens to depth s16 grid if sizes differ."""
+                N_img = img_tok.shape[1]
+                if N_img == h_depth * w_depth:
+                    return img_tok
+                # Infer img patch grid: assume square-ish; use sqrt heuristic.
+                h_img = int(N_img ** 0.5)
+                w_img = N_img // h_img
+                B_, _, D = img_tok.shape
+                img_map = img_tok.transpose(1, 2).reshape(B_, D, h_img, w_img)
+                img_map = F.interpolate(
+                    img_map.float(), size=(h_depth, w_depth),
+                    mode="bilinear", align_corners=False,
+                ).to(img_tok.dtype)
+                return img_map.flatten(2).transpose(1, 2)   # (B, h*w, D)
+
+            img_t1 = _align_tokens(img_t1, h1_s16, w1_s16)
+            img_t2 = _align_tokens(img_t2, h2_s16, w2_s16)
+
+            # Additive fusion: depth tokens + image tokens
+            t1 = t1 + img_t1
+            t2 = t2 + img_t2
+
         # ── 4. Cross-attention ───────────────────────────────────────────
         t1_out, t2_out, cam_tok1, cam_tok2 = self.cross_attn(t1, t2, T_12=T_12)
         # t1_out, t2_out : (B, N, token_dim)
 
-        # ── 5. Decode both views ─────────────────────────────────────────
-        # depth_input is the *original* (un-capped, un-normalised) depth so
-        # the residual head corrects in metric-metres space.
-        out1 = self.decoder(t1_out, feats1, depth_input=depth1, input_hw=(H1, W1))
-        out2 = self.decoder(t2_out, feats2, depth_input=depth2, input_hw=(H2, W2))
+        # ── 5. Build priors + decode both views ─────────────────────────────
+        if self.predict_depth_map:
+            # ── Depth-map mode: use MDE depths directly as 1-channel priors.
+            # No unprojection or pose-warping needed — the decoder predicts
+            # a scalar depth residual on top of the MDE prior.
+            prior1 = depth1     # (B, 1, H1, W1)  — passed at original resolution
+            prior2 = depth2     # (B, 1, H2, W2)
+        else:
+            # ── Point-map mode: build geometric 3-D priors.
+            # K is required to build the geometric prior; if not provided, fall
+            # back to a unit approximation (X=Y=0, Z=depth) which is also safe
+            # since the residual head is zero-initialised.
+            if K is not None:
+                # Point prior for view 1: unproject depth1 in view-1 frame.
+                prior1 = self._unproject(depth1, K)             # (B, 3, H1, W1)
+
+                # Point prior for view 2: unproject depth2 in view-2 frame, then
+                # warp into view-1 frame via T_21 = se3_inv(T_12).
+                if T_12 is not None:
+                    T_21 = se3_inv(T_12)                        # cam2 → cam1
+                    pp2_cam2 = self._unproject(depth2, K)       # (B, 3, H2, W2)
+                    prior2 = transform_pts(pp2_cam2, T_21)      # (B, 3, H2, W2)
+                else:
+                    # No pose: view-2 prior stays in view-2 frame (best we can do)
+                    prior2 = self._unproject(depth2, K)
+            else:
+                # Fallback: trivial prior [0, 0, depth] — residual head corrects.
+                zeros = torch.zeros_like(depth1)
+                prior1 = torch.cat([zeros, zeros, depth1], dim=1)
+                zeros2 = torch.zeros_like(depth2)
+                prior2 = torch.cat([zeros2, zeros2, depth2], dim=1)
+
+            # Optional isotropic scale normalisation — applied identically to X, Y, Z
+            # of both priors so the decoder's residual head operates in ~O(1) units.
+            # Zero-initialised residual head is a no-op at t=0 regardless of scale.
+            if point_norm_scale is not None:
+                prior1 = prior1 / point_norm_scale
+                prior2 = prior2 / point_norm_scale
+
+        # depth_input passed to decoder is the *original* (un-capped,
+        # un-normalised) prior so the residual head corrects in metric-metres space.
+        out1 = self.decoder(t1_out, feats1, point_prior=prior1, input_hw=(H1, W1))
+        out2 = self.decoder(t2_out, feats2, point_prior=prior2, input_hw=(H2, W2))
 
         # ── 6. Pose prediction + optional iterative GRU refinement ────────────
         # PoseHead uses encoder global features (view-specific, before cross-attn).
@@ -378,13 +541,24 @@ class DepthOnlyNet(nn.Module):
                     "T_12_iters": T_12_iters[:-1],   # [T_1 … T_{N-1}] for pose_iters_loss
                 }
 
+        if self.predict_depth_map:
+            outputs = {
+                "depth1":      out1["depth"],
+                "depth2":      out2["depth"],
+                "confidence1": out1["confidence"],
+                "confidence2": out2["confidence"],
+                **pose_preds,
+            }
+            if "log_scale" in out1 and "log_scale" in out2:
+                outputs["log_scale1"] = out1["log_scale"]
+                outputs["log_scale2"] = out2["log_scale"]
+            return outputs
         return {
-            "depth1":      out1["depth"],
-            "depth2":      out2["depth"],
-            "confidence1": out1["confidence"],
-            "confidence2": out2["confidence"],
-            "log_scale1":  out1["log_scale"],
-            "log_scale2":  out2["log_scale"],
+            "point1":           out1["point"],
+            "point2":           out2["point"],
+            "confidence1":      out1["confidence"],
+            "confidence2":      out2["confidence"],
+            "point_norm_scale": point_norm_scale,
             **pose_preds,
         }
 
@@ -427,4 +601,7 @@ def build_depth_only_net(cfg: dict) -> DepthOnlyNet:
         pose_refine_iters    = c.get("pose_refine_iters",         0),
         pose_refine_feat_dim = c.get("pose_refine_feat_dim",     128),
         pose_refine_hidden   = c.get("pose_refine_hidden",       128),
+        use_image_encoder    = c.get("use_image_encoder",       False),
+        image_encoder_ckpt   = c.get("image_encoder_ckpt",       None),
+        predict_depth_map    = c.get("predict_depth_map",        False),
     )

@@ -15,6 +15,7 @@ import os
 import random
 import sys
 import time
+import math
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _REPO_ROOT)
@@ -31,7 +32,13 @@ except ImportError:   # tensorboard not installed — logging silently disabled
     _SummaryWriter = None
 
 from data.scene import find_scene_paths
-from training.losses import total_loss as compute_total_loss, compute_depth_metrics
+from training.losses import (
+    total_loss as compute_total_loss,
+    compute_depth_metrics,
+    unproject_depth,
+    transform_point_map,
+    se3_inv,
+)
 from training.utils import (
     seed_everything, build_dataset, build_loader,
     build_optimizer, build_scheduler,
@@ -43,6 +50,155 @@ from training.utils import (
 # ---------------------------------------------------------------------------
 # One epoch
 # ---------------------------------------------------------------------------
+
+def normalize_depth_map(depth: torch.Tensor, params: dict | None) -> torch.Tensor:
+    """Apply optional affine depth normalisation while preserving invalid zeros."""
+    if not params:
+        return depth
+    scale = float(params.get("scale", 1.0))
+    offset = float(params.get("offset", 0.0))
+    if scale == 0.0:
+        raise ValueError("depth_normalization scale must be non-zero")
+    if offset != 0.0:
+        raise ValueError(
+            "depth_normalization offset must stay at 0.0: valid depths below a positive offset "
+            "would otherwise collide with the invalid-zero sentinel"
+        )
+    valid = depth > 0
+    depth_n = (depth - offset) / scale
+    return torch.where(valid, depth_n, depth)
+
+
+def denormalize_depth_map(depth: torch.Tensor, params: dict | None) -> torch.Tensor:
+    """Invert normalize_depth_map for positive predicted depths."""
+    if not params:
+        return depth
+    scale = float(params.get("scale", 1.0))
+    offset = float(params.get("offset", 0.0))
+    return depth * scale + offset
+
+
+def compute_depth_normalization_stats(loader: DataLoader, max_samples: int = 2_000_000) -> dict:
+    """Estimate train-set median/std for MDE and GT valid depth pixels."""
+    samples = {"mde": [], "gt": []}
+    counts = {"mde": 0, "gt": 0}
+    sums = {"mde": 0.0, "gt": 0.0}
+    sq_sums = {"mde": 0.0, "gt": 0.0}
+
+    def _accumulate(name: str, values: torch.Tensor) -> None:
+        values = values[(values > 0) & torch.isfinite(values)].detach().cpu().float().flatten()
+        n = values.numel()
+        if n == 0:
+            return
+        counts[name] += n
+        sums[name] += float(values.sum())
+        sq_sums[name] += float((values * values).sum())
+
+        remaining = max_samples - sum(x.numel() for x in samples[name])
+        if remaining <= 0:
+            return
+        if n > remaining:
+            idx = torch.linspace(0, n - 1, remaining, dtype=torch.long)
+            values = values[idx]
+        samples[name].append(values)
+
+    for batch in loader:
+        _accumulate("mde", batch["mde_depths"])
+        _accumulate("gt", batch["depths"])
+
+    stats = {}
+    for name in ("mde", "gt"):
+        if counts[name] == 0 or not samples[name]:
+            raise RuntimeError(f"No valid {name} depth pixels found for depth normalization")
+        mean = sums[name] / counts[name]
+        var = max(sq_sums[name] / counts[name] - mean * mean, 0.0)
+        std = max(math.sqrt(var), 1e-6)
+        median = float(torch.cat(samples[name]).median())
+        # Keep depth values positive for the current decoders/losses, which
+        # model depth as a positive distance. The std is still recorded as a
+        # train-set statistic, but the active affine transform is depth/median.
+        # Re-tune depth loss weights after enabling this: SI-log changes modestly,
+        # but MSE scales as 1 / scale^2 while pixel/geometric losses still run on
+        # metric depths via depth1_metric/depth2_metric.
+        stats[name] = {"median": median, "std": std, "offset": 0.0, "scale": max(median, 1e-6)}
+    return stats
+
+
+def compute_point_normalization_stats(
+    loader: DataLoader,
+    max_samples: int = 2_000_000,
+) -> dict:
+    """
+    Estimate the train-set median of 3D point Euclidean norms over both views.
+
+    Iterates the train loader, unprojects GT depth maps for both views into
+    the view-1 camera frame, and computes scale = median(||P||) over all
+    valid 3D points (single global scalar — same dataset-wide philosophy as
+    compute_depth_normalization_stats).
+
+    Uses training.losses.unproject_depth + se3_inv + transform_point_map so
+    the unprojection convention is identical to point_map_loss.
+
+    Returns {"scale": float} — stored as cfg["point_normalization"]["scale"].
+    """
+    samples: list[torch.Tensor] = []
+    depth_min = 1e-3
+    depth_max = 80.0
+
+    for batch in loader:
+        depths  = batch["depths"]          # (B, N, 1, H, W)
+        K_batch = batch.get("intrinsics")  # (B, 3, 3)
+        if K_batch is None:
+            continue
+
+        gt1 = depths[:, 0]   # (B, 1, H, W)
+        gt2 = depths[:, 1]
+
+        # Valid masks — same convention as point_map_loss / geometric_consistency.
+        valid1 = (gt1 > depth_min) & (gt1 < depth_max) & torch.isfinite(gt1)
+        valid2 = (gt2 > depth_min) & (gt2 < depth_max) & torch.isfinite(gt2)
+
+        # GT point map view 1: unproject directly (already in cam1 frame).
+        gt_point1 = unproject_depth(gt1, K_batch)   # (B, 3, H, W)
+
+        # GT point map view 2: unproject in cam2, warp into cam1 via T_21.
+        gt_point2_cam2 = unproject_depth(gt2, K_batch)
+        if "poses" in batch:
+            poses        = batch["poses"]               # (B, N, 4, 4)
+            T_12_pts     = se3_inv(poses[:, 1]) @ poses[:, 0]
+            T_21_pts     = se3_inv(T_12_pts)
+            gt_point2    = transform_point_map(gt_point2_cam2, T_21_pts)
+        else:
+            gt_point2 = gt_point2_cam2
+
+        def _accumulate(pts: torch.Tensor, valid: torch.Tensor) -> None:
+            norms = pts.norm(dim=1, keepdim=True)           # (B, 1, H, W)
+            vals  = norms[valid].detach().cpu().float().flatten()
+            n = vals.numel()
+            if n == 0:
+                return
+            n_have = sum(x.numel() for x in samples)
+            remaining = max_samples - n_have
+            if remaining <= 0:
+                return
+            if n > remaining:
+                idx = torch.linspace(0, n - 1, remaining, dtype=torch.long)
+                vals = vals[idx]
+            samples.append(vals)
+
+        _accumulate(gt_point1, valid1)
+        _accumulate(gt_point2, valid2)
+
+        if sum(x.numel() for x in samples) >= max_samples:
+            break
+
+    if not samples:
+        raise RuntimeError("No valid 3D points found for point normalization stats")
+
+    all_norms = torch.cat(samples)
+    scale = max(float(all_norms.median()), 1e-6)
+    return {"scale": scale}
+
 
 def run_epoch(
     model,
@@ -63,12 +219,18 @@ def run_epoch(
     log_every        = int(train_cfg.get("log_every", 50))
     grad_clip        = train_cfg.get("grad_clip")
     grad_accum_steps = int(train_cfg.get("gradient_accumulation_steps", 1))
+    depth_norm_cfg   = cfg.get("depth_normalization", {})
+    normalize_depths = bool(depth_norm_cfg.get("enabled", False))
+    _point_norm_cfg  = cfg.get("point_normalization", {})
+    point_norm_scale = float(_point_norm_cfg.get("scale", 1.0)) if _point_norm_cfg.get("enabled", False) else None
 
     totals    = {
         "loss": 0.0,
         "depth": 0.0,
+        "depth_mse": 0.0,
         "smooth": 0.0,
         "iters": 0.0,
+        "point_map": 0.0,
         "pixel_consistency": 0.0,
         "geometric": 0.0,
         "cam_pose": 0.0,
@@ -107,6 +269,14 @@ def run_epoch(
                 )
             mde_depths = batch["mde_depths"]   # (B, N, 1, H, W)
 
+            if normalize_depths:
+                batch = dict(batch)
+                batch["depths_metric"] = depths
+                batch["depths"] = normalize_depth_map(depths, depth_norm_cfg.get("gt"))
+                batch["mde_depths"] = normalize_depth_map(mde_depths, depth_norm_cfg.get("mde"))
+                depths = batch["depths"]
+                mde_depths = batch["mde_depths"]
+
             rgb1        = imgs[:, 0]
             rgb2        = imgs[:, 1]
             depth_mono1 = mde_depths[:, 0]   # MDE prior for view 1
@@ -139,15 +309,25 @@ def run_epoch(
             num_pose_iters = train_cfg.get("num_pose_iters", 2)
             with torch.amp.autocast("cuda", enabled=(scaler is not None)):
                 if model_variant == "depth_only":
-                    # depth_only: no RGB, no camera head, no iterative pose loop.
+                    # depth_only: no camera head, no iterative pose loop.
                     # Use GT relative pose directly as conditioning.
                     # K is passed for optional GRU pose refinement; it is ignored
                     # when pose_refine_iters=0 (the default), so this is harmless.
+                    # rgb1/rgb2 are passed when use_image_encoder=True; the model
+                    # raises an informative error if they are required but absent.
+                    _use_img_enc = bool(getattr(model, "use_image_encoder", False))
+                    if _use_img_enc and (rgb1 is None or rgb2 is None):
+                        raise ValueError(
+                            "This checkpoint uses use_image_encoder=True, but rgb1/rgb2 were not provided."
+                        )
                     outputs = model(
                         depth1=depth_mono1,
                         depth2=depth_mono2,
                         T_12=T_12_gt,
                         K=K_gt,
+                        rgb1=rgb1 if _use_img_enc else None,
+                        rgb2=rgb2 if _use_img_enc else None,
+                        point_norm_scale=point_norm_scale,
                     )
                     # Expose K/T for loss compatibility (no camera supervision).
                     K_iter = K_gt
@@ -186,13 +366,64 @@ def run_epoch(
                     for k, v in outputs.items()
                 }
 
+            if normalize_depths and "depth1" in outputs:
+                outputs = dict(outputs)
+                outputs["depth1_metric"] = denormalize_depth_map(outputs["depth1"], depth_norm_cfg.get("gt"))
+                outputs["depth2_metric"] = denormalize_depth_map(outputs["depth2"], depth_norm_cfg.get("gt"))
+
             # Compute loss in fp32 (outside autocast) to avoid numerical instability
+            depth_norm_scale = None
+            if normalize_depths:
+                depth_norm_scale = float(depth_norm_cfg.get("gt", {}).get("scale", 1.0))
+
+            # Point-map sanity print (first training step of first epoch, depth_only only)
+            if train and epoch == 1 and step == 0 and model_variant == "depth_only" and "point1" in outputs:
+                p1 = outputs["point1"].detach().float()
+                norms1 = p1.norm(dim=1)
+                print(
+                    f"[pt-sanity] epoch={epoch:03d} step={step+1:04d} "
+                    f"point1 norm: min={norms1.min():.3f} median={norms1.median():.3f} max={norms1.max():.3f}"
+                    + (f"  point_norm_scale={point_norm_scale:.4f}" if point_norm_scale is not None else "  (no point norm)")
+                )
+
+            # log_scale head diagnostic (depth-map branch only) — first 500
+            # global training steps only, to avoid spamming later epochs.
+            if train and model_variant == "depth_only" and "log_scale1" in outputs:
+                global_step = (epoch - 1) * len(loader) + step
+                if global_step < 500:
+                    ls = torch.cat([outputs["log_scale1"], outputs["log_scale2"]]).detach().float()
+                    print(
+                        f"[log_scale] step={global_step:d} "
+                        f"mean={ls.mean():.4f} abs_mean={ls.abs().mean():.4f} "
+                        f"min={ls.min():.4f} max={ls.max():.4f}"
+                    )
+                    # Temporary diagnostic: log the zero-init head WEIGHT norm
+                    # itself (not just the activation output above) to confirm
+                    # whether the weight tensor is actually moving under the
+                    # updated no_decay exclusion, or only the activation was
+                    # changing while the weight stayed pinned near zero.
+                    head_log_scale = getattr(getattr(model, "decoder", None), "head_log_scale", None)
+                    if head_log_scale is not None:
+                        w_norm = head_log_scale.weight.detach().float().norm().item()
+                        print(f"[log_scale] step={global_step:d} head_log_scale.weight.norm={w_norm:.6f}")
+
             loss, breakdown = compute_total_loss(
                 outputs, batch, cfg.get("loss", {}), K_iter,
                 use_confidence=use_confidence,
                 camera_weight=camera_weight,
                 epoch=epoch,
+                depth_norm_scale=depth_norm_scale,
+                point_norm_scale=point_norm_scale,
             )
+
+            if train and step < int(train_cfg.get("depth_loss_debug_steps", 3)):
+                print(
+                    f"[loss-scale] epoch={epoch:03d} step={step+1:04d} "
+                    f"depth_eff={breakdown.get('depth_effective', 0.0):.6f} "
+                    f"(si={breakdown.get('depth_weighted', 0.0):.6f} mse={breakdown.get('depth_mse_weighted', 0.0):.6f}) "
+                    f"pix_eff={breakdown.get('pixel_consistency_weighted', 0.0):.6f} "
+                    f"gc_eff={breakdown.get('geometric_weighted', 0.0):.6f}"
+                )
 
             # ── Loss spike / NaN guard ────────────────────────────────────
             spike_thresh = float(train_cfg.get("loss_spike_threshold", 50.0))
@@ -220,12 +451,16 @@ def run_epoch(
                 # (or on the very last batch of the epoch).
                 is_last_batch = (step + 1 == len(loader))
                 if (step + 1) % grad_accum_steps == 0 or is_last_batch:
-                    optimizer_step(optimizer, model, grad_clip, scaler=scaler)
+                    optimizer_step(optimizer, model, grad_clip, scaler=scaler,
+                                   log_every=log_every, step=step)
 
             totals["loss"]       += loss.item()
             totals["depth"]      += breakdown.get("depth",     0.0)
+            totals["depth_mse"]  += breakdown.get("depth_mse", 0.0)
             totals["smooth"]     += breakdown.get("smooth",    0.0)
             totals["iters"]      += breakdown.get("iters",     0.0)
+            totals["point_map"]  += breakdown.get("point_map", 0.0)
+            totals["pixel_consistency"] += breakdown.get("pixel_consistency", 0.0)
             totals["cam_pose"]   += breakdown.get("cam_pose",  0.0)
             totals["cam_rot"]    += breakdown.get("cam_rot",   0.0)
             totals["cam_trans"]  += breakdown.get("cam_trans", 0.0)
@@ -234,8 +469,16 @@ def run_epoch(
             totals["geometric"]  += breakdown.get("geometric",  0.0)
 
             if not train:
-                pred1 = outputs["depth1"]                         # (B,1,pH,pW)
-                gt1   = depths[:, 0]                              # (B,1,H,W)
+                # For point models derive depth from the Z-channel of the cam-1-frame point map.
+                if "point1" in outputs:
+                    pred1 = outputs["point1"][:, 2:3].clamp(min=0)  # (B,1,pH,pW)
+                    # De-normalise from point-normalised units to real metres for metric computation.
+                    if point_norm_scale is not None:
+                        pred1 = pred1 * point_norm_scale
+                else:
+                    pred1 = outputs.get("depth1_metric", outputs["depth1"])  # (B,1,pH,pW)
+                gt_depths_for_metrics = batch.get("depths_metric", depths)
+                gt1   = gt_depths_for_metrics[:, 0]                       # (B,1,H,W)
                 gt1_s = F.interpolate(gt1, size=pred1.shape[-2:], mode="nearest")
                 m = compute_depth_metrics(pred1.detach(), gt1_s)
                 if not any(v != v for v in m.values()):           # skip NaN batches
@@ -249,8 +492,10 @@ def run_epoch(
                 n = n_batches
                 avg_loss  = totals["loss"] / n
                 avg_depth = totals["depth"] / n
+                avg_mse   = totals["depth_mse"] / n
                 avg_smooth= totals["smooth"]/ n
                 avg_iters = totals["iters"] / n
+                avg_point = totals["point_map"] / n
                 avg_pix   = totals.get("pixel_consistency", 0.0) / n
                 avg_cam   = totals["cam_pose"] / n
                 avg_rot   = totals["cam_rot"]  / n
@@ -262,7 +507,7 @@ def run_epoch(
                 print(
                     f"  epoch {epoch:03d}  step {step+1:04d}/{len(loader):04d}"
                     f"  loss={avg_loss:.4f}"
-                    f"  depth={avg_depth:.4f} smooth={avg_smooth:.4f} iters={avg_iters:.4f}"
+                    f"  point={avg_point:.4f}  depth={avg_depth:.4f} mse={avg_mse:.4f} smooth={avg_smooth:.4f} iters={avg_iters:.4f}"
                     f"  pix={avg_pix:.6f}  gc={avg_gc:.6f}"
                     f"  cam={avg_cam:.4f} (rot={avg_rot:.3f} trans={avg_trans:.3f} K={avg_camK:.3f} id={avg_cid:.3f})"
                     f"  lr={lr:.2e}  {elapsed:.1f}s"
@@ -350,6 +595,52 @@ def train(cfg: dict, arch_cfg: dict, resume: str | None = None) -> None:
     val_ds   = build_dataset(cfg, root_dir=root_dir,      scene_paths=val_paths)
     test_ds  = build_dataset(cfg, root_dir=test_root_dir, scene_paths=test_paths)
 
+    depth_norm_cfg = cfg.get("depth_normalization", {})
+    if depth_norm_cfg.get("enabled", False):
+        _mde_cfg = depth_norm_cfg.get("mde", {})
+        _gt_cfg  = depth_norm_cfg.get("gt",  {})
+        _needs_depth_stats = (
+            _mde_cfg.get("median") is None or _mde_cfg.get("scale") is None
+            or _gt_cfg.get("median") is None or _gt_cfg.get("scale") is None
+        )
+        if _needs_depth_stats:
+            stats_loader = DataLoader(
+                train_ds,
+                batch_size=cfg["loader"]["batch_size"],
+                num_workers=cfg["loader"].get("num_workers", 0),
+                pin_memory=cfg["loader"].get("pin_memory", True),
+                drop_last=False,
+                shuffle=False,
+            )
+            max_samples = int(depth_norm_cfg.get("max_samples", 2_000_000))
+            stats = compute_depth_normalization_stats(stats_loader, max_samples=max_samples)
+            cfg["depth_normalization"] = {**depth_norm_cfg, **stats}
+            print("[train] Depth normalization from train split: "
+                  f"MDE median={stats['mde']['median']:.4f} std={stats['mde']['std']:.4f}; "
+                  f"GT median={stats['gt']['median']:.4f} std={stats['gt']['std']:.4f}")
+        else:
+            print("[train] Depth normalization using config values: "
+                  f"MDE median={_mde_cfg['median']:.4f} std={_mde_cfg.get('std', float('nan')):.4f}; "
+                  f"GT median={_gt_cfg['median']:.4f} std={_gt_cfg.get('std', float('nan')):.4f}")
+
+    point_norm_cfg = cfg.get("point_normalization", {})
+    if point_norm_cfg.get("enabled", False):
+        if point_norm_cfg.get("scale") is None:
+            _pt_stats_loader = DataLoader(
+                train_ds,
+                batch_size=cfg["loader"]["batch_size"],
+                num_workers=cfg["loader"].get("num_workers", 0),
+                pin_memory=cfg["loader"].get("pin_memory", True),
+                drop_last=False,
+                shuffle=False,
+            )
+            max_samples_pt = int(point_norm_cfg.get("max_samples", 2_000_000))
+            pt_stats = compute_point_normalization_stats(_pt_stats_loader, max_samples=max_samples_pt)
+            cfg["point_normalization"] = {**point_norm_cfg, **pt_stats}
+            print(f"[train] Point normalization from train split: scale={pt_stats['scale']:.4f}")
+        else:
+            print(f"[train] Point normalization using config value: scale={point_norm_cfg['scale']:.4f}")
+
     train_loader = build_loader(cfg, train_ds, shuffle=True)
     val_loader   = build_loader(cfg, val_ds,   shuffle=False)
     test_loader  = build_loader(cfg, test_ds,  shuffle=False)
@@ -410,11 +701,29 @@ def train(cfg: dict, arch_cfg: dict, resume: str | None = None) -> None:
     # AMP GradScaler — only meaningful on CUDA; None on CPU (disables AMP transparently).
     scaler = torch.amp.GradScaler("cuda") if torch.cuda.is_available() else None
 
+    def _override_lr_from_config(opt, sch, cfg_lr: float) -> None:
+        # Keep current run config authoritative when resuming from checkpoints.
+        loaded_lrs = [float(pg.get("lr", 0.0)) for pg in opt.param_groups]
+        for pg in opt.param_groups:
+            pg["lr"] = cfg_lr
+            if "initial_lr" in pg:
+                pg["initial_lr"] = cfg_lr
+
+        if sch is not None:
+            if hasattr(sch, "base_lrs") and isinstance(sch.base_lrs, list):
+                sch.base_lrs = [cfg_lr for _ in sch.base_lrs]
+            if hasattr(sch, "_last_lr") and isinstance(sch._last_lr, list):
+                sch._last_lr = [cfg_lr for _ in sch._last_lr]
+
+        loaded_unique = sorted({round(v, 12) for v in loaded_lrs})
+        print(f"[ckpt] Overrode resumed lr {loaded_unique} -> {cfg_lr:.6g} (from config)")
+
     # --- resume ---
     start_epoch = 1
     best_metric = float("inf") if ckpt_cfg.get("mode", "min") == "min" else -float("inf")
     if resume and os.path.isfile(resume):
         start_epoch, best_metric = load_checkpoint(resume, model, optimizer, scheduler, device)
+        _override_lr_from_config(optimizer, scheduler, float(cfg["optimizer"]["lr"]))
 
     save_dir  = ckpt_cfg.get("save_dir", "checkpoints/")
     top_k     = int(ckpt_cfg.get("save_top_k", 3))
@@ -470,10 +779,13 @@ def train(cfg: dict, arch_cfg: dict, resume: str | None = None) -> None:
         if val_metrics:
             val_break = (
                 f"  val_loss={val_metrics.get('loss', float('nan')):.4f} "
+                f"point={val_metrics.get('point_map', 0.0):.4f} "
                 f"depth={val_metrics.get('depth', 0.0):.4f} "
+                f"mse={val_metrics.get('depth_mse', 0.0):.4f} "
                 f"smooth={val_metrics.get('smooth', 0.0):.4f} "
                 f"iters={val_metrics.get('iters', 0.0):.4f} "
                 f"pix={val_metrics.get('pixel_consistency', 0.0):.6f} "
+                f"gc={val_metrics.get('geometric', 0.0):.6f} "
                 f"cam={val_metrics.get('cam_pose', 0.0):.4f} "
                 f"cam_rot={val_metrics.get('cam_rot', 0.0):.4f} "
                 f"cam_trans={val_metrics.get('cam_trans', 0.0):.4f}"
@@ -502,7 +814,9 @@ def train(cfg: dict, arch_cfg: dict, resume: str | None = None) -> None:
         # Build a compact train breakdown string from available keys
         train_break = (
             f"train_loss={train_metrics.get('loss', float('nan')):.4f} "
+            f"point={train_metrics.get('point_map', 0.0):.4f} "
             f"depth={train_metrics.get('depth', 0.0):.4f} "
+            f"mse={train_metrics.get('depth_mse', 0.0):.4f} "
             f"smooth={train_metrics.get('smooth', 0.0):.4f} "
             f"iters={train_metrics.get('iters', 0.0):.4f} "
             f"pix={train_metrics.get('pixel_consistency', 0.0):.4f} "
