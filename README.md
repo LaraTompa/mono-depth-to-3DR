@@ -225,11 +225,35 @@ Training hyper-parameters live in `config/training.yaml`. Checkpoints are saved 
 
 ## Architectures
 
-- `models/model_image_depth` : main DepthAlignNet (image + monocular depth inputs, cross-attention, camera head, iterative refinement optional).
-- `models/model_depth_only`  : depth-only variant (no RGB, lighter, useful when only monocular depths are available).
-- `models/model_vista`       : ViSTA-style variant (DINO backbone / alternative decoder; experimental).
+All variants take a *pair* of monocular depth predictions (e.g. Depth Pro / ZoeDepth) and output aligned depth for both views (plus relative pose where enabled), trained for multiview consistency.
+
+- `models/model_image_depth` : **Mono3DR v1**, DepthAlignNet. Image + monocular depth inputs, ConvNeXt-Tiny FPN encoder, windowed cross-attention, camera head, optional iterative refinement. Outputs a depth map. Config: `config/arch/v1.yaml`.
+- `models/model_depth_only`  : **Mono3DR v2–v4**, DepthOnlyNet. Median-normalised depth pairs go through a shared ConvNeXt-Tiny depth encoder, then MASt3R-initialised symmetric cross-attention blocks (768-d tokens), then a fusion decoder with skip connections. Config: `config/arch/depth_only.yaml`. Two switches select the variant:
+  - `use_image_encoder`: adds a frozen MASt3R ViT-Large RGB encoder whose tokens are summed onto the depth tokens (zero-initialised projection, so training starts identical to the depth-only model).
+  - `predict_depth_map`: `true` predicts a 1-channel depth map (SI-log + MSE losses); `false` predicts a 3-channel XYZ point map in the view-1 camera frame (DUSt3R-style, `point_map_loss`).
+- `models/model_vista`       : ViSTA-style variant (DINOv2 ViT-L/14 RGB encoder + MASt3R cross-attention + ConvNeXt depth stream; experimental). Config: `config/arch/vista.yaml`.
+
+| Version | Output | RGB input | Model | Key config |
+|---|---|---|---|---|
+| Mono3DR v1 | depth | yes | `model_image_depth` | `config/arch/v1.yaml` |
+| Mono3DR v2 | pointmap | yes | `model_depth_only` | `use_image_encoder: true`, `predict_depth_map: false` |
+| Mono3DR v3 | depth | no | `model_depth_only` | `use_image_encoder: false`, `predict_depth_map: true` |
+| Mono3DR v4 | pointmap | no | `model_depth_only` | `use_image_encoder: false`, `predict_depth_map: false` |
 
 Select variant via the saved checkpoint `arch` field or architecture configs in `config/arch/`.
+
+## Results
+
+Evaluated with `scripts/test_set_eval.py`. Metrics are averaged over 3315 evaluated frame pairs. *Monocular Baseline (Scaled)* applies a median scale to the raw monocular depth using the GT depth. Best Mono3DR variant: **v1 (depth + image)**.
+
+| Method | RMSE ↓ | Abs Rel ↓ | PC RMSE (px) ↓ | Geo L2 (m) ↓ | SSIM ↑ |
+|---|---|---|---|---|---|
+| Monocular Baseline | 1.4235 | 0.7112 | 193.02 | 1.8764 | 0.4635 |
+| Monocular Baseline (Scaled) | 0.1938 | 0.0708 | 31.88 | 0.2151 | 0.6391 |
+| **Mono3DR v1 (depth + image)** | 0.2698 | 0.1352 | 44.95 | 0.2866 | 0.6249 |
+| Mono3DR v2 (pointmap + image) | 0.2813 | 0.1299 | 58.83 | 0.3440 | 0.5894 |
+| Mono3DR v3 (depth) | 0.3098 | 0.1575 | 56.17 | 0.3356 | 0.5894 |
+| Mono3DR v4 (pointmap) | 0.3259 | 0.1616 | 61.15 | 0.3839 | 0.5925 |
 
 ## Losses (training/losses.py)
 
@@ -289,3 +313,13 @@ Defaults: `--depth_scale_pred` is `1.0` (metres); use `--depth_scale_gt 1000.0` 
 4. MASt3R: Vincent Leroy, Yohann Cabon, Jérôme Revaud, "Grounding Image Matching in 3D with MASt3R", arXiv, 2024, url: https://arxiv.org/abs/2406.09756
 5. ViSTA-SLAM: Ganlin Zhang, Shenhan Qian, Xi Wang, Daniel Cremers, "ViSTA-SLAM: Visual SLAM with Symmetric Two-view Association", 3DV, 2026, arXiv: https://arxiv.org/abs/2509.01584
 6. ConvNeXt: Zhuang Liu, Hanzi Mao, Chao-Yuan Wu, Christoph Feichtenhofer, Trevor Darrell, Saining Xie, "A ConvNet for the 2020s", CVPR, 2022, arXiv: https://arxiv.org/abs/2201.03545
+7. MoGe: Ruicheng Wang, Sicheng Xu, Cassie Dai, Jianfeng Xiang, Yu Deng, Xin Tong, Jiaolong Yang, "MoGe: Unlocking Accurate Monocular Geometry Estimation for Open-Domain Images with Optimal Training Supervision", CVPR, 2025, url: https://arxiv.org/abs/2410.19115
+8. Metric3D: Wei Yin, Chi Zhang, Hao Chen, Zhipeng Cai, Gang Yu, Kaixuan Wang, Xiaozhi Chen, Chunhua Shen, "Metric3D: Towards Zero-shot Metric 3D Prediction from A Single Image", ICCV, 2023, url: https://arxiv.org/abs/2307.10984
+9. Metric3D v2: Mu Hu, Wei Yin, Chi Zhang, Zhipeng Cai, Xiaoxiao Long, Hao Chen, Kaixuan Wang, Gang Yu, Chunhua Shen, Shaojie Shen, "Metric3D v2: A Versatile Monocular Geometric Foundation Model for Zero-shot Metric Depth and Surface Normal Estimation", IEEE TPAMI, 2024, url: https://arxiv.org/abs/2404.15506
+10. MiDaS: René Ranftl, Katrin Lasinger, David Hafner, Konrad Schindler, Vladlen Koltun, "Towards Robust Monocular Depth Estimation: Mixing Datasets for Zero-Shot Cross-Dataset Transfer", IEEE TPAMI, 2022, url: https://arxiv.org/abs/1907.01341
+11. VGGT: Jianyuan Wang, Minghao Chen, Nikita Karaev, Andrea Vedaldi, Christian Rupprecht, David Novotny, "VGGT: Visual Geometry Grounded Transformer", CVPR, 2025, url: https://arxiv.org/abs/2503.11651
+12. MUSt3R: Yohann Cabon, Lucas Stoffl, Leonid Antsfeld, Gabriela Csurka, Boris Chidlovskii, Jerome Revaud, Vincent Leroy, "MUSt3R: Multi-view Network for Stereo 3D Reconstruction", arXiv, 2025, url: https://arxiv.org/abs/2503.01661
+13. DUSt3R: Shuzhe Wang, Vincent Leroy, Yohann Cabon, Boris Chidlovskii, Jerome Revaud, "DUSt3R: Geometric 3D Vision Made Easy", CVPR, 2024, url: https://arxiv.org/abs/2312.14132
+14. Depth Anything 3: Haotong Lin, Sili Chen, Jun Hao Liew, Donny Y. Chen, Zhenyu Li, Guang Shi, Jiashi Feng, Bingyi Kang, "Depth Anything 3: Recovering the Visual Space from Any Views", arXiv, 2025, url: https://arxiv.org/abs/2511.10647
+15. LocalBins: Shariq Farooq Bhat, Ibraheem Alhashim, Peter Wonka, "LocalBins: Improving Depth Estimation by Learning Local Distributions", arXiv, 2022, url: https://arxiv.org/abs/2203.15132
+16. NeWCRFs: Weihao Yuan, Xiaodong Gu, Zuozhuo Dai, Siyu Zhu, Ping Tan, "NeWCRFs: Neural Window Fully-connected CRFs for Monocular Depth Estimation", CVPR, 2022, url: https://arxiv.org/abs/2203.01502
